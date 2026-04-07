@@ -1,0 +1,14 @@
+name: Build & Push
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-push:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service, web-customer, web-admin]
+    steps:
+      - uses: actions/checkout@v4
+      - run: echo "Building apps/${{ matrix.service }}"

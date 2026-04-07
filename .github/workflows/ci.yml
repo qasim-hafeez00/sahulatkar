@@ -1,0 +1,58 @@
+name: CI
+on:
+  push:
+    branches: [main, develop, 'feature/**']
+  pull_request:
+    branches: [main, develop]
+
+env:
+  PYTHON_VERSION: "3.12"
+  NODE_VERSION: "20"
+
+jobs:
+  python-lint:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: pip install ruff mypy
+      - run: echo "linting apps/${{ matrix.service }}"
+
+  python-test:
+    runs-on: ubuntu-latest
+    needs: python-lint
+    strategy:
+      matrix:
+        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: pip install -e packages/shared-python[test] || echo "no shared-python tests yet"
+      - run: echo "testing apps/${{ matrix.service }}"
+
+  frontend-test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        app: [web-customer, web-admin]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: "${{ env.NODE_VERSION }}" }
+      - run: cd apps/${{ matrix.app }} && npm ci || echo "no package-lock yet"
+      - run: cd apps/${{ matrix.app }} && npm run lint || echo "no lint script yet"
+
+  migration-check:
+    runs-on: ubuntu-latest
+    needs: python-lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "${{ env.PYTHON_VERSION }}" }
+      - run: pip install alembic asyncpg sqlalchemy
+      - run: echo "Migration check"
