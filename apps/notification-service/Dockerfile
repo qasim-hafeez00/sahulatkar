@@ -1,19 +1,43 @@
-FROM python:3.12-slim AS base
+# STAGE 1: Builder
+FROM python:3.12-slim AS builder
+
+WORKDIR /build
+
+# Build dependencies
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq-dev gcc python3-dev && \
+    rm -rf /var/lib/apt/lists/*
+
+# Install shared package
+COPY packages/shared-python/ /tmp/shared-python/
+RUN pip install --no-cache-dir --prefix=/install /tmp/shared-python/
+
+# Install service dependencies
+COPY apps/notification-service/pyproject.toml /tmp/
+RUN pip install --no-cache-dir --prefix=/install -e /tmp/[test] || \
+    pip install --no-cache-dir --prefix=/install /tmp/
+
+# STAGE 2: Runtime
+FROM python:3.12-slim AS runtime
+
 WORKDIR /app
 
+# Runtime dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    libpq-dev gcc && rm -rf /var/lib/apt/lists/*
+    libpq5 && \
+    rm -rf /var/lib/apt/lists/*
 
-COPY packages/shared-python/ /tmp/shared-python/
-RUN pip install --no-cache-dir /tmp/shared-python/
+# Copy installed packages from builder
+COPY --from=builder /install /usr/local
 
-COPY apps/notification-service/pyproject.toml apps/notification-service/
-RUN pip install --no-cache-dir -e apps/notification-service/
+# Copy application source
+COPY apps/notification-service/src/ /app/src/
 
-COPY apps/notification-service/src/ apps/notification-service/src/
-
+# Security: Run as non-root user
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
 EXPOSE 8000
+
+ENV PYTHONPATH=/app
 CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "4"]

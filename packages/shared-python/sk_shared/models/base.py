@@ -1,8 +1,11 @@
-import uuid
+import uuid as uuid_pkg
 from datetime import datetime
+from typing import Optional
+
+from sqlalchemy import UUID, DateTime
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 from sqlalchemy.sql import func
-from sqlalchemy import UUID
+from sqlalchemy.ext.hybrid import hybrid_property
 
 class Base(DeclarativeBase):
     pass
@@ -12,4 +15,11 @@ class TimestampMixin:
     updated_at: Mapped[datetime] = mapped_column(server_default=func.now(), onupdate=func.now(), nullable=False)
 
 class UUIDMixin:
-    uuid: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), default=uuid.uuid4, unique=True, nullable=False)
+    uuid: Mapped[uuid_pkg.UUID] = mapped_column(UUID(as_uuid=True), default=uuid_pkg.uuid4, unique=True, nullable=False)
+
+class SoftDeleteMixin:
+    deleted_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    
+    @hybrid_property
+    def is_deleted(self) -> bool:
+        return self.deleted_at is not None

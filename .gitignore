@@ -1,0 +1,67 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+venv/
+env/
+ENV/
+env.bak/
+venv.bak/
+
+# Databases
+*.sqlite3
+*.db
+
+# Node
+node_modules/
+dist/
+.next/
+out/
+build/
+.npm/
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+*.log
+tmp/
+
+# Logs and test outputs
+tests.log
+tests_*.log
+test_out*.txt
+test_result*.txt
+checkout_test*.txt
+final_*.txt
+test_final*.txt
+test_k.txt
+test_err.txt
+run_dbg_test.py
+test_all_final.txt
+
+# Local Env
+.env
+.env.local

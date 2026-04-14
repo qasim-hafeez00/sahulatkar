@@ -1,4 +1,5 @@
 name: CI
+
 on:
   push:
     branches: [main, develop, 'feature/**']
@@ -8,32 +9,93 @@ on:
 env:
   PYTHON_VERSION: "3.12"
   NODE_VERSION: "20"
+  POSTGRES_DB: sahulatkar
+  POSTGRES_USER: sk_app
+  POSTGRES_PASSWORD: sk_password
 
 jobs:
   python-lint:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service]
+        service:
+          - apps/gateway
+          - apps/product-service
+          - apps/credit-engine
+          - apps/payment-orchestrator
+          - apps/ledger-service
+          - apps/notification-service
+          - packages/shared-python
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "${{ env.PYTHON_VERSION }}" }
-      - run: pip install ruff mypy
-      - run: echo "linting apps/${{ matrix.service }}"
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+          cache: "pip"
+      - name: Install Linting Tools
+        run: pip install ruff mypy
+      - name: Run Ruff
+        run: ruff check ${{ matrix.service }}
+      - name: Run Mypy
+        run: mypy ${{ matrix.service }} --ignore-missing-imports
 
   python-test:
     runs-on: ubuntu-latest
     needs: python-lint
     strategy:
       matrix:
-        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service]
+        service:
+          - gateway
+          - product-service
+          - credit-engine
+          - payment-orchestrator
+          - ledger-service
+          - notification-service
+    services:
+      postgres:
+        image: timescale/timescaledb:2.14.2-pg16
+        env:
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7.2-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "${{ env.PYTHON_VERSION }}" }
-      - run: pip install -e packages/shared-python[test] || echo "no shared-python tests yet"
-      - run: echo "testing apps/${{ matrix.service }}"
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+          cache: "pip"
+      - name: Install Shared Package
+        run: pip install -e packages/shared-python[test]
+      - name: Install Service Dependencies
+        run: pip install -e apps/${{ matrix.service }}[test]
+      - name: Run Tests
+        env:
+          DATABASE_URL: postgresql+asyncpg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+          REDIS_URL: redis://localhost:6379/0
+          ENVIRONMENT: test
+        run: |
+          pytest apps/${{ matrix.service }}/tests/ -v --cov=apps/${{ matrix.service }}/src --cov-report=xml --cov-fail-under=80
+      - name: Upload Coverage
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ matrix.service }}
+          path: coverage.xml
 
   frontend-test:
     runs-on: ubuntu-latest
@@ -43,16 +105,116 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
-        with: { node-version: "${{ env.NODE_VERSION }}" }
-      - run: cd apps/${{ matrix.app }} && npm ci || echo "no package-lock yet"
-      - run: cd apps/${{ matrix.app }} && npm run lint || echo "no lint script yet"
+        with:
+          node-version: "${{ env.NODE_VERSION }}"
+          cache: "npm"
+          cache-dependency-path: apps/${{ matrix.app }}/package-lock.json
+      - name: Install Dependencies
+        run: cd apps/${{ matrix.app }} && npm ci
+      - name: Run Lint
+        run: cd apps/${{ matrix.app }} && npm run lint
+      - name: Run Type-check
+        run: cd apps/${{ matrix.app }} && npm run type-check || echo "No type-check script"
+      - name: Run Tests
+        run: cd apps/${{ matrix.app }} && npm test
+      - name: Build (Verification)
+        run: cd apps/${{ matrix.app }} && npm run build
 
   migration-check:
     runs-on: ubuntu-latest
     needs: python-lint
+    services:
+      postgres:
+        image: timescale/timescaledb:2.14.2-pg16
+        env:
+          POSTGRES_DB: ${{ env.POSTGRES_DB }}
+          POSTGRES_USER: ${{ env.POSTGRES_USER }}
+          POSTGRES_PASSWORD: ${{ env.POSTGRES_PASSWORD }}
+        ports:
+          - 5432:5432
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
-        with: { python-version: "${{ env.PYTHON_VERSION }}" }
-      - run: pip install alembic asyncpg sqlalchemy
-      - run: echo "Migration check"
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - name: Install Alembic and Dependencies
+        run: |
+          pip install alembic asyncpg sqlalchemy
+          pip install -e packages/shared-python
+      - name: Run Migrations
+        env:
+          DATABASE_URL: postgresql+asyncpg://${{ env.POSTGRES_USER }}:${{ env.POSTGRES_PASSWORD }}@localhost:5432/${{ env.POSTGRES_DB }}
+        run: |
+          alembic upgrade head
+          alembic downgrade -1
+          alembic upgrade head
+
+  hard-gate-test:
+    runs-on: ubuntu-latest
+    needs: python-test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "${{ env.PYTHON_VERSION }}"
+      - name: Install Dependencies
+        run: |
+          pip install -e packages/shared-python[test]
+          pip install -e apps/gateway[test]
+      - name: Run Hard Gate Tests
+        env:
+          ENVIRONMENT: test
+        run: |
+          pytest apps/gateway/tests/test_hard_gate.py -v --tb=short
+
+  docker-build:
+    runs-on: ubuntu-latest
+    needs: [python-test, frontend-test]
+    strategy:
+      matrix:
+        service: [gateway, product-service, credit-engine, payment-orchestrator, ledger-service, notification-service, web-customer, web-admin]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      - name: Build (No Push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: apps/${{ matrix.service }}/Dockerfile
+          tags: sk-${{ matrix.service }}:ci
+          push: false
+          load: false
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  terraform-validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Terraform
+        uses: hashicorp/setup-terraform@v3
+
+      - name: Set up TFLint
+        uses: terraform-linters/setup-tflint@v4
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive infra/terraform
+
+      - name: Terraform Init (backend disabled)
+        run: |
+          terraform -chdir=infra/terraform/bootstrap init -backend=false
+          terraform -chdir=infra/terraform/environments/staging init -backend=false
+          terraform -chdir=infra/terraform/environments/production init -backend=false
+
+      - name: Terraform Validate
+        run: |
+          terraform -chdir=infra/terraform/bootstrap validate
+          terraform -chdir=infra/terraform/environments/staging validate
+          terraform -chdir=infra/terraform/environments/production validate
+
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint --recursive infra/terraform

@@ -3,25 +3,55 @@
 @tailwind utilities;
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #0a1020;
+  --foreground: #f4f7fb;
+  --muted: #9aa8bd;
+  --panel: rgba(13, 20, 39, 0.88);
+  --panel-strong: #111a32;
+  --border: rgba(158, 180, 214, 0.14);
+  --accent: #f5b301;
+  --accent-soft: rgba(245, 179, 1, 0.12);
+  --success: #21c97a;
+  --warning: #f5b301;
+  --danger: #f85f73;
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
-  }
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background:
+    radial-gradient(circle at top left, rgba(33, 201, 122, 0.12), transparent 24%),
+    radial-gradient(circle at top right, rgba(245, 179, 1, 0.15), transparent 22%),
+    linear-gradient(180deg, #08101f 0%, #0f1730 52%, #08101b 100%);
 }
 
 body {
   color: var(--foreground);
-  background: var(--background);
-  font-family: Arial, Helvetica, sans-serif;
+  background:
+    radial-gradient(circle at 20% 20%, rgba(245, 179, 1, 0.12), transparent 0 24%),
+    radial-gradient(circle at 80% 0%, rgba(33, 201, 122, 0.12), transparent 0 22%),
+    linear-gradient(180deg, #0b1120 0%, #0e1730 100%);
+  font-family: var(--font-geist-sans), "Geist", sans-serif;
+  min-height: 100vh;
 }
 
 @layer utilities {
   .text-balance {
-    text-wrap: balance;
+    overflow-wrap: break-word;
+  }
+
+  .glass-panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    -webkit-backdrop-filter: blur(18px);
+    backdrop-filter: blur(18px);
+    box-shadow: 0 18px 60px rgba(0, 0, 0, 0.25);
+  }
+
+  .dashboard-grid {
+    display: grid;
+    gap: 1rem;
   }
 }

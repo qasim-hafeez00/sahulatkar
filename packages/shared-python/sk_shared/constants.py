@@ -19,21 +19,26 @@ class OrderState:
     COMPLETED = "completed"
     CANCELLED = "cancelled"
     REFUNDED = "refunded"
+    RETURNED = "returned"
     DISPUTED = "disputed"
 
 class RedisNS:
     AUTH_OTP = "sk:auth:otp"
     AUTH_OTP_ATTEMPTS = "sk:auth:otp_attempts"
+    CONTRACT_OTP = "sk:contract:otp"
+    CONTRACT_OTP_ATTEMPTS = "sk:contract:otp_attempts"
     AUTH_SESSION = "sk:auth:session"
     AUTH_ADMIN_SESSION = "sk:auth:admin_session"
     CREDIT_USER = "sk:credit:user"
     CREDIT_VELOCITY = "sk:credit:velocity"
     CREDIT_BLACKLIST = "sk:credit:blacklist"
     PRODUCT_UPO = "sk:product:upo"
+    PRODUCT_URL = "sk:product:url"
     KYC_NADRA = "sk:kyc:nadra"
     VCN_PENDING = "sk:vcn:pending"
     PAYMENT_IDEMPOTENT = "sk:payment:idempotent"
     WEBHOOK_DEDUP = "sk:webhook:dedup"
+    SHIPMENT_TRACKING = "sk:shipment:tracking"
     FEATURE_FLAG = "sk:system:feature"
     RATE_LIMIT = "sk:ratelimit"
     LOCK = "sk:lock"
@@ -54,6 +59,7 @@ class QueueName:
     WEBHOOK_DELIVERY = "sk:queue:webhook_delivery"
     RECONCILIATION = "sk:queue:reconciliation"
     CHARITY_DISBURSE = "sk:queue:charity_disburse"
+    TRACKING_REGISTER = "sk:queue:tracking_register"
 
 class RedisTTL:
     OTP = 180
@@ -62,6 +68,7 @@ class RedisTTL:
     ADMIN_SESSION = 28800
     CREDIT_CACHE = 30
     PRODUCT_CACHE = 300
+    PRODUCT_URL_MAP = 86400
     NADRA_CACHE = 2592000
     FEATURE_FLAG = 60
     FRAUD_RULES = 1800

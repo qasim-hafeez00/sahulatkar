@@ -1,0 +1,4 @@
+aws_region              = "ap-south-1"
+environment             = "staging"
+redis_auth_token        = "replace-with-strong-token"
+db_password_secret_arn  = "arn:aws:secretsmanager:ap-south-1:123456789012:secret:sk/staging/db-password"
