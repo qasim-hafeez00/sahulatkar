@@ -9,6 +9,7 @@ from typing import Sequence, Union
 
 from alembic import op
 import sqlalchemy as sa
+from sqlalchemy.dialects import postgresql
 
 # revision identifiers, used by Alembic.
 revision: str = "004_init_m05_contracts"
@@ -18,80 +19,12 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
-    op.create_table(
-        "merchants",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("uuid", sa.UUID(as_uuid=True), nullable=False),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("normalized_name", sa.String(length=255), nullable=True),
-        sa.Column("domain", sa.String(length=255), nullable=True),
-        sa.Column("is_active", sa.Boolean(), nullable=False, server_default=sa.text("true")),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("uuid"),
-    )
-
-    op.create_table(
-        "products",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("uuid", sa.UUID(as_uuid=True), nullable=False),
-        sa.Column("merchant_id", sa.BigInteger(), nullable=True),
-        sa.Column("name", sa.String(length=255), nullable=False),
-        sa.Column("url", sa.Text(), nullable=False),
-        sa.Column("currency", sa.String(length=10), nullable=False),
-        sa.Column("cost_price", sa.Numeric(14, 2), nullable=False),
-        sa.Column("sale_price", sa.Numeric(14, 2), nullable=True),
-        sa.Column("in_stock", sa.Boolean(), nullable=False, server_default=sa.text("true")),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.ForeignKeyConstraint(["merchant_id"], ["merchants.id"], ondelete="SET NULL"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("uuid"),
-    )
-    op.create_index("ix_products_merchant_id", "products", ["merchant_id"], unique=False)
-
-    op.create_table(
-        "orders",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("uuid", sa.UUID(as_uuid=True), nullable=False),
-        sa.Column("user_id", sa.BigInteger(), nullable=False),
-        sa.Column("product_id", sa.BigInteger(), nullable=True),
-        sa.Column("status", sa.String(length=50), nullable=False),
-        sa.Column("total_amount", sa.Numeric(14, 2), nullable=False),
-        sa.Column("down_payment_amount", sa.Numeric(14, 2), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.ForeignKeyConstraint(["product_id"], ["products.id"], ondelete="SET NULL"),
-        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-        sa.UniqueConstraint("uuid"),
-    )
-    op.create_index("ix_orders_status", "orders", ["status"], unique=False)
-    op.create_index("ix_orders_user_id_created_at", "orders", ["user_id", "created_at"], unique=False)
-
-    op.create_table(
-        "order_status_history",
-        sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
-        sa.Column("order_id", sa.BigInteger(), nullable=False),
-        sa.Column("from_status", sa.String(length=50), nullable=True),
-        sa.Column("to_status", sa.String(length=50), nullable=False),
-        sa.Column("reason", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.ForeignKeyConstraint(["order_id"], ["orders.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
-    )
-    op.create_index("ix_order_status_history_order_id", "order_status_history", ["order_id"], unique=False)
-
+    # 1. wakalah_agreements (WITHOUT order_id FK for now to break circularity)
     op.create_table(
         "wakalah_agreements",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("uuid", sa.UUID(as_uuid=True), nullable=False),
-        sa.Column("order_id", sa.BigInteger(), nullable=False),
+        sa.Column("order_id", sa.BigInteger(), nullable=False), # Placeholder for value, FK added in 006
         sa.Column("user_id", sa.BigInteger(), nullable=False),
         sa.Column("contract_number", sa.String(length=50), nullable=False),
         sa.Column("authorized_amount", sa.Numeric(14, 2), nullable=False),
@@ -102,20 +35,28 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.ForeignKeyConstraint(["order_id"], ["orders.id"], ondelete="CASCADE"),
+        sa.Column('principal_name', sa.String(length=200), nullable=True),
+        sa.Column('principal_cnic', sa.String(length=20), nullable=True),
+        sa.Column('principal_phone', sa.String(length=20), nullable=True),
+        sa.Column('agent_name', sa.String(length=100), server_default='SahulatKar (Pvt) Ltd.', nullable=False),
+        sa.Column('agent_secp_license', sa.String(length=50), server_default='SECP-L-12345', nullable=False),
+        sa.Column('product_description', sa.Text(), nullable=True),
+        sa.Column('merchant_name', sa.String(length=255), nullable=True),
+        sa.Column('product_url', sa.String(length=2048), nullable=True),
+        sa.Column('price_variance_pct', sa.Numeric(precision=4, scale=2), server_default='5.00', nullable=False),
+        sa.Column('valid_until', sa.DateTime(), nullable=True),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("contract_number"),
         sa.UniqueConstraint("uuid"),
     )
-    op.create_index("ix_wakalah_order_id", "wakalah_agreements", ["order_id"], unique=False)
-    op.create_index("ix_wakalah_user_id", "wakalah_agreements", ["user_id"], unique=False)
 
+    # 2. murabaha_contracts
     op.create_table(
         "murabaha_contracts",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column("uuid", sa.UUID(as_uuid=True), nullable=False),
-        sa.Column("order_id", sa.BigInteger(), nullable=False),
+        sa.Column("order_id", sa.BigInteger(), nullable=False), # FK added in 006
         sa.Column("user_id", sa.BigInteger(), nullable=False),
         sa.Column("wakalah_agreement_id", sa.BigInteger(), nullable=True),
         sa.Column("contract_number", sa.String(length=50), nullable=False),
@@ -132,16 +73,17 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.Column("deleted_at", sa.DateTime(), nullable=True),
-        sa.ForeignKeyConstraint(["order_id"], ["orders.id"], ondelete="CASCADE"),
+        sa.Column('currency', sa.String(length=3), server_default='PKR', nullable=False),
+        sa.Column('template_version', sa.String(length=10), server_default='1.0', nullable=False),
+        sa.Column('validated_by_shariah_board', sa.Boolean(), server_default=sa.text('false'), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["wakalah_agreement_id"], ["wakalah_agreements.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("contract_number"),
         sa.UniqueConstraint("uuid"),
     )
-    op.create_index("ix_murabaha_order_id", "murabaha_contracts", ["order_id"], unique=False)
-    op.create_index("ix_murabaha_user_id", "murabaha_contracts", ["user_id"], unique=False)
 
+    # 3. contract_digital_signatures
     op.create_table(
         "contract_digital_signatures",
         sa.Column("id", sa.BigInteger(), autoincrement=True, nullable=False),
@@ -162,29 +104,9 @@ def upgrade() -> None:
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("uuid"),
     )
-    op.create_index("ix_contract_signature_user_id", "contract_digital_signatures", ["user_id"], unique=False)
 
 
 def downgrade() -> None:
-    op.drop_index("ix_contract_signature_user_id", table_name="contract_digital_signatures")
     op.drop_table("contract_digital_signatures")
-
-    op.drop_index("ix_murabaha_user_id", table_name="murabaha_contracts")
-    op.drop_index("ix_murabaha_order_id", table_name="murabaha_contracts")
     op.drop_table("murabaha_contracts")
-
-    op.drop_index("ix_wakalah_user_id", table_name="wakalah_agreements")
-    op.drop_index("ix_wakalah_order_id", table_name="wakalah_agreements")
     op.drop_table("wakalah_agreements")
-
-    op.drop_index("ix_order_status_history_order_id", table_name="order_status_history")
-    op.drop_table("order_status_history")
-
-    op.drop_index("ix_orders_user_id_created_at", table_name="orders")
-    op.drop_index("ix_orders_status", table_name="orders")
-    op.drop_table("orders")
-
-    op.drop_index("ix_products_merchant_id", table_name="products")
-    op.drop_table("products")
-
-    op.drop_table("merchants")

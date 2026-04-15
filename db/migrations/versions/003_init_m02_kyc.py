@@ -38,15 +38,21 @@ def upgrade() -> None:
     )
 
     # create enum type for status
-    kyc_status_enum = postgresql.ENUM('pending', 'submitted', 'in_review', 'approved', 'rejected', name='kycstatus')
-    kyc_status_enum.create(op.get_bind(), checkfirst=True)
+    op.execute("""
+        DO $$
+        BEGIN
+            IF NOT EXISTS (SELECT 1 FROM pg_type WHERE typname = 'kycstatus') THEN
+                CREATE TYPE kycstatus AS ENUM ('pending', 'submitted', 'in_review', 'approved', 'rejected');
+            END IF;
+        END$$;
+    """)
 
     # 2. User Kyc Verifications
     op.create_table('user_kyc_verifications',
         sa.Column('id', sa.BigInteger(), autoincrement=True, nullable=False),
         sa.Column('uuid', sa.UUID(as_uuid=True), nullable=False),
         sa.Column('user_id', sa.BigInteger(), nullable=False),
-        sa.Column('status', sa.Enum('pending', 'submitted', 'in_review', 'approved', 'rejected', name='kycstatus'), nullable=False),
+        sa.Column('status', postgresql.ENUM('pending', 'submitted', 'in_review', 'approved', 'rejected', name='kycstatus', create_type=False), nullable=False),
         sa.Column('cnic_front_image_url', sa.String(length=255), nullable=True),
         sa.Column('cnic_back_image_url', sa.String(length=255), nullable=True),
         sa.Column('liveness_video_url', sa.String(length=255), nullable=True),

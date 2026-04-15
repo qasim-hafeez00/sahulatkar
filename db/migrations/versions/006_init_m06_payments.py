@@ -214,6 +214,10 @@ def upgrade() -> None:
     op.create_index("ix_virtual_cards_user_id", "virtual_cards", ["user_id"], unique=False)
     op.create_index("ix_virtual_cards_status", "virtual_cards", ["status"], unique=False)
 
+    # Add Foreign Keys for Shariah Contracts created in 004
+    op.create_foreign_key("fk_wakalah_order_id", "wakalah_agreements", "orders", ["order_id"], ["id"], ondelete="CASCADE")
+    op.create_foreign_key("fk_murabaha_order_id", "murabaha_contracts", "orders", ["order_id"], ["id"], ondelete="CASCADE")
+
 
 def downgrade() -> None:
     op.drop_index("ix_order_status_history_order_id", table_name="order_status_history")

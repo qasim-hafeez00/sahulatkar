@@ -1,8 +1,8 @@
-"""Harden M05 Contracts
+"""Fix Migration Conflicts
 
-Revision ID: 005_harden_m05_contracts
-Revises: 004_init_m05_contracts
-Create Date: 2026-04-08 17:50:00.000000
+Revision ID: 012_fix_migration_conflicts
+Revises: 011_init_m11_ledger
+Create Date: 2026-04-14 12:00:00.000000
 
 """
 from typing import Sequence, Union
@@ -11,14 +11,14 @@ from alembic import op
 import sqlalchemy as sa
 
 # revision identifiers, used by Alembic.
-revision: str = '005_harden_m05_contracts'
-down_revision: Union[str, None] = '004_init_m05_contracts'
+revision: str = '012_fix_migration_conflicts'
+down_revision: Union[str, None] = '011_init_m11_ledger'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
 def upgrade() -> None:
+    # Tables were moved to 004 to satisfy 006 dependencies
     pass
-
 
 def downgrade() -> None:
     pass
