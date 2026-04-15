@@ -8,7 +8,7 @@ from sk_shared.models.auth import AdminUser
 from sk_shared.models.order import Order
 from sk_shared.models.auth import User
 
-from src.core.dependencies import get_current_admin, get_db
+from src.core.dependencies import get_current_admin, get_db, RequirePermission
 
 router = APIRouter(prefix="/admin/orders", tags=["Admin Orders"])
 
@@ -21,7 +21,7 @@ async def list_admin_orders(
     status: str | None = Query(default=None),
     sort_by: str | None = Query(default="created_at"),
     sort_dir: str | None = Query(default="desc"),
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List all orders with filtering and sorting."""
@@ -39,7 +39,14 @@ async def list_admin_orders(
         params["status"] = status
     
     where_clause = " AND ".join(where_clauses)
-    sort_col = sort_by or "created_at"
+    sort_column_map = {
+        "id": "id",
+        "order_number": "order_number",
+        "status": "status",
+        "total_amount": "total_amount",
+        "created_at": "created_at",
+    }
+    sort_col = sort_column_map.get(sort_by, "created_at")
     sort_order = "DESC" if sort_dir == "desc" else "ASC"
     
     query = text(
@@ -98,7 +105,7 @@ async def list_admin_orders(
 @router.get("/{order_id}")
 async def get_admin_order_detail(
     order_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """Get detailed order information."""

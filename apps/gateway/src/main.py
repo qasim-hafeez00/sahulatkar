@@ -4,6 +4,8 @@ import json
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
+from src.core.rate_limit import rate_limit_middleware
 from src.api.routes import api_router
 from src.config import settings
 from sk_shared.database import SessionLocal
@@ -68,11 +70,26 @@ app = FastAPI(
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://app.sahulatkar.pk",
+        "https://admin.sahulatkar.pk"
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def apply_rate_limit(request, call_next):
+    return await rate_limit_middleware(request, call_next)
+
+@app.exception_handler(Exception)
+async def global_exception_handler(request, exc):
+    # Avoid leaking internals. Should log 'exc' to a logger here.
+    return JSONResponse(
+        status_code=500,
+        content={"detail": "INTERNAL_SERVER_ERROR"}
+    )
 
 app.include_router(api_router, prefix="/api")
 

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 
-from src.core.dependencies import get_current_admin, get_db
+from src.core.dependencies import get_current_admin, get_db, RequirePermission
 
 router = APIRouter(prefix="/admin/users", tags=["Admin Users"])
 
@@ -19,7 +19,7 @@ async def list_admin_users(
     status: str | None = Query(default=None),
     sort_by: str | None = Query(default="created_at"),
     sort_dir: str | None = Query(default="desc"),
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("read_user")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     offset = (page - 1) * limit
@@ -92,7 +92,7 @@ async def list_admin_users(
 @router.get("/{user_id}")
 async def get_admin_user_detail(
     user_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("read_user")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     query = text(

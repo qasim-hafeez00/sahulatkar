@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 
-from src.core.dependencies import get_current_admin, get_db
+from src.core.dependencies import get_current_admin, get_db, RequirePermission
 
 router = APIRouter(prefix="/admin/payments", tags=["Admin Payments"])
 
@@ -21,7 +21,7 @@ async def list_admin_payments(
     status: str | None = Query(default=None),
     sort_by: str | None = Query(default="created_at"),
     sort_dir: str | None = Query(default="desc"),
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """List all payments with filtering and sorting."""
@@ -43,7 +43,15 @@ async def list_admin_payments(
         params["status"] = status
     
     where_clause = " AND ".join(where_clauses)
-    sort_col = sort_by or "created_at"
+    sort_column_map = {
+        "id": "id",
+        "transaction_id": "transaction_id",
+        "amount": "amount",
+        "status": "status",
+        "created_at": "created_at",
+        "settled_at": "settled_at",
+    }
+    sort_col = sort_column_map.get(sort_by, "created_at")
     sort_order = "DESC" if sort_dir == "desc" else "ASC"
     
     query = text(
@@ -101,7 +109,7 @@ async def list_admin_payments(
 @router.get("/{payment_id}")
 async def get_admin_payment_detail(
     payment_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     """Get detailed payment information."""

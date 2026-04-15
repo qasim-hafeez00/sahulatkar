@@ -1,7 +1,7 @@
 from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.core.dependencies import get_current_admin, get_db, get_redis
+from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
 from src.schemas.kyc import AdminKycDecisionRequest, KycVerificationResponse
 from src.services.kyc_queue import KycQueueService
 from sk_shared.models.auth import AdminUser
@@ -12,7 +12,7 @@ router = APIRouter(prefix="/admin/kyc", tags=["Admin KYC"])
 
 @router.get("/queue")
 async def get_queue(
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
 ):
@@ -24,7 +24,7 @@ async def get_queue(
 @router.post("/{queue_id}/claim", status_code=status.HTTP_200_OK)
 async def claim_queue_item(
     queue_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
 ):
@@ -40,7 +40,7 @@ async def claim_queue_item(
 async def submit_decision(
     queue_id: int,
     request: AdminKycDecisionRequest,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
 ):

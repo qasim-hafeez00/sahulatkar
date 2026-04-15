@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 
-from src.core.dependencies import get_current_admin, get_db
+from src.core.dependencies import get_current_admin, get_db, RequirePermission
 from src.schemas.hitl import HitlListResponse, HitlQueueItemResponse, HitlResolveRequest, HitlStatusResponse
 from src.services.hitl_queue import HitlQueueService
 
@@ -35,7 +35,7 @@ def _serialize(item) -> HitlQueueItemResponse:
 @router.get("/queue", response_model=HitlListResponse)
 async def list_hitl_queue(
     status_filter: str | None = Query(default=None, alias="status"),
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)
@@ -46,7 +46,7 @@ async def list_hitl_queue(
 @router.get("/queue/{queue_id}", response_model=HitlQueueItemResponse)
 async def get_hitl_queue_item(
     queue_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)
@@ -59,7 +59,7 @@ async def get_hitl_queue_item(
 @router.post("/{queue_id}/claim", response_model=HitlQueueItemResponse)
 async def claim_hitl_item(
     queue_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)
@@ -73,7 +73,7 @@ async def claim_hitl_item(
 @router.post("/{queue_id}/start", response_model=HitlStatusResponse)
 async def start_hitl_item(
     queue_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)
@@ -88,7 +88,7 @@ async def start_hitl_item(
 async def resolve_hitl_item(
     queue_id: int,
     request: HitlResolveRequest,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)
@@ -102,7 +102,7 @@ async def resolve_hitl_item(
 @router.post("/{queue_id}/cancel", response_model=HitlStatusResponse)
 async def cancel_hitl_item(
     queue_id: int,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
     db: AsyncSession = Depends(get_db),
 ):
     service = HitlQueueService(db)

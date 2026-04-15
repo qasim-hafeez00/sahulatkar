@@ -79,7 +79,7 @@ async def _seed_admin_with_token() -> tuple[AdminUser, str]:
         await session.refresh(admin)
 
     token = create_access_token(
-        {"admin_id": admin.id, "role": "super_admin"},
+        {"admin_id": admin.id, "role": "super_admin", "permissions": ["all_actions"]},
         settings.JWT_PRIVATE_KEY,
         timedelta(seconds=3600),
     )

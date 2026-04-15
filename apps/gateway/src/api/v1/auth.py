@@ -36,8 +36,7 @@ async def login(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis)
 ):
-    # Dummy mock for now, can expand later
-    pass
+    return await AuthService.login(req, db, redis)
 
 @router.post("/refresh", response_model=TokenRefreshResponse)
 async def refresh(
@@ -45,8 +44,7 @@ async def refresh(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis)
 ):
-    # Dummy mock
-    pass
+    return await AuthService.refresh_token(req, db, redis)
 
 @router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
 async def logout(
@@ -55,8 +53,11 @@ async def logout(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis)
 ):
-    # Dummy mock
-    pass
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ")[1]
+        await AuthService.logout(user.id, token, db, redis)
+    return
 
 @router.get("/me", response_model=CurrentUserResponse)
 async def get_me(user: User = Depends(get_current_user)):

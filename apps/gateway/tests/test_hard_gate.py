@@ -54,7 +54,7 @@ async def test_vcn_issue_blocked_until_contracts_signed(client, test_user):
         json={"order_id": order.id},
     )
     assert blocked.status_code == 403
-    assert blocked.json()["detail"] == "MURABAHA_NOT_SIGNED"
+    assert blocked.json()["detail"] == "PAYMENT_REQUIRED"
 
     async with TestingSessionLocal() as session:
         db_order = await session.scalar(select(Order).where(Order.id == order.id))

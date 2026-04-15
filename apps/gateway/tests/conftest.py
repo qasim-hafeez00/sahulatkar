@@ -96,9 +96,11 @@ def redis_mock() -> RedisClient:
 from src.core.dependencies import get_db as gateway_get_db
 
 @pytest.fixture
-def override_dependencies(redis_mock: RedisClient):
-    app.dependency_overrides[gateway_get_db] = override_get_db
-    
+def override_dependencies(db_session: AsyncSession, redis_mock: RedisClient):
+    async def shared_get_db() -> AsyncGenerator[AsyncSession, None]:
+        yield db_session
+
+    app.dependency_overrides[gateway_get_db] = shared_get_db
     app.state.redis = redis_mock
     
     def override_get_redis(request: Request):
@@ -130,6 +132,12 @@ async def client(override_dependencies) -> AsyncGenerator[AsyncClient, None]:
 # ── User / Admin helpers ──────────────────────────────────────────────────────
 
 @pytest.fixture
+async def db_session() -> AsyncGenerator[AsyncSession, None]:
+    async with TestingSessionLocal() as session:
+        yield session
+
+
+@pytest.fixture
 async def test_user():
     """Seed a customer user and return (user, access_token)."""
     from sk_shared.models.auth import User
@@ -144,6 +152,26 @@ async def test_user():
         settings.JWT_PRIVATE_KEY,
         timedelta(seconds=900),
     )
+    
+    # NEW: Create session in DB and Redis
+    from sk_shared.models.auth import UserSession
+    acc_hash = hashlib.sha256(token.encode()).hexdigest()
+    async with TestingSessionLocal() as session:
+        user_session = UserSession(
+            user_id=user.id,
+            access_token_hash=acc_hash,
+            expires_at=datetime.now(timezone.utc) + timedelta(seconds=900)
+        )
+        session.add(user_session)
+        await session.commit()
+    
+    # redis_mock is a local fixture, we need to access it. 
+    # But fixtures are requested by name in the test function.
+    # In conftest, we can use request.getfixturevalue if needed, 
+    # but the easiest way is to push to app.state.redis directly if available.
+    if hasattr(app.state, "redis"):
+        await app.state.redis.set(f"sk:auth:session:{acc_hash}", str(user.id), 900)
+        
     return user, token
 
 
@@ -164,8 +192,13 @@ async def test_admin():
         await session.refresh(admin)
 
     token = create_access_token(
-        {"admin_id": admin.id, "role": "super_admin"},
+        {"admin_id": admin.id, "role": "super_admin", "permissions": ["all_actions"]},
         settings.JWT_PRIVATE_KEY,
         timedelta(seconds=3600),
     )
+    
+    # NEW: Redis session for admin (if we added admin session checking to dependencies)
+    # The current get_current_admin in dependencies.py doesn't yet check Redis session 
+    # (only user login does in this iteration), but we set the token correctly for RBAC.
+    
     return admin, token
