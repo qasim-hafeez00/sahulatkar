@@ -6,12 +6,11 @@ from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sk_shared.models.auth import AdminUser
+from sk_shared.models.auth import AdminUser, Role
 from src.core.kms import KMSProvider
 from src.core.audit import record_audit_event
 from src.schemas.auth import (
     AdminAuthResponse,
-    AdminLoginRequest,
     AdminMfaSetupResponse,
     AdminMfaVerifyRequest,
 )
@@ -20,8 +19,15 @@ from src.services.rbac import RBACService
 from src.core.dependencies import get_db, get_redis, get_current_admin, RequirePermission
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import get_password_hash
+from src.schemas.admin_auth import AdminLoginRequest, AdminLoginResponse, AssignRoleRequest, CreateAdminRequest
 
-router = APIRouter(prefix="/admin/auth", tags=["admin_auth"])
+# ADMIN SECURITY POLICY:
+# 1. No refresh tokens permitted for admin accounts to minimize session longevity risks.
+# 2. MFA is mandatory for all admin accounts (enforced via REQUIRE_ADMIN_MFA).
+# 3. Role updates immediately invalidate ALL active sessions for that admin in Redis.
+# 4. JWTs should have a short TTL (settings.ADMIN_TOKEN_EXPIRE_MINUTES).
+
+router = APIRouter(prefix="/admin/auth", tags=["Admin Auth"])
 
 @router.post("/login", response_model=AdminAuthResponse)
 async def admin_login(
@@ -87,7 +93,7 @@ async def verify_mfa(
 class CreateAdminRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
-    role: str = Field(default="analyst")
+    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
 
 
 class AssignRoleRequest(BaseModel):
@@ -107,15 +113,16 @@ async def create_admin(
     if existing:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="ADMIN_EMAIL_EXISTS")
 
+    role_obj = await db.scalar(select(Role).where(Role.name == payload.role))
+    
     new_admin = AdminUser(
         uuid=uuid.uuid4(),
         email=payload.email,
         password_hash=get_password_hash(payload.password),
         mfa_enabled=False,
+        role_id=role_obj.id if role_obj else None,
     )
     db.add(new_admin)
-    await db.commit()
-    await db.refresh(new_admin)
 
     await record_audit_event(
         db=db,
@@ -126,6 +133,8 @@ async def create_admin(
         target_id=new_admin.id,
         changes={"email": payload.email, "role": payload.role},
     )
+    await db.commit()
+    await db.refresh(new_admin)
     return {
         "admin_id": new_admin.id,
         "email": new_admin.email,
@@ -151,6 +160,10 @@ async def assign_admin_role(
 
     permissions = RBACService.get_role_permissions(payload.role)
 
+    role_obj = await db.scalar(select(Role).where(Role.name == payload.role))
+    if role_obj:
+        target.role_id = role_obj.id
+        
     await record_audit_event(
         db=db,
         request=request,
@@ -160,11 +173,20 @@ async def assign_admin_role(
         target_id=admin_id,
         changes={"role": payload.role, "permissions": permissions},
     )
+    await db.commit()
+    
+    # Invalidate all existing sessions for this admin
+    sessions_key = f"sk:auth:admin_sessions:{admin_id}"
+    session_hashes = await redis.redis.smembers(sessions_key)
+    for h in session_hashes:
+        await redis.delete(f"sk:auth:admin_session:{h.decode()}")
+    await redis.delete(sessions_key)
+
     return {
         "admin_id": admin_id,
         "role": payload.role,
         "permissions": permissions,
-        "note": "Role applied to next login token. Existing sessions unaffected until expiry.",
+        "note": "Role applied to DB. Existing sessions invalidated successfully.",
     }
 
 

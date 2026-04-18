@@ -9,7 +9,7 @@ from src.schemas.auth import (
     ResendOtpRequest
 )
 from src.services.auth import AuthService
-from src.core.dependencies import get_db, get_redis, get_current_user
+from src.core.dependencies import get_db, get_redis, get_current_user, rate_limit_auth
 from sk_shared.redis_client import RedisClient
 from sk_shared.models.auth import User
 
@@ -19,7 +19,8 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 async def register_initiate(
     req: RegisterInitiateRequest,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(rate_limit_auth)
 ):
     return await AuthService.initiate_registration(req, db, redis)
 
@@ -27,7 +28,8 @@ async def register_initiate(
 async def verify_otp(
     req: VerifyOtpRequest,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(rate_limit_auth)
 ):
     return await AuthService.verify_otp(req, db, redis)
 
@@ -35,7 +37,8 @@ async def verify_otp(
 async def login(
     req: LoginRequest,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(rate_limit_auth)
 ):
     return await AuthService.login(req, db, redis)
 
@@ -63,7 +66,8 @@ async def logout(
 @router.post("/otp/resend", response_model=RegisterInitiateResponse)
 async def resend_otp(
     req: ResendOtpRequest,
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(rate_limit_auth)
 ):
     import json
     from fastapi import HTTPException

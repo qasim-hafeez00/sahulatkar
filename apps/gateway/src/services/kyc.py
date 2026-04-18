@@ -125,11 +125,22 @@ class KycService:
         )
         profile = result.scalar_one_or_none()
         if profile and profile.cnic:
-            try:
-                profile.cnic = KMSProvider().decrypt(profile.cnic)
-            except Exception:
-                # Backward-compatible for legacy plaintext rows.
-                pass
+            raw = profile.cnic
+            if isinstance(raw, (bytes, bytearray)):
+                try:
+                    profile.cnic = KMSProvider().decrypt(raw)
+                except Exception:
+                    # Check if stored value is legacy plaintext
+                    try:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        profile.cnic = raw.decode("utf-8")
+                        logger.warning(f"Legacy plaintext CNIC detected for user {profile.user_id}")
+                    except Exception:
+                        import logging
+                        logger = logging.getLogger(__name__)
+                        logger.error(f"Cannot decrypt CNIC for user {profile.user_id}")
+                        profile.cnic = ""
         return profile
 
     async def upsert_profile(

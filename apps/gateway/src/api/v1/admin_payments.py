@@ -31,7 +31,7 @@ async def list_admin_payments(
     params: dict[str, object] = {"limit": limit, "offset": offset}
     
     if q:
-        where_clauses.append("payment_transactions.transaction_id ILIKE :q")
+        where_clauses.append("LOWER(payment_transactions.transaction_id) LIKE LOWER(:q)")
         params["q"] = f"%{q}%"
     
     if gateway:

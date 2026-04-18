@@ -31,4 +31,4 @@ async def record_audit_event(
         request_id=request_id,
     )
     db.add(audit_record)
-    await db.commit()
+    # Caller must run db.commit() explicitly

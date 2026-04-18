@@ -39,7 +39,7 @@ async def list_admin_users(
     params: dict[str, object] = {"limit": limit, "offset": offset}
 
     if search:
-        where_clauses.append("phone ILIKE :search")
+        where_clauses.append("LOWER(phone) LIKE LOWER(:search)")
         params["search"] = f"%{search}%"
     if status:
         where_clauses.append("status = :status")

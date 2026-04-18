@@ -16,6 +16,8 @@ from src.api.v1.payments import router as payments_router
 from src.api.v1.orders import router as orders_router
 from src.api.v1.credit import router as credit_router
 
+from src.api.v1.internal import router as internal_router
+
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/v1")
 api_router.include_router(admin_auth_router, prefix="/v1")
@@ -33,3 +35,4 @@ api_router.include_router(contracts_router, prefix="/v1")
 api_router.include_router(payments_router, prefix="/v1")
 api_router.include_router(orders_router, prefix="/v1")
 api_router.include_router(credit_router, prefix="/v1")
+api_router.include_router(internal_router, prefix="/v1")

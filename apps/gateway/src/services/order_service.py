@@ -67,6 +67,12 @@ class OrderService:
 
         product = await self.db.scalar(select(Product).where(Product.id == order.product_id)) if order.product_id else None
         if not product:
+            import datetime
+            time_since_creation = (datetime.datetime.now(datetime.timezone.utc) - order.created_at.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+            if order.status == "url_received" and time_since_creation > 600:
+                order.status = "extraction_failed"
+                await self.db.commit()
+                return {"status": "extraction_failed", "order_id": order.id, "reason": "Timeout waiting for extraction."}
             return {"status": "pending", "order_id": order.id}
 
         sale_price = float(product.sale_price or 0)

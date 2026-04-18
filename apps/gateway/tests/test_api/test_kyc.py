@@ -321,3 +321,57 @@ async def test_admin_queue_item_removed_after_decision(client: AsyncClient, test
 async def test_admin_requires_auth(client: AsyncClient):
     r = await client.get("/api/v1/admin/kyc/queue")
     assert r.status_code == 401
+
+# ─── New Tests for Phase 3/5 fixes ───────────────────────────────────────────
+
+async def test_kyc_resubmit_clears_stale_queue(client: AsyncClient, test_user, test_admin, db_session):
+    user, token = test_user
+    _, admin_token = test_admin
+    
+    # 1. Seed a rejected KYC with a queue entry
+    async with TestingSessionLocal() as session:
+        kyc = UserKycVerification(
+            user_id=user.id,
+            status=KycStatus.REJECTED,
+            cnic_front_image_url="/tmp/f.jpg",
+            cnic_back_image_url="/tmp/b.jpg",
+            liveness_video_url="/tmp/v.mp4"
+        )
+        session.add(kyc)
+        await session.flush()
+        
+        q = KycVerificationQueue(kyc_verification_id=kyc.id)
+        session.add(q)
+        await session.commit()
+    
+    # 2. Resubmit
+    r = await client.post("/api/v1/kyc/resubmit", headers=_auth(token))
+    assert r.status_code == 200
+    
+    # 3. Verify queue entry is GONE
+    r_queue = await client.get("/api/v1/admin/kyc/queue", headers=_auth(admin_token))
+    assert r_queue.json() == []
+
+async def test_profile_cnic_decryption_fallback(client: AsyncClient, test_user, db_session):
+    """Verify that if decryption fails, we fallback to UTF-8 decode or empty string."""
+    user, token = test_user
+    
+    # Seed a profile with plain text bytes (which will fail KMS decryption)
+    plain_cnic = "12345-1234567-1".encode("utf-8")
+    async with TestingSessionLocal() as session:
+        profile = CustomerProfile(
+            user_id=user.id,
+            first_name="Legacy",
+            last_name="User",
+            cnic=plain_cnic,
+            dob=datetime(1990, 1, 1),
+            address="Some Address"
+        )
+        session.add(profile)
+        await session.commit()
+        
+    r = await client.get("/api/v1/kyc/profile", headers=_auth(token))
+    assert r.status_code == 200
+    # Should fall back to decode("utf-8") successfully
+    assert r.json()["cnic"] == "12345-1234567-1"
+

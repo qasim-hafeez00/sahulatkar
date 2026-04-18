@@ -54,12 +54,26 @@ async def delivery_event_listener(app: FastAPI) -> None:
         await pubsub.close()
 
 
+async def verify_critical_tables():
+    """Verify that admin-related tables exist to prevent runtime 501s."""
+    tables = ["system_parameters", "risk_blacklist"]
+    async with SessionLocal() as db:
+        for table in tables:
+            try:
+                await db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
+            except Exception:
+                logger.warning(f"CRITICAL_TABLE_MISSING: Table '{table}' not found in database. Admin modules may be degraded.")
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Initializing Gateway Lifespan...")
     app.state.redis = get_redis_client(settings.REDIS_URL)
     app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
+    
+    # Verify core admin infrastructure
+    await verify_critical_tables()
+    
     InternalServiceClient.start()
     yield
     logger.info("Shutting down Gateway Lifespan...")

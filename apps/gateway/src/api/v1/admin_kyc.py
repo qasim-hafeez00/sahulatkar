@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit import record_audit_event
@@ -13,13 +13,16 @@ router = APIRouter(prefix="/admin/kyc", tags=["Admin KYC"])
 
 @router.get("/queue", response_model=list[KycQueueItemResponse])
 async def get_queue(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=100),
     current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
 ):
-    """Return all pending, unclaimed KYC review items."""
+    """Return all pending, unclaimed KYC review items with pagination."""
+    offset = (page - 1) * limit
     service = KycQueueService(db, redis_client)
-    return await service.get_queue()
+    return await service.get_queue(offset=offset, limit=limit)
 
 
 @router.post("/{queue_id}/claim", status_code=status.HTTP_200_OK)

@@ -238,7 +238,11 @@ async def verify_contract_integrity(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CONTRACT_FILE_NOT_FOUND")
         computed_hash = hashlib.sha256(path.read_bytes()).hexdigest()
     else:
-        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="REMOTE_HASH_VERIFICATION_NOT_AVAILABLE")
+        try:
+            pdf_bytes = await storage.download(contract.contract_pdf_path)
+            computed_hash = hashlib.sha256(pdf_bytes).hexdigest()
+        except Exception as exc:
+            raise HTTPException(status_code=status.HTTP_500_INTERNAL_SERVER_ERROR, detail=f"CONTRACT_FETCH_FAILED: {exc}")
     return {
         "valid": computed_hash == contract.contract_hash,
         "stored_hash": contract.contract_hash,

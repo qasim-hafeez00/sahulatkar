@@ -27,7 +27,7 @@ async def initiate_order(
     db: AsyncSession = Depends(get_db),
 ):
     order = await OrderService(db).initiate(current_user, str(req.product_url))
-    return OrderInitiateResponse(order_id=order.id, status="processing")
+    return OrderInitiateResponse(order_id=order.id, status=order.status)
 
 
 @router.get("/{order_id}/offer", response_model=OrderOfferResponse)

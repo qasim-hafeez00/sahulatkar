@@ -102,6 +102,16 @@ async def resubmit_kyc(
     kyc.cnic_front_image_url = None
     kyc.cnic_back_image_url = None
     kyc.liveness_video_url = None
+    
+    from sqlalchemy import delete
+    from sk_shared.models.kyc import KycVerificationQueue
+    
+    await db.execute(
+        delete(KycVerificationQueue).where(
+            KycVerificationQueue.kyc_verification_id == kyc.id
+        )
+    )
+    
     await db.commit()
     await db.refresh(kyc)
     return kyc
@@ -122,8 +132,16 @@ async def upsert_profile(
     # Decrypt CNIC for the response to avoid Pydantic validation errors on bytes
     from src.core.kms import KMSProvider
     resp = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
-    if isinstance(resp.get("cnic"), (bytes, bytearray)):
-        resp["cnic"] = KMSProvider().decrypt(resp["cnic"])
+    cnic_val = resp.get("cnic")
+    if isinstance(cnic_val, (bytes, bytearray)):
+        try:
+            resp["cnic"] = KMSProvider().decrypt(cnic_val)
+        except Exception:
+            # Fallback for legacy or corrupted data
+            try:
+                resp["cnic"] = cnic_val.decode("utf-8")
+            except Exception:
+                resp["cnic"] = ""
         
     return resp
 
@@ -141,7 +159,14 @@ async def get_profile(
         
     from src.core.kms import KMSProvider
     resp = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
-    if isinstance(resp.get("cnic"), (bytes, bytearray)):
-        resp["cnic"] = KMSProvider().decrypt(resp["cnic"])
+    cnic_val = resp.get("cnic")
+    if isinstance(cnic_val, (bytes, bytearray)):
+        try:
+            resp["cnic"] = KMSProvider().decrypt(cnic_val)
+        except Exception:
+            try:
+                resp["cnic"] = cnic_val.decode("utf-8")
+            except Exception:
+                resp["cnic"] = ""
         
     return resp

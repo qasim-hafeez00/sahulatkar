@@ -16,7 +16,7 @@ from src.config import settings
 
 class ContractSignerService:
     @staticmethod
-    async def issue_signing_otp(db: AsyncSession, redis: RedisClient, contract_type: str, contract_id: int) -> None:
+    async def issue_signing_otp(db: AsyncSession, redis: RedisClient, contract_type: str, contract_id: int, user_id: int) -> None:
         # Fetch user phone number for the notification
         model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
         contract = await db.scalar(select(model).where(model.id == contract_id))
@@ -29,8 +29,8 @@ class ContractSignerService:
 
         otp = generate_otp()
         otp_hash = hash_otp(otp)
-        otp_key = f"{RedisNS.CONTRACT_OTP}:{contract_type}:{contract_id}"
-        attempts_key = f"{RedisNS.CONTRACT_OTP_ATTEMPTS}:{contract_type}:{contract_id}"
+        otp_key = f"{RedisNS.CONTRACT_OTP}:{contract_type}:{contract_id}:{user_id}"
+        attempts_key = f"{RedisNS.CONTRACT_OTP_ATTEMPTS}:{contract_type}:{contract_id}:{user_id}"
 
         await redis.set(otp_key, otp_hash, settings.OTP_TTL)
         await redis.delete(attempts_key)
@@ -42,9 +42,9 @@ class ContractSignerService:
             await notify.push_contract_otp(user.phone, otp)
 
     @staticmethod
-    async def verify_signing_otp(redis: RedisClient, contract_type: str, contract_id: int, otp_code: str) -> str:
-        otp_key = f"{RedisNS.CONTRACT_OTP}:{contract_type}:{contract_id}"
-        attempts_key = f"{RedisNS.CONTRACT_OTP_ATTEMPTS}:{contract_type}:{contract_id}"
+    async def verify_signing_otp(redis: RedisClient, contract_type: str, contract_id: int, user_id: int, otp_code: str) -> str:
+        otp_key = f"{RedisNS.CONTRACT_OTP}:{contract_type}:{contract_id}:{user_id}"
+        attempts_key = f"{RedisNS.CONTRACT_OTP_ATTEMPTS}:{contract_type}:{contract_id}:{user_id}"
 
         attempts = await redis.get(attempts_key)
         if attempts and int(attempts) >= settings.MAX_OTP_ATTEMPTS:
@@ -100,7 +100,7 @@ class ContractSignerService:
 
         ContractSignerService._check_validity(contract)
 
-        otp_hash = await ContractSignerService.verify_signing_otp(redis, "wakalah", contract.id, otp_code)
+        otp_hash = await ContractSignerService.verify_signing_otp(redis, "wakalah", contract.id, user_id, otp_code)
 
         order = await db.scalar(select(Order).where(Order.id == contract.order_id))
         if order is None:
@@ -131,9 +131,7 @@ class ContractSignerService:
             )
         )
 
-        await db.commit()
-        await db.refresh(contract)
-        await db.refresh(order)
+        await db.flush()
         return contract, order
 
     @staticmethod
@@ -161,7 +159,7 @@ class ContractSignerService:
 
         ContractSignerService._check_validity(contract)
 
-        otp_hash = await ContractSignerService.verify_signing_otp(redis, "murabaha", contract.id, otp_code)
+        otp_hash = await ContractSignerService.verify_signing_otp(redis, "murabaha", contract.id, user_id, otp_code)
 
         order = await db.scalar(select(Order).where(Order.id == contract.order_id))
         if order is None:
@@ -231,7 +229,5 @@ class ContractSignerService:
             )
             db.add(inst)
 
-        await db.commit()
-        await db.refresh(contract)
-        await db.refresh(order)
+        await db.flush()
         return contract, order

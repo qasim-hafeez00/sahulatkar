@@ -31,7 +31,7 @@ async def list_admin_orders(
     params: dict[str, object] = {"limit": limit, "offset": offset}
     
     if q:
-        where_clauses.append("(orders.order_number ILIKE :q OR users.email ILIKE :q)")
+        where_clauses.append("(LOWER(orders.order_number) LIKE LOWER(:q) OR LOWER(users.email) LIKE LOWER(:q))")
         params["q"] = f"%{q}%"
     
     if status:

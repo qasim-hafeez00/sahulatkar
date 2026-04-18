@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     # Admin
     ADMIN_SESSION_TTL: int = 28800  # 8 hours
     ADMIN_RATE_LIMIT_PER_MIN: int = 30  # per-admin IP rate cap
+    REQUIRE_ADMIN_MFA: bool = True
 
     # Inter-service security (P4-3)
     INTERNAL_SERVICE_TOKEN: str = "local-internal-token"

@@ -1,3 +1,4 @@
+import hashlib
 from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 from fastapi import Request, Depends, HTTPException, status
@@ -43,7 +44,6 @@ async def get_current_user(
          raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization header missing")
     
     token = auth_header.split(" ")[1]
-    import hashlib
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     
     # Fast check in Redis
@@ -97,7 +97,6 @@ async def get_current_admin(
     if not auth_header:
          raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization header missing")
          
-    import hashlib
     token = auth_header.split(" ")[1]
     token_hash = hashlib.sha256(token.encode()).hexdigest()
     
@@ -131,3 +130,23 @@ class RequirePermission:
         if self.required_permission not in permissions and "all_actions" not in permissions:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing required permission")
         return admin
+
+async def rate_limit_auth(request: Request, redis: RedisClient = Depends(get_redis)):
+    import time
+    ip = request.client.host if request and request.client else "unknown"
+    key = f"sk:rate_limit:auth:{ip}"
+    limit = 10  # 10 requests
+    window = 60 # per 60 seconds
+
+    now = time.time()
+    redis_instance = redis.redis if hasattr(redis, "redis") else redis
+
+    await redis_instance.zremrangebyscore(key, 0, now - window)
+    count = await redis_instance.zcard(key)
+    
+    if count >= limit:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many attempts. Try again later.")
+        
+    await redis_instance.zadd(key, {str(now): now})
+    await redis_instance.expire(key, window)
+

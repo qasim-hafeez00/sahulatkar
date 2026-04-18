@@ -1,13 +1,16 @@
+import json
+from datetime import datetime, timezone
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import OrderState
+from sk_shared.constants import OrderState, QueueName
 from sk_shared.models.auth import User
 from sk_shared.models.order import Order, OrderStatusHistory
 from sk_shared.models.payment import Installment, Loan, PaymentTransaction
+from sk_shared.redis_client import RedisClient
 from src.core.audit import record_audit_event
-from src.core.dependencies import get_current_user, get_db
+from src.core.dependencies import get_current_user, get_db, get_redis
 from src.schemas.payments import (
     DownPaymentRequest,
     DownPaymentResponse,
@@ -26,6 +29,7 @@ async def issue_vcn(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
     order = await db.scalar(
         select(Order).where(
@@ -44,6 +48,16 @@ async def issue_vcn(
                 detail="DOWN_PAYMENT_NOT_CONFIRMED",
             )
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="VCN_GATE_NOT_PASSED")
+        
+    old_status = order.status
+    order.status = "pending_vcn"
+    db.add(OrderStatusHistory(
+        order_id=order.id, 
+        from_status=old_status,
+        to_status="pending_vcn", 
+        reason="vcn_issue_requested",
+    ))
+    # We delay committing until end of logic normally, but here audit expects to log the action.
 
     await record_audit_event(
         db=db,
@@ -55,6 +69,17 @@ async def issue_vcn(
         changes={"order_id": order.id},
     )
 
+    vcn_job = json.dumps({
+        "event": "vcn.issue_requested",
+        "order_id": order.id,
+        "user_id": current_user.id,
+        "amount": float(order.total_amount),
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+    })
+    if hasattr(redis, "redis"):
+        await redis.redis.lpush(QueueName.VCN_ISSUE, vcn_job)
+
+    await db.commit()
     return VcnIssueResponse(status="queued", order_id=order.id)
 
 
@@ -64,6 +89,7 @@ async def create_down_payment(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
     order = await db.scalar(
         select(Order).where(
@@ -94,14 +120,14 @@ async def create_down_payment(
 
     payment = PaymentTransaction(
         user_id=current_user.id,
+        order_id=order.id,
         amount=float(req.amount_pkr),
         gateway=req.method,
         status="initiated",
     )
     db.add(payment)
-    await db.commit()
-    await db.refresh(payment)
-
+    # Don't commit yet to avoid split transaction with audit trail
+    
     await record_audit_event(
         db=db,
         request=request,
@@ -111,17 +137,31 @@ async def create_down_payment(
         target_id=order.id,
         changes={
             "order_id": order.id,
-            "payment_id": payment.id,
             "amount_pkr": str(req.amount_pkr),
             "method": req.method,
         },
     )
+    
+    await db.commit()
+    await db.refresh(payment)
+    
+    payment_job = json.dumps({
+        "event": "payment.initiate_requested",
+        "payment_id": payment.id,
+        "order_id": order.id,
+        "user_id": current_user.id,
+        "amount": float(req.amount_pkr),
+        "gateway": req.method,
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+    })
+    if hasattr(redis, "redis"):
+        await redis.redis.lpush(QueueName.PAYMENT_INITIATE, payment_job)
 
     return DownPaymentResponse(
         payment_id=payment.id,
         status=payment.status,
         transaction_id=getattr(payment, "gateway_txn_id", None),
-        checkout_url=None,
+        checkout_url=None, # Will be set by webhook or orchestrator
     )
 
 

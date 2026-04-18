@@ -164,6 +164,10 @@ class AuthService:
             if locked_until > datetime.now(timezone.utc):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
             
+        # Verify MFA Enforcement
+        if getattr(settings, "REQUIRE_ADMIN_MFA", True) and not admin.mfa_enabled:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MFA_SETUP_REQUIRED")
+
         # Verify TOTP
         if admin.mfa_enabled and admin.mfa_secret_encrypted:
             if not req.totp_code:
@@ -191,6 +195,10 @@ class AuthService:
         )
         token_hash = hashlib.sha256(acc_token.encode()).hexdigest()
         await redis.set(f"sk:auth:admin_session:{token_hash}", f"{admin.id}:{role_name}", settings.ADMIN_SESSION_TTL)
+        
+        if hasattr(redis, "redis"):
+            await redis.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
+            await redis.redis.expire(f"sk:auth:admin_sessions:{admin.id}", settings.ADMIN_SESSION_TTL)
         
         return AdminAuthResponse(access_token=acc_token, admin_id=admin.id, role=role_name)
 
@@ -229,6 +237,8 @@ class AuthService:
 
         user.failed_login_attempts = 0
         user.locked_until = None
+        
+        await redis.delete(f"sk:auth:otp_attempts:{req.phone}")
         
         from sqlalchemy import update
         await db.execute(

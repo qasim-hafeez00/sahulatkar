@@ -15,13 +15,15 @@ class KycQueueService:
         self.db = db
         self.redis = redis
 
-    async def get_queue(self) -> list[KycVerificationQueue]:
+    async def get_queue(self, offset: int = 0, limit: int = 50) -> list[KycVerificationQueue]:
         result = await self.db.execute(
-            select(KycVerificationQueue).where(
-                KycVerificationQueue.assigned_admin_id == None  # noqa: E711
-            )
+            select(KycVerificationQueue)
+            .where(KycVerificationQueue.assigned_admin_id == None)  # noqa: E711
+            .order_by(KycVerificationQueue.created_at.asc())
+            .offset(offset)
+            .limit(limit)
         )
-        return result.scalars().all()
+        return list(result.scalars().all())
 
     async def claim(self, queue_id: int, admin_id: int) -> KycVerificationQueue:
         result = await self.db.execute(
