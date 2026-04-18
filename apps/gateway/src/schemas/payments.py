@@ -9,7 +9,7 @@ from pydantic import BaseModel, Field
 
 class DownPaymentRequest(BaseModel):
     order_id: int = Field(..., gt=0)
-    method: str = Field(..., pattern="^(safepay|jazzcash|easypaisa)$")
+    method: str = Field(..., pattern="^(safepay|jazzcash|easypaisa|raast)$")
     amount_pkr: Decimal = Field(..., gt=0)
 
 

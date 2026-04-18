@@ -21,6 +21,7 @@ class Settings(BaseSettings):
     OTP_TTL: int = 180  # 3 minutes
     MAX_OTP_ATTEMPTS: int = 3
     OTP_ATTEMPTS_TTL: int = 300  # 5 minutes
+
     # S3 Storage (Optional, fallback to LocalStorage if missing)
     S3_BUCKET: Optional[str] = None
     S3_ACCESS_KEY: Optional[str] = None
@@ -33,7 +34,17 @@ class Settings(BaseSettings):
     
     # Admin
     ADMIN_SESSION_TTL: int = 28800  # 8 hours
+    ADMIN_RATE_LIMIT_PER_MIN: int = 30  # per-admin IP rate cap
+
+    # Inter-service security (P4-3)
+    INTERNAL_SERVICE_TOKEN: str = "local-internal-token"
+
+    # KMS — local mock path uses KMS_MOCK_KEY_HEX (AES-256 hex-encoded key).
+    # Production: set ENVIRONMENT=production and KMS_KEY_ARN for AWS KMS Boto3 path.
+    KMS_MOCK_KEY_HEX: str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+    KMS_KEY_ARN: Optional[str] = None  # e.g. arn:aws:kms:ap-south-1:123456789:key/xxxx
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 settings = Settings()
+

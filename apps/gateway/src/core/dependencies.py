@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from typing import AsyncGenerator, Optional
 from fastapi import Request, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
@@ -65,13 +66,15 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     
     # Check lockout
-    from datetime import datetime, timezone
-    if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is locked")
-        
+    if user.locked_until:
+        locked_until = user.locked_until if user.locked_until.tzinfo else user.locked_until.replace(tzinfo=timezone.utc)
+        if locked_until > datetime.now(timezone.utc):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User account is locked")
+
     if user.status in ["suspended", "blocked"]:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="User account is blocked")
     return user
+
 
 async def get_current_admin_token_payload(credentials: HTTPAuthorizationCredentials = Depends(security_scheme)):
     try:

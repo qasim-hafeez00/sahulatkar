@@ -12,6 +12,9 @@ from src.schemas.kyc import (
 )
 from src.services.kyc import KycService
 from sk_shared.models.auth import User
+from sk_shared.models.kyc import KycStatus
+from sk_shared.storage import get_storage_client
+from src.config import settings
 
 router = APIRouter(prefix="/kyc", tags=["KYC"])
 
@@ -42,8 +45,9 @@ async def upload_document(
             detail=f"Invalid document_type. Allowed: {sorted(allowed_types)}",
         )
 
-    # Mock local-storage path; swap for S3 presigned URL in production.
-    file_path = f"/tmp/kyc/{current_user.id}/{document_type}_{file.filename}"
+    file_key = f"kyc/{current_user.id}/{document_type}_{file.filename}"
+    payload = await file.read()
+    file_path = await get_storage_client(settings).upload(file_key, payload)
 
     service = KycService(db)
     kyc = await service.upload_document(current_user.id, document_type, file_path)
@@ -72,6 +76,34 @@ async def get_kyc_status(
     """Return the current KYC verification status for the authenticated user."""
     service = KycService(db)
     kyc = await service.get_or_create_kyc(current_user.id)
+    storage = get_storage_client(settings)
+    for field in ["cnic_front_image_url", "cnic_back_image_url", "liveness_video_url"]:
+        value = getattr(kyc, field, None)
+        if value:
+            setattr(kyc, field, await storage.get_download_url(value))
+    return kyc
+
+
+@router.post("/resubmit", response_model=KycVerificationResponse)
+async def resubmit_kyc(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    service = KycService(db)
+    kyc = await service.get_or_create_kyc(current_user.id)
+    if kyc.status != KycStatus.REJECTED:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="KYC_NOT_REJECTED")
+
+    kyc.status = KycStatus.PENDING
+    kyc.attempt_number = (kyc.attempt_number or 1) + 1
+    kyc.rejection_reason = None
+    if hasattr(kyc, "rejection_code"):
+        kyc.rejection_code = None
+    kyc.cnic_front_image_url = None
+    kyc.cnic_back_image_url = None
+    kyc.liveness_video_url = None
+    await db.commit()
+    await db.refresh(kyc)
     return kyc
 
 
@@ -86,7 +118,14 @@ async def upsert_profile(
     """Create or update the customer's personal profile."""
     service = KycService(db)
     profile = await service.upsert_profile(current_user.id, payload)
-    return profile
+    
+    # Decrypt CNIC for the response to avoid Pydantic validation errors on bytes
+    from src.core.kms import KMSProvider
+    resp = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
+    if isinstance(resp.get("cnic"), (bytes, bytearray)):
+        resp["cnic"] = KMSProvider().decrypt(resp["cnic"])
+        
+    return resp
 
 
 @router.get("/profile", response_model=CustomerProfileResponse)
@@ -99,4 +138,10 @@ async def get_profile(
     profile = await service.get_profile(current_user.id)
     if not profile:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Profile not found")
-    return profile
+        
+    from src.core.kms import KMSProvider
+    resp = {c.name: getattr(profile, c.name) for c in profile.__table__.columns}
+    if isinstance(resp.get("cnic"), (bytes, bytearray)):
+        resp["cnic"] = KMSProvider().decrypt(resp["cnic"])
+        
+    return resp

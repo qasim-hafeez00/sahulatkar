@@ -5,11 +5,16 @@ from src.api.v1.kyc import router as kyc_router
 from src.api.v1.admin_kyc import router as admin_kyc_router
 from src.api.v1.admin_hitl import router as admin_hitl_router
 from src.api.v1.admin_dashboard import router as admin_dashboard_router
+from src.api.v1.admin_analytics import router as admin_analytics_router
 from src.api.v1.admin_users import router as admin_users_router
 from src.api.v1.admin_orders import router as admin_orders_router
 from src.api.v1.admin_payments import router as admin_payments_router
+from src.api.v1.admin_risk import router as admin_risk_router
+from src.api.v1.admin_system import router as admin_system_router
 from src.api.v1.contracts import router as contracts_router
 from src.api.v1.payments import router as payments_router
+from src.api.v1.orders import router as orders_router
+from src.api.v1.credit import router as credit_router
 
 api_router = APIRouter()
 api_router.include_router(auth_router, prefix="/v1")
@@ -18,8 +23,13 @@ api_router.include_router(kyc_router, prefix="/v1")
 api_router.include_router(admin_kyc_router, prefix="/v1")
 api_router.include_router(admin_hitl_router, prefix="/v1")
 api_router.include_router(admin_dashboard_router, prefix="/v1")
+api_router.include_router(admin_analytics_router, prefix="/v1")
 api_router.include_router(admin_users_router, prefix="/v1")
 api_router.include_router(admin_orders_router, prefix="/v1")
 api_router.include_router(admin_payments_router, prefix="/v1")
+api_router.include_router(admin_risk_router, prefix="/v1")
+api_router.include_router(admin_system_router, prefix="/v1")
 api_router.include_router(contracts_router, prefix="/v1")
 api_router.include_router(payments_router, prefix="/v1")
+api_router.include_router(orders_router, prefix="/v1")
+api_router.include_router(credit_router, prefix="/v1")

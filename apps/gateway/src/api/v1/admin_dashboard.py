@@ -46,15 +46,22 @@ async def get_dashboard_summary(
         
         pending_installments = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status = 'pending'"))
         overdue_installments = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status = 'overdue'"))
+        overdue_amount_pkr = await _fetch_scalar(
+            db,
+            "SELECT COALESCE(SUM(total_amount), 0) FROM installments WHERE deleted_at IS NULL AND status = 'overdue'",
+        )
         
         paid_installments = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status = 'paid'"))
         total_finished = overdue_installments + paid_installments
+        approved_risk = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM risk_assessments WHERE decision = 'approved' AND created_at > NOW() - INTERVAL '30 days'"))
+        total_risk = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM risk_assessments WHERE created_at > NOW() - INTERVAL '30 days'"))
+        approval_rate = round((approved_risk / total_risk * 100), 2) if total_risk > 0 else 0.0
         
         default_rate = round((overdue_installments / total_finished * 100), 2) if total_finished > 0 else 0.0
 
     except Exception as e:
         print(f"DASHBOARD ERROR: {e}")
-        active_users, total_orders, gmv_raw, pending_installments, overdue_installments, default_rate = 0, 0, 0.0, 0, 0, 0.0
+        active_users, total_orders, gmv_raw, pending_installments, overdue_installments, overdue_amount_pkr, default_rate, approval_rate = 0, 0, 0.0, 0, 0, 0.0, 0.0, 0.0
 
     response_payload = {
         "requested_by": {
@@ -64,11 +71,11 @@ async def get_dashboard_summary(
         "kpis": {
             "gmv": {"value": gmv_raw, "trend": "+0.0%", "status": "green"},
             "active_users": {"value": active_users, "trend": "+0.0%", "status": "green"},
-            "approval_rate": {"value": 85.0, "trend": "+0.0%", "status": "yellow"}, # Stubbed until Engine history is tracked
+            "approval_rate": {"value": approval_rate, "trend": "+0.0%", "status": "yellow"},
             "default_rate": {"value": default_rate, "trend": "+0.0%", "status": "green" if default_rate < 5.0 else "red"},
             "orders_total": {"value": total_orders, "trend": "+0.0%", "status": "green"},
             "payments_due": {"value": pending_installments, "trend": "+0.0%", "status": "yellow"},
-            "overdue_amount": {"value": overdue_installments, "trend": "+0.0%", "status": "red"},
+            "overdue_amount": {"value": overdue_amount_pkr, "trend": "+0.0%", "status": "red"},
         },
         "action_items": [
             {

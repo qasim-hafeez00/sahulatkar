@@ -1,6 +1,8 @@
 import time
 from fastapi import Request, HTTPException, status
 from sk_shared.redis_client import RedisClient
+from sk_shared.security import decode_access_token
+from src.config import settings
 
 class RateLimiter:
     def __init__(self, redis: RedisClient):
@@ -53,6 +55,20 @@ async def rate_limit_middleware(request: Request, call_next):
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 detail="Too many authentication attempts. Please wait a minute."
             )
+
+    auth_header = request.headers.get("Authorization")
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header.split(" ", 1)[1]
+        try:
+            payload = decode_access_token(token, settings.JWT_PUBLIC_KEY)
+            user_id = payload.get("user_id")
+            if user_id and not await limiter.check_rate_limit(f"user:{user_id}", 60, 60):
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="Too many requests for this account. Please retry shortly.",
+                )
+        except Exception:
+            pass
 
     response = await call_next(request)
     return response

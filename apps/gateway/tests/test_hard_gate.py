@@ -44,21 +44,34 @@ async def _seed_order(user_id: int, status: str) -> Order:
         return order
 
 
-async def test_vcn_issue_blocked_until_contracts_signed(client, test_user):
+async def test_vcn_issue_blocked_until_down_payment_confirmed(client, test_user):
     user, token = test_user
     order = await _seed_order(user.id, OrderState.CONTRACTS_PENDING)
 
-    blocked = await client.post(
+    blocked_pending = await client.post(
         "/api/v1/payments/vcn/issue",
         headers=_auth(token),
         json={"order_id": order.id},
     )
-    assert blocked.status_code == 403
-    assert blocked.json()["detail"] == "MURABAHA_NOT_SIGNED"
+    assert blocked_pending.status_code == 403
+    assert blocked_pending.json()["detail"] == "VCN_GATE_NOT_PASSED"
 
     async with TestingSessionLocal() as session:
         db_order = await session.scalar(select(Order).where(Order.id == order.id))
         db_order.status = OrderState.CONTRACTS_SIGNED
+        await session.commit()
+
+    blocked_signed = await client.post(
+        "/api/v1/payments/vcn/issue",
+        headers=_auth(token),
+        json={"order_id": order.id},
+    )
+    assert blocked_signed.status_code == 403
+    assert blocked_signed.json()["detail"] == "DOWN_PAYMENT_NOT_CONFIRMED"
+
+    async with TestingSessionLocal() as session:
+        db_order = await session.scalar(select(Order).where(Order.id == order.id))
+        db_order.status = OrderState.DOWN_PAYMENT_RECEIVED
         await session.commit()
 
     allowed = await client.post(

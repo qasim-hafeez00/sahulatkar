@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -14,7 +14,7 @@ class ContractDisclosure(BaseModel):
     total_sale_price: float
     profit_rate_pct: float
     currency: str = "PKR"
-    installment_count: int
+    installment_count: Literal[3, 4, 6, 12] = 4
 
 
 class WakalahGenerateResponse(BaseModel):
@@ -35,7 +35,7 @@ class WakalahSignRequest(BaseModel):
 
 class MurabahaGenerateRequest(BaseModel):
     order_id: int = Field(..., gt=0)
-    installment_count: int = Field(default=4, ge=2, le=12)
+    installment_count: Literal[3, 4, 6, 12] = 4
 
 
 class MurabahaGenerateResponse(BaseModel):
@@ -76,7 +76,8 @@ class AdminContractResponse(BaseModel):
     user_id: int
     order_id: int
     principal_name: Optional[str]
-    principal_cnic: Optional[str]
+    # principal_cnic intentionally omitted: stored AES-256 encrypted; use KYC admin
+    # endpoint to retrieve decrypted CNIC via authorised channel.
     signed_at: Optional[datetime]
     created_at: datetime
     contract_pdf_path: str

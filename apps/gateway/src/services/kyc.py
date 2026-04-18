@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, timezone
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -12,6 +12,7 @@ from sk_shared.models.kyc import (
 from src.schemas.kyc import CustomerProfileBase
 from .nadra import NadraClientMock
 from .shufti import ShuftiClientMock
+from src.core.kms import KMSProvider
 
 
 class KycService:
@@ -102,6 +103,7 @@ class KycService:
             kyc.rejection_reason = "NADRA verification failed for CNIC."
         else:
             kyc.status = KycStatus.IN_REVIEW
+            kyc.nadra_verified_at = datetime.now(timezone.utc)
             # Push to manual review queue (idempotent via unique constraint)
             existing_q = await self.db.execute(
                 select(KycVerificationQueue).where(
@@ -121,7 +123,14 @@ class KycService:
         result = await self.db.execute(
             select(CustomerProfile).where(CustomerProfile.user_id == user_id)
         )
-        return result.scalar_one_or_none()
+        profile = result.scalar_one_or_none()
+        if profile and profile.cnic:
+            try:
+                profile.cnic = KMSProvider().decrypt(profile.cnic)
+            except Exception:
+                # Backward-compatible for legacy plaintext rows.
+                pass
+        return profile
 
     async def upsert_profile(
         self, user_id: int, payload: CustomerProfileBase
@@ -133,7 +142,7 @@ class KycService:
 
         profile.first_name = payload.first_name
         profile.last_name = payload.last_name
-        profile.cnic = payload.cnic
+        profile.cnic = KMSProvider().encrypt(payload.cnic)
         profile.dob = payload.dob
         profile.address = payload.address
 

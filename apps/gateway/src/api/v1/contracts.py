@@ -1,3 +1,5 @@
+import hashlib
+from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -6,6 +8,9 @@ from sk_shared.models.auth import AdminUser, User
 from sk_shared.models.contracts import MurabahaContract, WakalahAgreement
 from sk_shared.models.order import Order
 from sk_shared.redis_client import RedisClient
+from sk_shared.storage import get_storage_client
+from src.config import settings
+from src.core.audit import record_audit_event
 from src.core.dependencies import get_current_admin, get_current_user, get_db, get_redis
 from src.schemas.contracts import (
     AdminContractResponse,
@@ -61,6 +66,15 @@ async def sign_wakalah(
         ip_address=request.client.host if request.client else None,
         device_id=req.device_id,
     )
+    await record_audit_event(
+        db=db,
+        request=request,
+        customer_user_id=current_user.id,
+        module="contracts",
+        action="sign_wakalah",
+        target_id=contract.id,
+        changes={"order_id": order.id, "contract_number": contract.contract_number},
+    )
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
 
@@ -106,6 +120,15 @@ async def sign_murabaha(
         otp_code=req.otp_code,
         ip_address=request.client.host if request.client else None,
         device_id=req.device_id,
+    )
+    await record_audit_event(
+        db=db,
+        request=request,
+        customer_user_id=current_user.id,
+        module="contracts",
+        action="sign_murabaha",
+        target_id=contract.id,
+        changes={"order_id": order.id, "contract_number": contract.contract_number},
     )
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
@@ -192,3 +215,32 @@ async def get_contract_status(
         if murabaha
         else None,
     )
+
+
+@router.get("/{contract_type}/{contract_id}/verify")
+async def verify_contract_integrity(
+    contract_type: str,
+    contract_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
+    contract = await db.scalar(
+        select(model).where(model.id == contract_id, model.user_id == current_user.id, model.deleted_at.is_(None))
+    )
+    if not contract:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CONTRACT_NOT_FOUND")
+
+    storage = get_storage_client(settings)
+    if hasattr(storage, "base_dir"):
+        path = Path(contract.contract_pdf_path)
+        if not path.exists():
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CONTRACT_FILE_NOT_FOUND")
+        computed_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    else:
+        raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="REMOTE_HASH_VERIFICATION_NOT_AVAILABLE")
+    return {
+        "valid": computed_hash == contract.contract_hash,
+        "stored_hash": contract.contract_hash,
+        "computed_hash": computed_hash,
+    }

@@ -1,5 +1,7 @@
 import httpx
 from typing import Optional
+import uuid
+from src.config import settings
 
 class InternalServiceClient:
     client: Optional[httpx.AsyncClient] = None
@@ -18,3 +20,10 @@ class InternalServiceClient:
         if not cls.client:
              raise RuntimeError("InternalServiceClient is not initialized")
         return cls.client
+
+    @staticmethod
+    def signed_headers(request_id: str | None = None) -> dict[str, str]:
+        return {
+            "X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN,
+            "X-Request-ID": request_id or str(uuid.uuid4()),
+        }

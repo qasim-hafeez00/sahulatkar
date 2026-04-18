@@ -142,7 +142,7 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 @pytest.fixture
-async def test_user():
+async def test_user(redis_mock: RedisClient):
     """Seed a customer user and return (user, access_token)."""
     from sk_shared.models.auth import User
     async with TestingSessionLocal() as session:
@@ -169,18 +169,13 @@ async def test_user():
         session.add(user_session)
         await session.commit()
     
-    # redis_mock is a local fixture, we need to access it. 
-    # But fixtures are requested by name in the test function.
-    # In conftest, we can use request.getfixturevalue if needed, 
-    # but the easiest way is to push to app.state.redis directly if available.
-    if hasattr(app.state, "redis"):
-        await app.state.redis.set(f"sk:auth:session:{acc_hash}", str(user.id), 900)
+    await redis_mock.set(f"sk:auth:session:{acc_hash}", str(user.id), 900)
         
     return user, token
 
 
 @pytest.fixture
-async def test_admin():
+async def test_admin(redis_mock: RedisClient):
     """Seed an admin user and return (admin, access_token)."""
     from sk_shared.models.auth import AdminUser
     from sk_shared.security import get_password_hash
@@ -201,8 +196,11 @@ async def test_admin():
         timedelta(seconds=3600),
     )
     
-    # NEW: Redis session for admin (if we added admin session checking to dependencies)
-    # The current get_current_admin in dependencies.py doesn't yet check Redis session 
-    # (only user login does in this iteration), but we set the token correctly for RBAC.
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    await redis_mock.set(
+        f"sk:auth:admin_session:{token_hash}",
+        f"{admin.id}:super_admin",
+        3600,
+    )
     
     return admin, token

@@ -6,7 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from fastapi import HTTPException, status
 
-from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token
+from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token, get_password_hash
 from sk_shared.redis_client import RedisClient
 from sk_shared.models.auth import User, UserSession, AdminUser
 from src.schemas.auth import (
@@ -32,7 +32,9 @@ class AuthService:
         payload = {
             "phone": req.phone,
             "first_name": req.first_name,
-            "last_name": req.last_name
+            "last_name": req.last_name,
+            "referral_code": req.referral_code,
+            "password": req.password,
         }
         await redis.set(f"sk:auth:otp:{req.phone}:register", hashed_otp, settings.OTP_TTL)
         await redis.set(f"sk:auth:token:{otp_token}", json.dumps(payload), settings.OTP_TTL)
@@ -53,10 +55,14 @@ class AuthService:
             phone = token_data.get("phone")
             first_name = token_data.get("first_name", "")
             last_name = token_data.get("last_name", "")
+            referral_code = token_data.get("referral_code")
+            password = token_data.get("password")
         except Exception:
             phone = raw_payload
             first_name = ""
             last_name = ""
+            referral_code = None
+            password = None
             
         attempts_key = f"sk:auth:otp_attempts:{phone}"
         attempts = await redis.get(attempts_key)
@@ -70,16 +76,17 @@ class AuthService:
         if stored_hash != hash_otp(req.otp_code):
             await redis.incr(attempts_key)
             await redis.expire(attempts_key, settings.OTP_ATTEMPTS_TTL)
-            
-            result = await db.execute(select(User).where(User.phone == phone))
-            fail_user = result.scalar_one_or_none()
+
+            fail_result = await db.execute(select(User).where(User.phone == phone))
+            fail_user = fail_result.scalar_one_or_none()
             if fail_user:
                 fail_user.failed_login_attempts = (fail_user.failed_login_attempts or 0) + 1
                 if fail_user.failed_login_attempts >= 5:
                     fail_user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
                 await db.commit()
-                
+
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_OTP")
+
             
         # Success - find or create user
         result = await db.execute(select(User).where(User.phone == phone))
@@ -95,6 +102,10 @@ class AuthService:
             db.add(user)
             await db.commit()
             await db.refresh(user)
+        if referral_code and hasattr(user, "referral_code"):
+            user.referral_code = referral_code
+        if password:
+            user.password_hash = get_password_hash(password)
 
         user.failed_login_attempts = 0
         user.locked_until = None
@@ -148,17 +159,22 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
             
         # Check lockout
-        if admin.locked_until and admin.locked_until > datetime.now(timezone.utc):
-             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
+        if admin.locked_until:
+            locked_until = admin.locked_until if admin.locked_until.tzinfo else admin.locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
             
         # Verify TOTP
         if admin.mfa_enabled and admin.mfa_secret_encrypted:
+            if not req.totp_code:
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="TOTP_CODE_REQUIRED")
             from src.core.kms import KMSProvider
             kms = KMSProvider()
             decrypted_secret = kms.decrypt(admin.mfa_secret_encrypted)
             totp = pyotp.TOTP(decrypted_secret)
             if not totp.verify(req.totp_code):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
+
                 
         # Fetch actual role and permissions
         from src.services.rbac import RBACService
@@ -187,8 +203,10 @@ class AuthService:
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
             
-        if user.locked_until and user.locked_until > datetime.now(timezone.utc):
-             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
+        if user.locked_until:
+            locked_until = user.locked_until if user.locked_until.tzinfo else user.locked_until.replace(tzinfo=timezone.utc)
+            if locked_until > datetime.now(timezone.utc):
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
 
         if req.otp_code:
             stored_hash = await redis.get(f"sk:auth:otp:{req.phone}:login")
@@ -261,8 +279,12 @@ class AuthService:
             )
         )
         session = result.scalar_one_or_none()
-        if not session or session.expires_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc):
+        if not session:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or revoked")
+        expires_at = session.expires_at if session.expires_at.tzinfo else session.expires_at.replace(tzinfo=timezone.utc)
+        if expires_at < datetime.now(timezone.utc):
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Session expired or revoked")
+
 
         # Create new access token
         new_acc_token = create_access_token({"user_id": user_id}, settings.JWT_PRIVATE_KEY, timedelta(seconds=settings.JWT_ACCESS_TTL))

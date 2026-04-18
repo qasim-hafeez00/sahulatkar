@@ -1,5 +1,6 @@
 import pytest
 import uuid
+import hashlib
 from datetime import timedelta
 
 from sk_shared.constants import OrderState
@@ -83,6 +84,13 @@ async def _seed_admin_with_token() -> tuple[AdminUser, str]:
         settings.JWT_PRIVATE_KEY,
         timedelta(seconds=3600),
     )
+    from src.main import app
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    session_key = f"sk:auth:admin_session:{token_hash}"
+    session_value = f"{admin.id}:super_admin"
+    # Write into app.state.redis which is the shared redis_mock injected by override_dependencies
+    if hasattr(app.state, "redis") and app.state.redis is not None:
+        await app.state.redis.set(session_key, session_value, 3600)
     return admin, token
 
 

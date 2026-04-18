@@ -10,3 +10,4 @@ from .ledger import LedgerAccount, JournalEntry, JournalEntryLine, LateFeeCharit
 from .checkout import PurchaseExecution
 from .hitl import HitlQueue
 from .delivery import Courier, Shipment, TrackingEvent
+from .audit import AuditTrail

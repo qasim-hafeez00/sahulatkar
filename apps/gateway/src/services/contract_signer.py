@@ -37,7 +37,8 @@ class ContractSignerService:
 
         # Inter-service notification via Redis queue
         if settings.NOTIFICATION_SMS_ENABLED:
-            notify = NotificationClient(redis)
+            notify_backend = redis.redis if hasattr(redis, "redis") else redis
+            notify = NotificationClient(notify_backend)
             await notify.push_contract_otp(user.phone, otp)
 
     @staticmethod
@@ -66,7 +67,12 @@ class ContractSignerService:
     @staticmethod
     def _check_validity(contract: WakalahAgreement | MurabahaContract) -> None:
         if hasattr(contract, "valid_until") and contract.valid_until:
-            if datetime.now(timezone.utc) > contract.valid_until.replace(tzinfo=timezone.utc):
+            valid_until = (
+                contract.valid_until
+                if contract.valid_until.tzinfo
+                else contract.valid_until.replace(tzinfo=timezone.utc)
+            )
+            if datetime.now(timezone.utc) > valid_until:
                 raise HTTPException(status_code=status.HTTP_410_GONE, detail="CONTRACT_EXPIRED")
 
     @staticmethod
@@ -191,7 +197,7 @@ class ContractSignerService:
         from datetime import timedelta
         import uuid
         
-        principal_amt = float(contract.cost_price - float(order.down_payment_amount or 0))
+        principal_amt = float(contract.cost_price) - float(order.down_payment_amount or 0)
         loan = Loan(
             order_id=order.id,
             user_id=user_id,

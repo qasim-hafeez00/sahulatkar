@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 from src.core.rate_limit import rate_limit_middleware
 from src.api.routes import api_router
 from src.config import settings
@@ -106,4 +107,10 @@ setup_metrics(app)
 
 @app.get("/health", tags=["system"])
 async def health_check():
-    return {"status": "ok", "service": "gateway"}
+    try:
+        async with SessionLocal() as db:
+            await db.execute(text("SELECT 1"))
+        await app.state.redis.redis.ping()
+        return {"status": "ok", "service": "gateway"}
+    except Exception:
+        return JSONResponse(status_code=503, content={"status": "degraded", "service": "gateway"})

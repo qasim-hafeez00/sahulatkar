@@ -1,6 +1,7 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from src.core.audit import record_audit_event
 from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
 from src.schemas.kyc import AdminKycDecisionRequest, KycVerificationResponse, KycQueueItemResponse
 from src.services.kyc_queue import KycQueueService
@@ -40,6 +41,7 @@ async def claim_queue_item(
 async def submit_decision(
     queue_id: int,
     request: AdminKycDecisionRequest,
+    http_request: Request,
     current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
@@ -54,6 +56,19 @@ async def submit_decision(
     try:
         kyc = await service.process_decision(
             queue_id, current_admin.id, request.approved, request.rejection_reason
+        )
+        await record_audit_event(
+            db=db,
+            request=http_request,
+            admin_user_id=current_admin.id,
+            module="kyc",
+            action="admin_decision",
+            target_id=kyc.id,
+            changes={
+                "approved": request.approved,
+                "rejection_reason": request.rejection_reason,
+                "queue_id": queue_id,
+            },
         )
         return kyc
     except ValueError as exc:

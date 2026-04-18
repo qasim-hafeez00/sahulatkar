@@ -8,6 +8,7 @@ class RegisterInitiateRequest(BaseModel):
     last_name: str = Field(..., min_length=1, max_length=100)
     email: Optional[str] = None
     referral_code: Optional[str] = None
+    password: Optional[str] = Field(default=None, min_length=8, max_length=128)
 
 class RegisterInitiateResponse(BaseModel):
     otp_token: str
@@ -31,12 +32,21 @@ class LoginRequest(BaseModel):
 class AdminLoginRequest(BaseModel):
     email: str
     password: str
-    totp_code: str
+    totp_code: Optional[str] = None  # Required only when admin.mfa_enabled is True
 
 class AdminAuthResponse(BaseModel):
     access_token: str
     admin_id: int
     role: str
+
+
+class AdminMfaSetupResponse(BaseModel):
+    qr_uri: str
+    secret: str
+
+
+class AdminMfaVerifyRequest(BaseModel):
+    totp_code: str = Field(min_length=6, max_length=6)
 
 class TokenRefreshRequest(BaseModel):
     refresh_token: str

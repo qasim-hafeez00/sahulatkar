@@ -1,32 +1,39 @@
 import os
 from cryptography.hazmat.primitives.ciphers.aead import AESGCM
 
+from src.config import settings
+
+
 class KMSProvider:
     """
-    Interface for Key Management Service.
-    In the interim S08 mock, we use a single symmetric AES-GCM key from env vars.
-    This will be swapped out for actual AWS KMS via Boto3 in production.
+    Local AES-256-GCM Key Management mock.
+
+    Production path: when ENVIRONMENT=production and KMS_KEY_ARN is set,
+    swap this implementation for AWS Boto3:
+        import boto3
+        client = boto3.client("kms", region_name="ap-south-1")
+        encrypted = client.encrypt(KeyId=settings.KMS_KEY_ARN, Plaintext=plaintext.encode())["CiphertextBlob"]
+        plaintext = client.decrypt(CiphertextBlob=ciphertext)["Plaintext"].decode()
+    The interface (encrypt/decrypt) is identical, making the swap non-breaking.
     """
+
     def __init__(self):
-        # 32 bytes for AES-256
-        key_hex = os.getenv("KMS_MOCK_KEY_HEX", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef")
+        key_hex = settings.KMS_MOCK_KEY_HEX
         self.key = bytes.fromhex(key_hex)
         self.aesgcm = AESGCM(self.key)
 
     def encrypt(self, plaintext: str) -> bytes:
         if not plaintext:
             return b""
-        # Generate a 12-byte random nonce for AES-GCM
         nonce = os.urandom(12)
-        ciphertext = self.aesgcm.encrypt(nonce, plaintext.encode('utf-8'), None)
-        # Prepend the nonce to the ciphertext for decryption later
+        ciphertext = self.aesgcm.encrypt(nonce, plaintext.encode("utf-8"), None)
         return nonce + ciphertext
 
     def decrypt(self, encrypted_data: bytes) -> str:
         if not encrypted_data:
             return ""
-        # The first 12 bytes are the nonce
         nonce = encrypted_data[:12]
         ciphertext = encrypted_data[12:]
         plaintext = self.aesgcm.decrypt(nonce, ciphertext, None)
-        return plaintext.decode('utf-8')
+        return plaintext.decode("utf-8")
+

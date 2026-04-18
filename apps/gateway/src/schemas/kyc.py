@@ -48,11 +48,10 @@ class KycVerificationResponse(BaseModel):
 
 class KycQueueItemResponse(BaseModel):
     id: int
-    user_id: int
-    status: KycStatus
-    attempt_number: int
+    kyc_verification_id: int
+    assigned_admin_id: Optional[int] = None
+    claimed_at: Optional[datetime] = None
     created_at: datetime
-    updated_at: datetime
 
     class Config:
         from_attributes = True
