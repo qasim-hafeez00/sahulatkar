@@ -45,8 +45,8 @@ async def test_extract_completed_and_offer_and_search(client, db_session, monkey
 
 
 @pytest.mark.asyncio
-async def test_extract_rejects_invalid_url(client):
-    response = await client.post("/api/v1/products/extract", json={"raw_url": "ftp://invalid"})
+async def test_extract_rejects_invalid_url(client, user_header):
+    response = await client.post("/api/v1/products/extract", headers=user_header, json={"raw_url": "ftp://invalid"})
     assert response.status_code == 422
     assert response.json()["detail"] == "NOT_A_PRODUCT_URL"
 

@@ -3,7 +3,7 @@ from typing import Optional
 from uuid import UUID
 
 class RegisterInitiateRequest(BaseModel):
-    phone: str = Field(..., description="E.164 formatted phone number")
+    phone: str = Field(..., pattern=r"^\+92[0-9]{10}$", description="E.164 formatted phone number")
     first_name: str = Field(..., min_length=1, max_length=100)
     last_name: str = Field(..., min_length=1, max_length=100)
     email: Optional[str] = None

@@ -12,7 +12,10 @@ from sk_shared.database import SessionLocal
 from sk_shared.events import EVENT_DELIVERY_CONFIRMED, EVENT_DELIVERY_STATUS_CHANGED, event_channel
 from sk_shared.redis_client import get_redis_client
 from src.services.delivery_events import apply_delivery_confirmed_envelope, apply_delivery_status_envelope
-
+from src.core.http_client import InternalServiceClient
+from src.core.middleware import RequestIDMiddleware, SecurityHeadersMiddleware
+from src.core.logging import setup_logging, logger
+from src.core.metrics import setup_metrics
 
 async def delivery_event_listener(app: FastAPI) -> None:
     channels = [event_channel(EVENT_DELIVERY_STATUS_CHANGED), event_channel(EVENT_DELIVERY_CONFIRMED)]
@@ -52,9 +55,14 @@ async def delivery_event_listener(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    setup_logging()
+    logger.info("Initializing Gateway Lifespan...")
     app.state.redis = get_redis_client(settings.REDIS_URL)
     app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
+    InternalServiceClient.start()
     yield
+    logger.info("Shutting down Gateway Lifespan...")
+    await InternalServiceClient.stop()
     app.state.delivery_listener_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await app.state.delivery_listener_task
@@ -68,6 +76,8 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+app.add_middleware(SecurityHeadersMiddleware)
+app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -85,13 +95,14 @@ async def apply_rate_limit(request, call_next):
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
-    # Avoid leaking internals. Should log 'exc' to a logger here.
+    logger.error("Unhandled exception", exc_info=exc)
     return JSONResponse(
         status_code=500,
         content={"detail": "INTERNAL_SERVER_ERROR"}
     )
 
 app.include_router(api_router, prefix="/api")
+setup_metrics(app)
 
 @app.get("/health", tags=["system"])
 async def health_check():

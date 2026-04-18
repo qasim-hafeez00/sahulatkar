@@ -103,11 +103,19 @@ class ContractGeneratorService:
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
 
-        # In real app, fetch from UserKycVerification. Here we assume or mock.
+        from sk_shared.models.kyc import CustomerProfile
+        from sk_shared.models.auth import User
+        
+        profile = await self.db.scalar(select(CustomerProfile).where(CustomerProfile.user_id == user_id))
+        user_rec = await self.db.scalar(select(User).where(User.id == user_id))
+        
+        if not profile or not user_rec:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CUSTOMER_PROFILE_MISSING")
+
         principal_info = {
-            "name": "Customer Name", # Mock: In reality, fetch from db.select(UserKycVerification)
-            "cnic": "42101-XXXXXXX-1",
-            "phone": "+92300XXXXXXX"
+            "name": f"{profile.first_name} {profile.last_name}",
+            "cnic": profile.cnic,
+            "phone": user_rec.phone
         }
 
         existing = await self.db.scalar(
@@ -134,7 +142,7 @@ class ContractGeneratorService:
             f"Merchant: {product.merchant.name if product and product.merchant else 'Direct Merchant'}",
             f"Authorized Amount: PKR {order.total_amount:,.2f}",
             f"Price Variance Tolerance: 5.00%",
-            f"Date: {datetime.now().strftime('%Y-%m-%d')}",
+            f"Date: {datetime.now(timezone.utc).strftime('%Y-%m-%d')}",
         ]
         clauses = [
             "1. APPOINTMENT: The Principal hereby appoints SahulatKar as their Agent (Wakeel) to purchase the specified product on their behalf.",
@@ -162,7 +170,7 @@ class ContractGeneratorService:
             product_description=product.name if product else "Product",
             merchant_name=product.merchant.name if product and product.merchant else "Merchant",
             product_url=product.url if product else None,
-            valid_until=datetime.now() + timedelta(hours=24)
+            valid_until=datetime.now(timezone.utc) + timedelta(hours=24)
         )
         self.db.add(contract)
         await self.db.commit()

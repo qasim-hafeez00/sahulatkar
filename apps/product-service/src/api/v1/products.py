@@ -8,15 +8,17 @@ from uuid import UUID
 
 import sqlalchemy as sa
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import desc, func, or_, select
+from fastapi.responses import StreamingResponse
+from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import QueueName, RedisNS, RedisTTL
 from sk_shared.models.product import Merchant, Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
-from src.core.dependencies import get_current_user_id, get_db, get_redis
-from src.schemas.products import AgentQueueRequest, AgentQueueResponse, ExtractRequest, ExtractResponse, JobStatusResponse, OfferResponse, SearchItem, SearchResponse, UpoResponse
+from src.services.event_publisher import publish_event
+from src.core.dependencies import get_current_user_id, get_db, get_redis, require_service_token
+from src.schemas.products import AgentQueueRequest, AgentQueueResponse, ExtractRequest, ExtractResponse, JobStatusResponse, OfferResponse, SearchItem, SearchResponse, UpoResponse, ShippingInfo, ExtractionMeta, ExtractionPricing
 from src.services.checkout_agent import CheckoutAgentService
 from src.services.extraction_waterfall import ExtractionWaterfallService
 from src.services.pricing_service import PricingService
@@ -41,16 +43,20 @@ def _build_upo(product: Product) -> UpoResponse:
         extraction_confidence=Decimal(str(product.extraction_confidence or "0.000")),
         availability=product.stock_status if product.stock_status in {"in_stock", "out_of_stock", "limited", "unknown"} else "unknown",
         is_purchasable=bool(product.in_stock and not product.is_prohibited),
-        meta={
-            "title": product.name,
-            "brand": None,
-            "description": None,
-            "images": [product.primary_image_s3] if product.primary_image_s3 else [],
-        },
-        pricing={
-            "amount": Decimal(str(product.cost_price)),
-            "currency": product.currency,
-        },
+        meta=ExtractionMeta(
+            title=product.name,
+            brand=None,
+            description=None,
+            images=[product.primary_image_s3] if product.primary_image_s3 else [],
+        ),
+        pricing=ExtractionPricing(
+            amount=Decimal(str(product.cost_price)),
+            currency=product.currency,
+        ),
+        variants=[],
+        shipping=ShippingInfo(
+            ships_to_pakistan=True  # Default to true, or update if schema allows
+        ),
     )
 
 
@@ -118,7 +124,7 @@ async def extract_product(
         db.add(job)
         await db.flush()
 
-        await redis.rpush(
+        await redis.lpush(
             QueueName.SCRAPING,
             json.dumps(
                 {
@@ -132,6 +138,12 @@ async def extract_product(
         )
         await db.commit()
         return ExtractResponse(status="extracting", job_id=job.uuid)
+
+    # GAP-16: Validation for stock and shipping
+    if extraction_result.availability == "out_of_stock":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OUT_OF_STOCK")
+    if getattr(extraction_result, "ships_to_pakistan", True) is False:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="DOES_NOT_SHIP_TO_PAKISTAN")
 
     prohibited = await prohibited_checker.check_text(
         db=db,
@@ -163,7 +175,31 @@ async def extract_product(
     await db.commit()
     await db.refresh(product)
 
+    # GAP-13: Populate search_vector (PostgreSQL only)
+    if db.bind.dialect.name == "postgresql":
+        await db.execute(
+            text("""
+                UPDATE products
+                SET search_vector = to_tsvector('english', coalesce(name, '') || ' ' || coalesce(canonical_url, ''))
+                WHERE id = :id
+            """),
+            {"id": product.id}
+        )
+        await db.commit()
+
     upo = _build_upo(product)
+
+    # GAP-04: Publish product.extracted event
+    await publish_event(
+        redis=redis,
+        event="product.extracted",
+        payload={
+            "order_id": request_payload.order_id if hasattr(request_payload, "order_id") else None,
+            "product_id": str(product.uuid),
+            "upo": upo.model_dump(mode="json"),
+        }
+    )
+
     cache_key = f"{RedisNS.PRODUCT_UPO}:{product.uuid}"
     await redis.set_json(cache_key, upo.model_dump(mode="json"), ttl=RedisTTL.PRODUCT_CACHE)
     await redis.set(url_key, str(product.uuid), ttl=RedisTTL.PRODUCT_URL_MAP)
@@ -269,3 +305,46 @@ async def queue_checkout_job(
         force_failure=request_payload.force_failure,
     )
     return AgentQueueResponse(status="queued", job_id=execution.uuid, estimated_completion_seconds=45)
+
+
+@router.get("/agent/job/{job_id}/stream")
+async def stream_job_status(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> StreamingResponse:
+    from sk_shared.models.purchase import PurchaseExecution
+
+    async def event_generator():
+        last_step = None
+        # Max 120 iterations x 0.5s = 60s timeout
+        for _ in range(120):
+            execution = await db.scalar(
+                select(PurchaseExecution).where(PurchaseExecution.uuid == job_id)
+            )
+            if not execution:
+                yield f"data: {json.dumps({'error': 'JOB_NOT_FOUND'})}\n\n"
+                break
+
+            if execution.step_reached != last_step:
+                last_step = execution.step_reached
+                yield f"data: {json.dumps({'step': execution.step_reached, 'status': execution.status, 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
+
+            if execution.status in {"succeeded", "failed", "hitl_escalated", "cancelled"}:
+                break
+
+            await asyncio.sleep(0.5)
+
+    return StreamingResponse(event_generator(), media_type="text/event-stream")
+
+
+@router.post("/agent/job/{job_id}/cancel")
+async def cancel_checkout_job(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),  # admin/internal only
+) -> dict:
+    service = CheckoutAgentService(db, redis)
+    await service.cancel_job(job_id)
+    return {"status": "cancelled", "job_id": job_id}

@@ -5,7 +5,8 @@ from typing import Dict, Any
 from src.schemas.auth import (
     RegisterInitiateRequest, RegisterInitiateResponse,
     VerifyOtpRequest, AuthResponse, LoginRequest,
-    TokenRefreshRequest, TokenRefreshResponse, CurrentUserResponse
+    TokenRefreshRequest, TokenRefreshResponse, CurrentUserResponse,
+    ResendOtpRequest
 )
 from src.services.auth import AuthService
 from src.core.dependencies import get_db, get_redis, get_current_user
@@ -59,14 +60,57 @@ async def logout(
         await AuthService.logout(user.id, token, db, redis)
     return
 
+@router.post("/otp/resend", response_model=RegisterInitiateResponse)
+async def resend_otp(
+    req: ResendOtpRequest,
+    redis: RedisClient = Depends(get_redis)
+):
+    import json
+    from fastapi import HTTPException
+    import uuid
+    from sk_shared.security import generate_otp, hash_otp
+    from src.config import settings
+    
+    raw_payload = await redis.get(f"sk:auth:token:{req.otp_token}")
+    if not raw_payload:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP_EXPIRED")
+    
+    try:
+        token_data = json.loads(raw_payload)
+        phone = token_data.get("phone")
+    except Exception:
+        phone = raw_payload
+        
+    resend_count_key = f"sk:auth:otp_resend:{phone}"
+    count = await redis.get(resend_count_key)
+    if count and int(count) >= 3:
+        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="TOO_MANY_RESENDS")
+        
+    await redis.incr(resend_count_key)
+    if not count:
+        await redis.expire(resend_count_key, 3600) # 1 hour
+        
+    otp = generate_otp()
+    otp_token = str(uuid.uuid4())
+    hashed_otp = hash_otp(otp)
+    
+    await redis.set(f"sk:auth:otp:{phone}:register", hashed_otp, settings.OTP_TTL)
+    await redis.set(f"sk:auth:token:{otp_token}", raw_payload, settings.OTP_TTL)
+    await redis.delete(f"sk:auth:token:{req.otp_token}")
+    
+    masked_phone = phone[:5] + "******" + phone[-2:] if len(phone) >= 11 else "******"
+    return RegisterInitiateResponse(otp_token=otp_token, masked_phone=masked_phone)
+
 @router.get("/me", response_model=CurrentUserResponse)
 async def get_me(user: User = Depends(get_current_user)):
+    credit_limit = getattr(user, 'credit_limit', 0.0)
+    avail_credit = getattr(user, 'available_credit', 0.0)
     return CurrentUserResponse(
         user_id=user.id,
         uuid=user.uuid,
         phone=user.phone,
         kyc_status=user.status,
-        credit_limit=1000.0,
-        available_credit=1000.0,
+        credit_limit=credit_limit,
+        available_credit=avail_credit,
         status=user.status
     )

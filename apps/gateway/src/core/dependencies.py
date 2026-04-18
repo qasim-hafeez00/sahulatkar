@@ -83,10 +83,25 @@ async def get_current_admin_token_payload(credentials: HTTPAuthorizationCredenti
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate admin credentials")
 
 async def get_current_admin(
+    request: Request,
     payload: dict = Depends(get_current_admin_token_payload),
-    db: AsyncSession = Depends(get_db)
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis)
 ) -> AdminUser:
     admin_id = payload.get("admin_id")
+    
+    auth_header = request.headers.get("Authorization")
+    if not auth_header:
+         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Authorization header missing")
+         
+    import hashlib
+    token = auth_header.split(" ")[1]
+    token_hash = hashlib.sha256(token.encode()).hexdigest()
+    
+    session_data = await redis.get(f"sk:auth:admin_session:{token_hash}")
+    if not session_data:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session revoked or expired")
+
     result = await db.execute(select(AdminUser).where(AdminUser.id == admin_id, AdminUser.deleted_at.is_(None)))
     admin = result.scalar_one_or_none()
     if admin is None:

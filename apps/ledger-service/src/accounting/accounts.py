@@ -8,6 +8,7 @@ ACCOUNT_CODES = {
     "vcn_issued": "1200",
     "ap_merchants": "2001",
     "charity_payable": "2100",
+    "loan_loss_reserve": "2101",
     "customer_deposits": "2200",
     "owner_equity": "3001",
     "retained_earnings": "3900",
@@ -27,3 +28,11 @@ class PostingLine:
     debit_amount: Decimal = Decimal("0.00")
     credit_amount: Decimal = Decimal("0.00")
     description: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.debit_amount < 0 or self.credit_amount < 0:
+            raise ValueError("Posting line amounts must be non-negative")
+        if self.debit_amount > 0 and self.credit_amount > 0:
+            raise ValueError("A posting line cannot have both debit and credit amounts")
+        if self.debit_amount == 0 and self.credit_amount == 0:
+            raise ValueError("A posting line must have either debit or credit amount")

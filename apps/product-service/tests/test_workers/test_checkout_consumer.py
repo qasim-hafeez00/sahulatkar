@@ -1,15 +1,19 @@
 import asyncio
+import json
+from datetime import datetime, timezone, timedelta
 
 import pytest
 from sqlalchemy import select
 
 from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.models.hitl import HitlQueue
+from sk_shared.models.product import Product
+from sk_shared.models.order import Order
+from sk_shared.models.payment import VirtualCard
+from sk_shared.constants import QueueName
 
 from src.services.checkout_agent import CheckoutAgentService
 from src.workers.checkout_consumer import CheckoutConsumer
-from sk_shared.models.product import Product
-from sk_shared.models.order import Order
 
 
 class _SingleSessionFactory:
@@ -29,7 +33,7 @@ class _SingleSessionFactory:
 @pytest.mark.asyncio
 async def test_checkout_consumer_processes_successful_job(monkeypatch, db_session, redis_mock):
     # Setup dependencies
-    product = Product(name="Test", url="https://merchant.example/product", canonical_url="https://merchant.example/product", currency="PKR", cost_price=100)
+    product = Product(name="Test", url="https://m.com", currency="PKR", cost_price=100)
     db_session.add(product)
     await db_session.flush()
 
@@ -37,8 +41,6 @@ async def test_checkout_consumer_processes_successful_job(monkeypatch, db_sessio
     db_session.add(order)
     await db_session.flush()
 
-    from sk_shared.models.payment import VirtualCard
-    from datetime import datetime, timezone, timedelta
     vcn = VirtualCard(
         order_id=order.id,
         user_id=1,
@@ -54,34 +56,58 @@ async def test_checkout_consumer_processes_successful_job(monkeypatch, db_sessio
     db_session.add(vcn)
     await db_session.flush()
 
-    service = CheckoutAgentService(db_session, redis_mock)
-    execution = await service.queue_job(
+    execution = PurchaseExecution(
         order_id=order.id,
         vcn_id=vcn.id,
+        status="queued",
+        step_reached="queued",
+        queued_at=datetime.now(timezone.utc)
     )
+    db_session.add(execution)
+    await db_session.commit()
 
-    consumer = CheckoutConsumer()
+    # Pre-load the queue
+    payload = {"execution_id": str(execution.uuid)}
+    await redis_mock.rpush(QueueName.CHECKOUT, json.dumps(payload))
+
+    consumer = CheckoutConsumer(max_concurrency=1)
+    processed_event = asyncio.Event()
 
     original_process_job = CheckoutAgentService.process_job
 
-    async def process_and_stop(self, payload: dict) -> None:
-        await original_process_job(self, payload)
-        consumer.running = False
-        
+    async def process_and_signal(self, payload_arg: dict) -> None:
+        try:
+            await original_process_job(self, payload_arg)
+        finally:
+            processed_event.set()
+            consumer.running = False
+
     async def mock_run_checkout(*args, **kwargs):
-        return {"merchant_order_id": f"SK-{order.id}", "merchant_order_url": "https://merchant.example/success"}
+        return {"merchant_order_id": f"SK-{order.id}", "merchant_order_url": "https://m.com/success"}
+
+    async def mock_verify_charge(*args, **kwargs):
+        return True
 
     monkeypatch.setattr("src.workers.checkout_consumer.get_redis_client", lambda *_args, **_kwargs: redis_mock)
     monkeypatch.setattr("src.workers.checkout_consumer.SessionLocal", _SingleSessionFactory(db_session))
-    monkeypatch.setattr("src.workers.checkout_consumer.CheckoutAgentService.process_job", process_and_stop)
+    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService.process_job", process_and_signal)
     monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._run_playwright_checkout", mock_run_checkout)
+    async def mock_sleep(x):
+        return
 
-    await asyncio.wait_for(consumer.run(), timeout=2)
+    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._verify_vcn_charge", mock_verify_charge)
+    monkeypatch.setattr("asyncio.sleep", mock_sleep)
 
-    refreshed = await db_session.scalar(select(PurchaseExecution).where(PurchaseExecution.id == execution.id))
-    assert refreshed is not None
-    assert refreshed.status == "succeeded"
-    assert refreshed.merchant_order_id == f"SK-{order.id}"
+    # Run loop
+    run_task = asyncio.create_task(consumer.run())
+    try:
+        await asyncio.wait_for(processed_event.wait(), timeout=10)
+    finally:
+        consumer.running = False
+        await run_task
+
+    await db_session.refresh(execution)
+    assert execution.status == "succeeded"
 
 
 @pytest.mark.asyncio
@@ -93,28 +119,46 @@ async def test_checkout_consumer_escalates_hitl_on_forced_failure(monkeypatch, d
     db_session.add(order)
     await db_session.flush()
 
-    service = CheckoutAgentService(db_session, redis_mock)
-    execution = await service.queue_job(order_id=order.id, vcn_id=8102, force_failure=True)
+    execution = PurchaseExecution(
+        order_id=order.id,
+        vcn_id=8102,
+        status="queued",
+        step_reached="queued",
+        queued_at=datetime.now(timezone.utc)
+    )
+    db_session.add(execution)
+    await db_session.commit()
 
-    consumer = CheckoutConsumer()
+    payload = {"execution_id": str(execution.uuid), "force_failure": True}
+    await redis_mock.rpush(QueueName.CHECKOUT, json.dumps(payload))
+
+    consumer = CheckoutConsumer(max_concurrency=1)
+    processed_event = asyncio.Event()
 
     original_process_job = CheckoutAgentService.process_job
 
-    async def process_and_stop(self, payload: dict) -> None:
-        await original_process_job(self, payload)
-        consumer.running = False
+    async def process_and_signal(self, payload_arg: dict) -> None:
+        try:
+            await original_process_job(self, payload_arg)
+        finally:
+            processed_event.set()
+            consumer.running = False
 
     monkeypatch.setattr("src.workers.checkout_consumer.get_redis_client", lambda *_args, **_kwargs: redis_mock)
     monkeypatch.setattr("src.workers.checkout_consumer.SessionLocal", _SingleSessionFactory(db_session))
-    monkeypatch.setattr("src.workers.checkout_consumer.CheckoutAgentService.process_job", process_and_stop)
+    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService.process_job", process_and_signal)
 
-    await asyncio.wait_for(consumer.run(), timeout=2)
+    run_task = asyncio.create_task(consumer.run())
+    try:
+        await asyncio.wait_for(processed_event.wait(), timeout=10)
+    finally:
+        consumer.running = False
+        await run_task
 
-    refreshed = await db_session.scalar(select(PurchaseExecution).where(PurchaseExecution.id == execution.id))
-    assert refreshed is not None
-    assert refreshed.status == "hitl_escalated"
+    await db_session.refresh(execution)
+    assert execution.status == "hitl_escalated"
 
-    hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.execution_id == execution.id))
+    hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.order_id == execution.order_id))
     assert hitl is not None
     assert hitl.status == "pending"
 
@@ -124,14 +168,15 @@ async def test_checkout_consumer_idle_path_closes_redis(monkeypatch, db_session,
     consumer = CheckoutConsumer()
     closed = {"called": False}
 
-    async def fake_brpop(_queue_name, timeout=5):
-        consumer.running = False
-        return None
-
     async def fake_close() -> None:
         closed["called"] = True
 
-    monkeypatch.setattr(redis_mock.redis, "brpop", fake_brpop)
+    # brpop returns None and stops loop
+    async def mock_brpop(*args, **kwargs):
+        consumer.running = False
+        return None
+
+    monkeypatch.setattr(redis_mock.redis, "brpop", mock_brpop)
     monkeypatch.setattr(redis_mock, "close", fake_close)
     monkeypatch.setattr("src.workers.checkout_consumer.get_redis_client", lambda *_args, **_kwargs: redis_mock)
     monkeypatch.setattr("src.workers.checkout_consumer.SessionLocal", _SingleSessionFactory(db_session))

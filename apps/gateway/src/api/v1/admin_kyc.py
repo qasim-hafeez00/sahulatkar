@@ -2,7 +2,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
-from src.schemas.kyc import AdminKycDecisionRequest, KycVerificationResponse
+from src.schemas.kyc import AdminKycDecisionRequest, KycVerificationResponse, KycQueueItemResponse
 from src.services.kyc_queue import KycQueueService
 from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
@@ -10,7 +10,7 @@ from sk_shared.redis_client import RedisClient
 router = APIRouter(prefix="/admin/kyc", tags=["Admin KYC"])
 
 
-@router.get("/queue")
+@router.get("/queue", response_model=list[KycQueueItemResponse])
 async def get_queue(
     current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
     db: AsyncSession = Depends(get_db),

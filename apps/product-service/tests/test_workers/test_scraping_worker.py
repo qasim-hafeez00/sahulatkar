@@ -33,14 +33,15 @@ async def test_scraping_worker_processes_job(monkeypatch, db_session, redis_mock
 
     monkeypatch.setattr("src.services.extraction_waterfall.ExtractionWaterfallService.run_tier3", fake_tier3)
 
-    worker = ScrapingWorker(db_session, redis_mock)
+    worker = ScrapingWorker(redis_mock)
     await worker._process(
         {
-            "job_id": str(job.uuid),
+            "job_id": job.id,
             "input_url": "https://example.com/item",
             "canonical_url": "https://example.com/item",
             "platform": "CUSTOM",
-        }
+        },
+        db_session
     )
 
     await db_session.refresh(job)
@@ -76,21 +77,21 @@ async def test_scraping_worker_retries_then_fails(monkeypatch, db_session, redis
 
     monkeypatch.setattr("src.services.extraction_waterfall.ExtractionWaterfallService.run_tier3", failing_tier3)
 
-    worker = ScrapingWorker(db_session, redis_mock)
+    worker = ScrapingWorker(redis_mock)
     payload = {
-        "job_id": str(job.uuid),
+        "job_id": job.id,
         "input_url": "https://example.com/fail",
         "canonical_url": "https://example.com/fail",
         "platform": "CUSTOM",
     }
 
-    await worker._process(payload)
+    await worker._process(payload, db_session)
     await db_session.refresh(job)
     assert job.status == "retrying"
     assert job.attempt_number == 2
     assert await redis_mock.redis.llen("sk:queue:scraping") == 1
 
-    await worker._process(payload)
+    await worker._process(payload, db_session)
     await db_session.refresh(job)
     assert job.status == "failed"
     assert job.error_code == "EXTRACTION_FAILED"

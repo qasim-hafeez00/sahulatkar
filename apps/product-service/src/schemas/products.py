@@ -20,6 +20,20 @@ class ExtractionPricing(BaseModel):
     amount: Decimal
     currency: str = "PKR"
 
+class ShippingInfo(BaseModel):
+    estimated_cost: Decimal = Decimal("0")
+    estimated_days: str = "unknown"
+    ships_to_pakistan: bool = True
+
+class VariantOption(BaseModel):
+    label: str
+    value: str
+    is_available: bool = True
+
+class VariantGroup(BaseModel):
+    option_name: str
+    options: list[VariantOption] = Field(default_factory=list)
+
 
 class FinancingOffer(BaseModel):
     plan_months: int
@@ -42,6 +56,8 @@ class UpoResponse(BaseModel):
     is_purchasable: bool
     meta: ExtractionMeta
     pricing: ExtractionPricing
+    variants: list[VariantGroup] = Field(default_factory=list)
+    shipping: ShippingInfo | None = None
 
 
 class ExtractResponse(BaseModel):

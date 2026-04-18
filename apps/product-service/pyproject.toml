@@ -17,8 +17,21 @@ dependencies = [
     "beautifulsoup4>=4.12.3",
     "playwright>=1.42.0",
     "playwright-stealth>=1.0.6",
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.24.0",
+    "opentelemetry-sdk>=1.24.0",
+    "opentelemetry-instrumentation-fastapi>=0.45b0",
+    "opentelemetry-exporter-otlp>=1.24.0",
+    "boto3>=1.34.0",
+    "python-multipart>=0.0.9",
+    "python-jose[cryptography]>=3.3.0",
     "sk-shared"
 ]
+
+[project.scripts]
+scraping-worker = "src.workers.scraping_worker:main"
+checkout-worker = "src.workers.checkout_consumer:main"
+event-listener = "src.workers.event_listener:main"
 
 [project.optional-dependencies]
 test = [

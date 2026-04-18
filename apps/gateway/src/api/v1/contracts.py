@@ -110,6 +110,45 @@ async def sign_murabaha(
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
 
+
+
+# --- Admin Routes ---
+
+
+@router.get("/admin/wakalah", response_model=list[AdminContractResponse])
+async def list_wakalah(
+    current_admin: AdminUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(WakalahAgreement).order_by(WakalahAgreement.created_at.desc()).limit(100))
+    return result.scalars().all()
+
+
+@router.get("/admin/murabaha", response_model=list[AdminContractResponse])
+async def list_murabaha(
+    current_admin: AdminUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    result = await db.execute(select(MurabahaContract).order_by(MurabahaContract.created_at.desc()).limit(100))
+    return result.scalars().all()
+
+
+@router.get("/admin/{contract_type}/{contract_id}/pdf")
+async def get_contract_pdf(
+    contract_id: int,
+    contract_type: str,
+    current_admin: AdminUser = Depends(get_current_admin),
+    db: AsyncSession = Depends(get_db),
+):
+    model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
+    contract = await db.scalar(select(model).where(model.id == contract_id))
+    if not contract:
+        raise HTTPException(status_code=404, detail="CONTRACT_NOT_FOUND")
+
+    # In a real app, return a presigned S3 URL
+    return {"pdf_path": contract.contract_pdf_path, "download_url": "https://s3.example.com/placeholder-presigned-url"}
+
+
 @router.get("/{order_id}", response_model=ContractStatusResponse)
 async def get_contract_status(
     order_id: int,
@@ -153,40 +192,3 @@ async def get_contract_status(
         if murabaha
         else None,
     )
-
-
-# --- Admin Routes ---
-
-
-@router.get("/admin/wakalah", response_model=list[AdminContractResponse])
-async def list_wakalah(
-    current_admin: AdminUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(WakalahAgreement).order_by(WakalahAgreement.created_at.desc()).limit(100))
-    return result.scalars().all()
-
-
-@router.get("/admin/murabaha", response_model=list[AdminContractResponse])
-async def list_murabaha(
-    current_admin: AdminUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    result = await db.execute(select(MurabahaContract).order_by(MurabahaContract.created_at.desc()).limit(100))
-    return result.scalars().all()
-
-
-@router.get("/admin/{contract_type}/{contract_id}/pdf")
-async def get_contract_pdf(
-    contract_id: int,
-    contract_type: str,
-    current_admin: AdminUser = Depends(get_current_admin),
-    db: AsyncSession = Depends(get_db),
-):
-    model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
-    contract = await db.scalar(select(model).where(model.id == contract_id))
-    if not contract:
-        raise HTTPException(status_code=404, detail="CONTRACT_NOT_FOUND")
-
-    # In a real app, return a presigned S3 URL
-    return {"pdf_path": contract.contract_pdf_path, "download_url": "https://s3.example.com/placeholder-presigned-url"}

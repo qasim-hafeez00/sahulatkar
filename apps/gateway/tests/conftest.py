@@ -25,6 +25,10 @@ from sk_shared.models import kyc   # registers kyc models with Base.metadata
 from sk_shared.models import product  # registers product models with Base.metadata
 from sk_shared.models import order  # registers order models with Base.metadata
 from sk_shared.models import contracts  # registers contract models with Base.metadata
+from sk_shared.models import hitl       # HitlQueue
+from sk_shared.models import payment    # Loan, Installment, PaymentTransaction, VirtualCard
+from sk_shared.models import delivery   # Shipment, TrackingEvent
+from sk_shared.models import audit      # AuditTrail
 from src.main import app
 from src.config import settings
 

@@ -2,38 +2,77 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import datetime, timezone
+import signal
+import socket
+from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import QueueName, RedisNS, RedisTTL
+from sk_shared.database import SessionLocal
+from sk_shared.models.hitl import HitlQueue
 from sk_shared.models.product import Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
+from src.config import settings
+from src.services.event_publisher import publish_event
 from src.services.extraction_waterfall import ExtractionWaterfallService
 
 
 class ScrapingWorker:
-    def __init__(self, db: AsyncSession, redis: RedisClient, concurrency: int = 1) -> None:
-        self.db = db
+    def __init__(self, redis: RedisClient, max_concurrency: int = 5) -> None:
         self.redis = redis
-        self.concurrency = concurrency
         self.running = True
+        self._sem = asyncio.Semaphore(max_concurrency)
 
     async def run(self) -> None:
+        loop = asyncio.get_event_loop()
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
+        except NotImplementedError:
+            # Signal handlers not supported on this platform/event loop
+            pass
+
         while self.running:
+            # GAP-01: FIFO - brpop pops from RIGHT. Producer lpush to LEFT. Correct.
             job = await self.redis.redis.brpop(QueueName.SCRAPING, timeout=5)
             if job is None:
-                await asyncio.sleep(0)
                 continue
 
-            payload = json.loads(job[1].decode("utf-8"))
-            await self._process(payload)
+            try:
+                payload = json.loads(job[1].decode("utf-8"))
+                # Tasking to semaphore for concurrency
+                asyncio.create_task(self._process_with_sem(payload))
+            except Exception as e:
+                # GAP-12: Send to DLQ
+                await self._send_to_dlq({"raw_data": job[1].decode("utf-8")}, str(e))
 
-    async def _process(self, payload: dict) -> None:
-        scraping_job = await self.db.scalar(select(ScrapingJob).where(ScrapingJob.uuid == UUID(payload["job_id"])))
+    async def _process_with_sem(self, payload: dict) -> None:
+        async with self._sem:
+            try:
+                # Fresh session for each worker task
+                async with SessionLocal() as db:
+                    await self._process(payload, db)
+            except Exception as e:
+                await self._send_to_dlq(payload, str(e))
+
+    async def _send_to_dlq(self, payload: dict, error: str) -> None:
+        dlq_entry = {
+            **payload, 
+            "dlq_error": error, 
+            "dlq_at": datetime.now(timezone.utc).isoformat(),
+            "worker": socket.gethostname()
+        }
+        await self.redis.lpush(f"sk:queue:dlq:{QueueName.SCRAPING}", json.dumps(dlq_entry))
+
+    async def _process(self, payload: dict, db: AsyncSession) -> None:
+        job_id = payload.get("job_id")
+        if not job_id:
+            raise ValueError("No job_id in payload")
+        scraping_job = await db.scalar(select(ScrapingJob).where(ScrapingJob.id == job_id))
         if scraping_job is None:
             return
         if scraping_job.status in {"completed", "failed"}:
@@ -41,7 +80,7 @@ class ScrapingWorker:
 
         scraping_job.status = "running"
         scraping_job.started_at = datetime.now(timezone.utc)
-        await self.db.flush()
+        await db.flush()
 
         service = ExtractionWaterfallService()
         result = await service.run_tier3(payload["canonical_url"], payload.get("platform", "CUSTOM"))
@@ -53,14 +92,28 @@ class ScrapingWorker:
             if scraping_job.attempt_number < scraping_job.max_attempts:
                 scraping_job.attempt_number += 1
                 scraping_job.status = "retrying"
-                await self.db.commit()
-                await self.redis.rpush(QueueName.SCRAPING, json.dumps(payload))
+                await db.commit()
+                # GAP-01: Re-queue at the front (FIFO) or back? 
+                # FIFO means lpush to left. Correct.
+                await self.redis.lpush(QueueName.SCRAPING, json.dumps(payload))
                 return
 
             scraping_job.status = "failed"
             scraping_job.error_code = result.error_code
             scraping_job.error_message = result.error_message
-            await self.db.commit()
+            
+            # GAP-11: HITL Escalation for Scraper
+            if settings.FEATURE_HITL_ESCALATION and scraping_job.order_id:
+                hitl = HitlQueue(
+                    order_id=scraping_job.order_id,
+                    priority=3,
+                    status="pending",
+                    failure_reason=f"Scraping failed after {scraping_job.max_attempts} attempts: {result.error_message}",
+                    sla_deadline=datetime.now(timezone.utc) + timedelta(minutes=settings.HITL_SLA_MINUTES),
+                )
+                db.add(hitl)
+
+            await db.commit()
             return
 
         product = Product(
@@ -77,8 +130,18 @@ class ScrapingWorker:
             extraction_method=result.method,
             extraction_confidence=result.confidence,
         )
-        self.db.add(product)
-        await self.db.flush()
+        db.add(product)
+        await db.flush()
+
+        if hasattr(settings, "DATABASE_URL") and "postgresql" in str(settings.DATABASE_URL).lower():
+            await db.execute(
+                text("""
+                    UPDATE products
+                    SET search_vector = to_tsvector('english', coalesce(name, '') || ' ' || coalesce(canonical_url, ''))
+                    WHERE id = :id
+                """),
+                {"id": product.id}
+            )
 
         scraping_job.product_id = product.id
         scraping_job.status = "completed"
@@ -90,7 +153,20 @@ class ScrapingWorker:
             "confidence": str(result.confidence),
         }
         scraping_job.completed_at = datetime.now(timezone.utc)
-        await self.db.commit()
+        await db.commit()
+
+        # GAP-04: product.extracted event
+        await publish_event(
+            redis=self.redis,
+            event="product.extracted",
+            payload={
+                "order_id": scraping_job.order_id,
+                "product_id": str(product.uuid),
+                "title": product.name,
+                "price": str(product.cost_price),
+                "is_async": True,
+            }
+        )
 
         await self.redis.set_json(
             f"{RedisNS.PRODUCT_UPO}:{product.uuid}",

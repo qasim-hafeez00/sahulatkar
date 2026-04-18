@@ -1,16 +1,27 @@
 from __future__ import annotations
 
 from datetime import date
+import logging
+from uuid import uuid4
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import Installment
+from sk_shared.redis_client import RedisClient
+from src.billing.overdue_processor import OverdueProcessor
+
+
+logger = logging.getLogger(__name__)
 
 
 class BillingSweepService:
-    def __init__(self, db_session: AsyncSession) -> None:
+    LOCK_KEY = "ledger:billing_sweep:lock"
+    LOCK_TTL_SECONDS = 3600
+
+    def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
+        self.redis = redis
 
     async def load_due_installments(self, as_of: date | None = None, limit: int = 500) -> list[Installment]:
         due_date = as_of or date.today()
@@ -44,31 +55,69 @@ class BillingSweepService:
         import httpx
         from src.config import settings
         from src.services.accounting_service import AccountingService
+        from src.services.late_fee_service import LateFeeService
 
-        installments = await self.load_due_installments(as_of=as_of)
-        stats = {"total": len(installments), "success": 0, "failed": 0, "already_paid": 0}
-        accounting = AccountingService(self.db)
+        run_date = as_of or date.today()
+        lock_owner: str | None = None
+        if self.redis is not None:
+            lock_owner = uuid4().hex
+            acquired = await self.redis.redis.set(self.LOCK_KEY, lock_owner, ex=self.LOCK_TTL_SECONDS, nx=True)
+            if not acquired:
+                logger.warning("Billing sweep lock already held; skipping run")
+                return {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
 
-        async with httpx.AsyncClient(timeout=10.0) as client:
-            for inst in installments:
-                try:
-                    resp = await client.post(
-                        f"{settings.payment_service_url}/api/v1/payments/internal/trigger-installment",
-                        json={"installment_id": inst.id, "method": "jazzcash"} # Trigger auto-debit
-                    )
-                    if resp.status_code == 200:
-                        data = resp.json()
-                        if data["status"] == "success":
-                            # Payment was successful, record it in ledger
-                            await accounting.record_installment_paid(inst.id, inst.total_amount)
-                            stats["success"] += 1
-                        elif data["status"] == "already_paid":
-                            stats["already_paid"] += 1
+        try:
+            installments = await self.load_due_installments(as_of=run_date)
+            stats = {"total": len(installments), "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
+            accounting = AccountingService(self.db)
+            overdue_processor = OverdueProcessor(self.db)
+            late_fee_service = LateFeeService(self.db)
+
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                for inst in installments:
+                    try:
+                        resp = await client.post(
+                            f"{settings.payment_service_url}/api/v1/payments/internal/trigger-installment",
+                            json={"installment_id": inst.id, "method": "jazzcash"},
+                            headers={"X-Internal-Token": settings.internal_api_token},
+                        )
+                        if resp.status_code == 200:
+                            data = resp.json()
+                            if data["status"] == "success":
+                                # Payment was successful, record it in ledger
+                                await accounting.record_installment_paid(inst.id, inst.total_amount)
+                                stats["success"] += 1
+                            elif data["status"] == "already_paid":
+                                stats["already_paid"] += 1
+                            else:
+                                stats["failed"] += 1
                         else:
                             stats["failed"] += 1
-                    else:
+                    except Exception:
                         stats["failed"] += 1
-                except Exception:
-                    stats["failed"] += 1
+                        logger.exception("Billing sweep installment trigger failed", extra={"installment_id": inst.id, "loan_id": inst.loan_id})
 
-        return stats
+            overdue_candidates = await overdue_processor.find_newly_overdue(as_of=run_date)
+            overdue_ids = [inst.id for inst in overdue_candidates]
+            stats["newly_overdue"] = await overdue_processor.mark_overdue_batch(overdue_ids, as_of=run_date)
+
+            if stats["newly_overdue"] > 0:
+                refreshed_stmt = select(Installment).where(Installment.id.in_(overdue_ids), Installment.status == "overdue")
+                overdue_rows = (await self.db.execute(refreshed_stmt)).scalars().all()
+                for overdue_inst in overdue_rows:
+                    late_fee = overdue_processor.compute_late_fee_amount(overdue_inst, overdue_inst.days_overdue)
+                    if late_fee > 0:
+                        result = await late_fee_service.apply_late_fee_to_installment(overdue_inst.id, late_fee)
+                        if result["status"] == "applied":
+                            stats["late_fees_applied"] += 1
+
+            return stats
+        finally:
+            if self.redis is not None and lock_owner is not None:
+                current_owner = await self.redis.get(self.LOCK_KEY)
+                # Normalize: redis.get() may return bytes or str depending on client config
+                if current_owner is not None:
+                    if isinstance(current_owner, bytes):
+                        current_owner = current_owner.decode("utf-8")
+                    if current_owner == lock_owner:
+                        await self.redis.delete(self.LOCK_KEY)

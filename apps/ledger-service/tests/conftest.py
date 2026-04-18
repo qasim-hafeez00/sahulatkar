@@ -1,17 +1,20 @@
+import os
 import asyncio
 import pytest
-from httpx import AsyncClient
+import fakeredis.aioredis
+from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from sk_shared.models.base import Base
+from sk_shared.redis_client import RedisClient
 from src.main import app
 from src.core.database import get_db
+from src.core.dependencies import get_redis
 
-# Use in-memory SQLite for tests
-DATABASE_URL = "sqlite+aiosqlite:///:memory:"
+TEST_DATABASE_URL = os.getenv("LEDGER_TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 
 @pytest.fixture(scope="session")
 def event_loop():
@@ -21,11 +24,12 @@ def event_loop():
 
 @pytest.fixture(scope="function")
 async def engine():
-    engine = create_async_engine(
-        DATABASE_URL,
-        connect_args={"check_same_thread": False},
-        poolclass=StaticPool,
-    )
+    engine_kwargs = {"echo": False}
+    if TEST_DATABASE_URL.startswith("sqlite"):
+        engine_kwargs["connect_args"] = {"check_same_thread": False}
+        engine_kwargs["poolclass"] = StaticPool
+
+    engine = create_async_engine(TEST_DATABASE_URL, **engine_kwargs)
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     
@@ -41,13 +45,24 @@ async def db_session(engine):
         yield session
         await session.rollback()
 
+
 @pytest.fixture
-async def client(db_session):
+async def redis_mock() -> RedisClient:
+    return RedisClient(fakeredis.aioredis.FakeRedis())
+
+@pytest.fixture
+async def client(db_session, redis_mock):
     def override_get_db():
         yield db_session
 
+    def override_get_redis():
+        return redis_mock
+
     app.dependency_overrides[get_db] = override_get_db
-    async with AsyncClient(app=app, base_url="http://test") as ac:
+    app.dependency_overrides[get_redis] = override_get_redis
+    app.state.redis = redis_mock
+    transport = ASGITransport(app=app)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
         yield ac
     app.dependency_overrides.clear()
 

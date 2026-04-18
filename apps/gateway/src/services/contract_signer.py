@@ -185,6 +185,45 @@ class ContractSignerService:
                 reason="murabaha_signed",
             )
         )
+        
+        # P3-2: Automate Loan and Installment creation natively
+        from sk_shared.models.payment import Loan, Installment
+        from datetime import timedelta
+        import uuid
+        
+        principal_amt = float(contract.cost_price - float(order.down_payment_amount or 0))
+        loan = Loan(
+            order_id=order.id,
+            user_id=user_id,
+            murabaha_contract_id=contract.id,
+            loan_number=f"L-{datetime.now(timezone.utc).year}-{uuid.uuid4().hex[:8].upper()}",
+            principal_amount=principal_amt,
+            profit_amount=float(contract.profit_amount),
+            total_repayable=float(contract.total_sale_price) - float(order.down_payment_amount or 0),
+            down_payment_amount=float(order.down_payment_amount or 0),
+            balance_financed=principal_amt,
+            profit_rate_pct=float(contract.profit_rate_pct),
+            plan_type="murabaha",
+            installment_count=contract.installment_count,
+            installment_amount=(float(contract.total_sale_price) - float(order.down_payment_amount or 0)) / contract.installment_count,
+            status="active"
+        )
+        db.add(loan)
+        await db.flush()  # to get loan.id
+        
+        for sched in contract.installment_schedule:
+            inst = Installment(
+                loan_id=loan.id,
+                user_id=user_id,
+                installment_number=sched["installment_no"],
+                is_down_payment=False,
+                principal_portion=principal_amt / contract.installment_count,
+                profit_portion=float(contract.profit_amount) / contract.installment_count,
+                total_amount=float(sched["amount"]),
+                due_date=(datetime.now(timezone.utc) + timedelta(days=30 * sched["installment_no"])).date(),
+                status="pending"
+            )
+            db.add(inst)
 
         await db.commit()
         await db.refresh(contract)

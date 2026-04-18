@@ -39,6 +39,9 @@ class RedisClient:
     async def rpush(self, key: str, value: str) -> None:
         await self.redis.rpush(key, value)
 
+    async def lpush(self, key: str, value: str) -> None:
+        await self.redis.lpush(key, value)
+
     async def close(self) -> None:
         await self.redis.close()
 

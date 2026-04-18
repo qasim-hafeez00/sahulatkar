@@ -94,7 +94,10 @@ async def db_session() -> AsyncGenerator[AsyncSession, None]:
 
 @pytest.fixture
 def user_header() -> dict[str, str]:
-    return {"x-user-id": "101"}
+    return {
+        "x-user-id": "101",
+        "X-Internal-Service-Token": "dev-secret-token"
+    }
 
 
 def make_job_payload(job_id: uuid.UUID, canonical_url: str, platform: str = "CUSTOM") -> dict:

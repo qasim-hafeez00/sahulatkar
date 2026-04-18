@@ -20,7 +20,7 @@ import pyotp
 class AuthService:
     @staticmethod
     async def initiate_registration(req: RegisterInitiateRequest, db: AsyncSession, redis: RedisClient) -> RegisterInitiateResponse:
-        result = await db.execute(select(User).where(User.phone == req.phone, User.deleted_at == None))
+        result = await db.execute(select(User).where(User.phone == req.phone, User.deleted_at.is_(None)))
         if result.scalar_one_or_none():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="PHONE_ALREADY_REGISTERED")
             
@@ -28,8 +28,14 @@ class AuthService:
         otp_token = str(uuid.uuid4())
         hashed_otp = hash_otp(otp)
         
+        import json
+        payload = {
+            "phone": req.phone,
+            "first_name": req.first_name,
+            "last_name": req.last_name
+        }
         await redis.set(f"sk:auth:otp:{req.phone}:register", hashed_otp, settings.OTP_TTL)
-        await redis.set(f"sk:auth:token:{otp_token}", req.phone, settings.OTP_TTL)
+        await redis.set(f"sk:auth:token:{otp_token}", json.dumps(payload), settings.OTP_TTL)
         
         # Format masked phone
         masked_phone = req.phone[:5] + "******" + req.phone[-2:] if len(req.phone) >= 11 else "******"
@@ -37,9 +43,20 @@ class AuthService:
 
     @staticmethod
     async def verify_otp(req: VerifyOtpRequest, db: AsyncSession, redis: RedisClient) -> AuthResponse:
-        phone = await redis.get(f"sk:auth:token:{req.otp_token}")
-        if not phone:
+        import json
+        raw_payload = await redis.get(f"sk:auth:token:{req.otp_token}")
+        if not raw_payload:
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="OTP_EXPIRED")
+        
+        try:
+            token_data = json.loads(raw_payload)
+            phone = token_data.get("phone")
+            first_name = token_data.get("first_name", "")
+            last_name = token_data.get("last_name", "")
+        except Exception:
+            phone = raw_payload
+            first_name = ""
+            last_name = ""
             
         attempts_key = f"sk:auth:otp_attempts:{phone}"
         attempts = await redis.get(attempts_key)
@@ -53,23 +70,42 @@ class AuthService:
         if stored_hash != hash_otp(req.otp_code):
             await redis.incr(attempts_key)
             await redis.expire(attempts_key, settings.OTP_ATTEMPTS_TTL)
+            
+            result = await db.execute(select(User).where(User.phone == phone))
+            fail_user = result.scalar_one_or_none()
+            if fail_user:
+                fail_user.failed_login_attempts = (fail_user.failed_login_attempts or 0) + 1
+                if fail_user.failed_login_attempts >= 5:
+                    fail_user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                await db.commit()
+                
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_OTP")
             
         # Success - find or create user
         result = await db.execute(select(User).where(User.phone == phone))
         user = result.scalar_one_or_none()
         if not user:
-            # Here we just create a minimal user, full creation should have captured first/last earlier,
-            # For simplicity, assuming user is created
             user = User(
                 uuid=uuid.uuid4(),
                 phone=phone,
+                first_name=first_name,
+                last_name=last_name,
                 status="pending_kyc"
             )
             db.add(user)
             await db.commit()
             await db.refresh(user)
 
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        
+        from sqlalchemy import update
+        await db.execute(
+            update(UserSession)
+            .where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+        
         # Clear OTP
         await redis.delete(f"sk:auth:otp:{phone}:register")
         await redis.delete(f"sk:auth:token:{req.otp_token}")
@@ -117,8 +153,10 @@ class AuthService:
             
         # Verify TOTP
         if admin.mfa_enabled and admin.mfa_secret_encrypted:
-            # Simplified mock for TOTP verification
-            totp = pyotp.TOTP(admin.mfa_secret_encrypted.decode('utf-8'))
+            from src.core.kms import KMSProvider
+            kms = KMSProvider()
+            decrypted_secret = kms.decrypt(admin.mfa_secret_encrypted)
+            totp = pyotp.TOTP(decrypted_secret)
             if not totp.verify(req.totp_code):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
                 
@@ -149,13 +187,38 @@ class AuthService:
         if not user:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
             
-        if not user.password_hash or not verify_password(req.password, user.password_hash):
-             # For security, we might want to increment failed attempts here
-             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
-             
         if user.locked_until and user.locked_until > datetime.now(timezone.utc):
              raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
 
+        if req.otp_code:
+            stored_hash = await redis.get(f"sk:auth:otp:{req.phone}:login")
+            if not stored_hash or stored_hash != hash_otp(req.otp_code):
+                user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+                if user.failed_login_attempts >= 5:
+                    user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                await db.commit()
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+            await redis.delete(f"sk:auth:otp:{req.phone}:login")
+        elif req.password:
+            if not user.password_hash or not verify_password(req.password, user.password_hash):
+                user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
+                if user.failed_login_attempts >= 5:
+                    user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                await db.commit()
+                raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
+        else:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="Must provide password or otp_code")
+
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        
+        from sqlalchemy import update
+        await db.execute(
+            update(UserSession)
+            .where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+        
         # Generate tokens
         acc_token = create_access_token({"user_id": user.id}, settings.JWT_PRIVATE_KEY, timedelta(seconds=settings.JWT_ACCESS_TTL))
         ref_token = create_access_token({"user_id": user.id, "type": "refresh"}, settings.JWT_PRIVATE_KEY, timedelta(seconds=settings.JWT_REFRESH_TTL))

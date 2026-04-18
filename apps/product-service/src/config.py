@@ -32,6 +32,17 @@ class Settings(BaseSettings):
     CHECKOUT_MAX_RETRIES: int = 3
     HITL_SLA_MINUTES: int = 15
 
+    AWS_REGION: str = "ap-south-1"
+    S3_BUCKET_SCREENSHOTS: str = "sk-screenshots-dev"
+    INTERNAL_SERVICE_TOKEN: str = "dev-secret-token"
+    JWT_PUBLIC_KEY: str = ""
+
+    @property
+    def cors_allow_origins_list(self) -> List[str]:
+        if self.ENVIRONMENT == "local":
+            return ["*"]
+        return ["https://api.sahulatkar.com", "https://gateway.sahulatkar.internal"]
+
     CORS_ALLOW_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")

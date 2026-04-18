@@ -39,6 +39,20 @@ class KycVerificationResponse(BaseModel):
     cnic_back_image_url: Optional[str]
     liveness_video_url: Optional[str]
     rejection_reason: Optional[str]
+    attempt_number: int = 1
+    nadra_verified_at: Optional[datetime] = None
+    rejection_code: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+class KycQueueItemResponse(BaseModel):
+    id: int
+    user_id: int
+    status: KycStatus
+    attempt_number: int
+    created_at: datetime
+    updated_at: datetime
 
     class Config:
         from_attributes = True

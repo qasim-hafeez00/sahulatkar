@@ -61,8 +61,11 @@ class KycQueueService:
         if approved:
             kyc.status = KycStatus.APPROVED
             user = (
-                await self.db.execute(select(User).where(User.id == kyc.user_id, User.deleted_at == None))  # noqa: E711
+                await self.db.execute(select(User).where(User.id == kyc.user_id, User.deleted_at.is_(None)))
             ).scalar_one_or_none()
+
+            if user:
+                user.status = "active"
 
             if self.redis and user:
                 job = {
