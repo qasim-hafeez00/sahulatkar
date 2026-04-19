@@ -103,6 +103,14 @@ async def resubmit_kyc(
     kyc.cnic_back_image_url = None
     kyc.liveness_video_url = None
     
+    # TASK-13: Clear stale NADRA/Shufti verification data on resubmit
+    if hasattr(kyc, "nadra_verification_data"):
+        kyc.nadra_verification_data = None
+    if hasattr(kyc, "nadra_verified_at"):
+        kyc.nadra_verified_at = None
+    if hasattr(kyc, "shufti_verification_data"):
+        kyc.shufti_verification_data = None
+    
     from sqlalchemy import delete
     from sk_shared.models.kyc import KycVerificationQueue
     

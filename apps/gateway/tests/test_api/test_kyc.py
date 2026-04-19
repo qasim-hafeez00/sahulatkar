@@ -337,7 +337,9 @@ async def test_kyc_resubmit_clears_stale_queue(client: AsyncClient, test_user, t
             status=KycStatus.REJECTED,
             cnic_front_image_url="/tmp/f.jpg",
             cnic_back_image_url="/tmp/b.jpg",
-            liveness_video_url="/tmp/v.mp4"
+            liveness_video_url="/tmp/v.mp4",
+            nadra_verification_data={"verified": True},
+            shufti_verification_data={"ocr": {"ok": True}},
         )
         session.add(kyc)
         await session.flush()
@@ -353,6 +355,12 @@ async def test_kyc_resubmit_clears_stale_queue(client: AsyncClient, test_user, t
     # 3. Verify queue entry is GONE
     r_queue = await client.get("/api/v1/admin/kyc/queue", headers=_auth(admin_token))
     assert r_queue.json() == []
+
+    # 4. Verify stale verification data is cleared on resubmit
+    async with TestingSessionLocal() as session:
+        refreshed = await session.scalar(select(UserKycVerification).where(UserKycVerification.user_id == user.id))
+        assert refreshed.nadra_verification_data is None
+        assert refreshed.shufti_verification_data is None
 
 async def test_profile_cnic_decryption_fallback(client: AsyncClient, test_user, db_session):
     """Verify that if decryption fails, we fallback to UTF-8 decode or empty string."""

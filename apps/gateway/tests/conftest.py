@@ -212,12 +212,12 @@ async def test_user(redis_mock: RedisClient):
 async def test_admin(redis_mock: RedisClient):
     """Seed an admin user and return (admin, access_token)."""
     from sk_shared.models.auth import AdminUser
-    from sk_shared.security import get_password_hash
     async with TestingSessionLocal() as session:
         admin = AdminUser(
             uuid=uuid.uuid4(),
             email="admin@test.com",
-            password_hash=get_password_hash("S3cr3t!"),
+            # Password hash is not used by token-based admin fixtures.
+            password_hash="fixture-not-used",
             mfa_enabled=False,
         )
         session.add(admin)

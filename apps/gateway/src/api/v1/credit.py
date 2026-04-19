@@ -70,3 +70,51 @@ async def credit_status(
         "assessment_status": assessment_status,
         "next_review_date": next_review_date,
     }
+
+
+# ============================================================================
+# TASK-23: Credit History Endpoint
+# ============================================================================
+
+from fastapi import Query
+
+@router.get("/history")
+async def credit_history(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Endpoint for customers to view their credit limit history"""
+    from sqlalchemy import func
+    
+    offset = (page - 1) * limit
+    rows = (await db.execute(
+        select(CreditLimitHistory)
+        .where(CreditLimitHistory.user_id == current_user.id)
+        .order_by(CreditLimitHistory.created_at.desc())
+        .offset(offset).limit(limit)
+    )).scalars().all()
+    
+    total = await db.scalar(
+        select(func.count()).select_from(
+            select(CreditLimitHistory).where(CreditLimitHistory.user_id == current_user.id).subquery()
+        )
+    )
+    
+    return {
+        "items": [
+            {
+                "id": r.id,
+                "previous_limit": float(r.previous_limit or 0),
+                "new_limit": float(r.new_limit or 0),
+                "available_before": float(r.available_before or 0),
+                "available_after": float(r.available_after or 0),
+                "reason": r.reason,
+                "changed_by": r.changed_by,
+                "created_at": r.created_at.isoformat() if r.created_at else None,
+            }
+            for r in rows
+        ],
+        "pagination": {"page": page, "limit": limit, "total": int(total or 0)},
+    }

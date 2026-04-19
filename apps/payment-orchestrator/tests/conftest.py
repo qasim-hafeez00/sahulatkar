@@ -8,6 +8,8 @@ from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import Request
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import BigInteger
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
 from sk_shared.models import auth, contracts, order, payment, product, kyc  # register models
@@ -19,6 +21,13 @@ from src.config import settings
 from src.core.dependencies import get_db as service_get_db
 from src.core.dependencies import get_redis
 from src.main import app
+
+
+# SQLite only auto-generates PK values for INTEGER PRIMARY KEY.
+# Shared models use BigInteger PKs, so compile them as INTEGER in tests.
+@compiles(BigInteger, "sqlite")
+def _compile_bigint_sqlite(_type, _compiler, **_kw):
+    return "INTEGER"
 
 
 def generate_test_keys() -> tuple[str, str]:
@@ -35,7 +44,11 @@ def generate_test_keys() -> tuple[str, str]:
     return private_pem.decode("utf-8"), public_pem.decode("utf-8")
 
 
-test_engine = create_async_engine("sqlite+aiosqlite:///./payment_orchestrator_test.db", echo=False)
+TEST_DB_PATH = "./payment_orchestrator_test.db"
+test_engine = create_async_engine(
+    f"sqlite+aiosqlite:///{TEST_DB_PATH}",
+    echo=False,
+)
 TestingSessionLocal = async_sessionmaker(autocommit=False, autoflush=False, bind=test_engine, expire_on_commit=False)
 
 
@@ -74,6 +87,7 @@ def override_dependencies(redis_mock: RedisClient):
 @pytest.fixture(autouse=True)
 async def db_setup():
     async with test_engine.begin() as conn:
+        await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
     yield
     async with test_engine.begin() as conn:

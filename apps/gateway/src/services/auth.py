@@ -172,12 +172,30 @@ class AuthService:
         if admin.mfa_enabled and admin.mfa_secret_encrypted:
             if not req.totp_code:
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="TOTP_CODE_REQUIRED")
+            
+            # TASK-16 FIX: Add TOTP attempt lockout (max 5 failed attempts)
+            totp_fail_key = f"sk:auth:admin_totp_fail:{admin.id}"
+            fail_count_str = await redis.get(totp_fail_key)
+            fail_count = int(fail_count_str) if fail_count_str else 0
+            
+            if fail_count >= 5:
+                raise HTTPException(
+                    status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                    detail="TOTP_LOCKED_TOO_MANY_ATTEMPTS",
+                )
+            
             from src.core.kms import KMSProvider
             kms = KMSProvider()
             decrypted_secret = kms.decrypt(admin.mfa_secret_encrypted)
             totp = pyotp.TOTP(decrypted_secret)
             if not totp.verify(req.totp_code):
+                # Increment failure counter with 15-minute expiry
+                await redis.incr(totp_fail_key)
+                await redis.expire(totp_fail_key, 900)  # 15 minutes
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid TOTP code")
+            
+            # Clear failure counter on successful verification
+            await redis.delete(totp_fail_key)
 
                 
         # Fetch actual role and permissions

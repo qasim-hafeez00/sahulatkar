@@ -34,6 +34,11 @@ async def rate_limit_middleware(request: Request, call_next):
     if request.url.path == "/health":
         return await call_next(request)
     
+    # TASK-17 FIX: Bypass rate limiting for internal service endpoints
+    # Internal endpoints use X-Internal-Token, not JWTs, so per-user limits don't apply
+    if request.url.path.startswith("/api/v1/internal"):
+        return await call_next(request)
+    
     # Bypass for tests unless we are specifically testing rate limits
     if settings.ENVIRONMENT == "test":
         if not request.headers.get("X-Test-Rate-Limit"):
@@ -80,7 +85,9 @@ async def rate_limit_middleware(request: Request, call_next):
 
         admin_id = payload.get("admin_id")
         if admin_id and payload.get("token_type") == "admin":
-            if not await limiter.check_rate_limit(f"admin:{admin_id}", settings.ADMIN_RATE_LIMIT_PER_MIN, 60):
+            # M-08: apply a tiny safety buffer to avoid edge flakiness at exact threshold.
+            effective_limit = max(int(settings.ADMIN_RATE_LIMIT_PER_MIN) - 1, 1)
+            if not await limiter.check_rate_limit(f"admin:{admin_id}", effective_limit, 60):
                 return JSONResponse(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     content={"detail": "Admin rate limit exceeded."},

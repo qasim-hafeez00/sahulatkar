@@ -209,7 +209,20 @@ async def assign_admin_role(
 async def list_roles(
     current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
 ) -> dict:
-    all_roles = ["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"]
+    all_roles = [
+        "super_admin",
+        "risk_officer",
+        "kyc_reviewer",
+        "analyst",
+        "support",
+        "operations_manager",
+        "credit_risk_analyst",
+        "fraud_analyst",
+        "cs_agent",
+        "finance_analyst",
+        "compliance_officer",
+        "marketing_manager",
+    ]
     return {
         "roles": [
             {"name": role, "permissions": RBACService.get_role_permissions(role)}

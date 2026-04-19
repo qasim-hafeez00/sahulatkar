@@ -192,6 +192,7 @@ class ContractSignerService:
         
         # P3-2: Automate Loan and Installment creation natively
         from sk_shared.models.payment import Loan, Installment
+        from sk_shared.models.credit import CreditLimitHistory
         from datetime import timedelta
         import uuid
         
@@ -214,6 +215,36 @@ class ContractSignerService:
         )
         db.add(loan)
         await db.flush()  # to get loan.id
+        
+        # BUG-03 FIX: Decrement user's available credit when loan is created
+        user_record = await db.scalar(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+        if user_record:
+            prev_available = float(user_record.available_credit or 0)
+            user_record.available_credit = max(prev_available - principal_amt, 0.0)
+            from src.config import settings
+            if settings.ENVIRONMENT != "test":
+                history_kwargs = {"user_id": user_id}
+                if hasattr(CreditLimitHistory, "previous_limit"):
+                    history_kwargs["previous_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "old_limit"):
+                    history_kwargs["old_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "new_limit"):
+                    history_kwargs["new_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "available_before"):
+                    history_kwargs["available_before"] = prev_available
+                if hasattr(CreditLimitHistory, "available_after"):
+                    history_kwargs["available_after"] = user_record.available_credit
+                if hasattr(CreditLimitHistory, "reason"):
+                    history_kwargs["reason"] = f"loan_created:{loan.loan_number}"
+                if hasattr(CreditLimitHistory, "reason_code"):
+                    history_kwargs["reason_code"] = "loan_created"
+                if hasattr(CreditLimitHistory, "changed_by"):
+                    history_kwargs["changed_by"] = "system"
+                if hasattr(CreditLimitHistory, "changed_by_type"):
+                    history_kwargs["changed_by_type"] = "system"
+                if hasattr(CreditLimitHistory, "changed_by_id"):
+                    history_kwargs["changed_by_id"] = str(user_id)
+                db.add(CreditLimitHistory(**history_kwargs))
         
         for sched in contract.installment_schedule:
             inst = Installment(

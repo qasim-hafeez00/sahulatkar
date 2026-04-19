@@ -155,3 +155,107 @@ async def get_admin_order_detail(
         },
         "created_at": _iso(row["created_at"]),
     }
+
+
+# ============================================================================
+# TASK-20: Admin Manual Order Status Override
+# ============================================================================
+
+from pydantic import BaseModel, Field
+from fastapi import HTTPException, status, Request
+from datetime import datetime, timezone
+from src.core.audit import record_audit_event
+
+
+class AdminOrderStatusRequest(BaseModel):
+    status: str = Field(..., min_length=1, max_length=50)
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+@router.put("/{order_id}/status")
+async def admin_override_order_status(
+    order_id: int,
+    payload: AdminOrderStatusRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Admin endpoint to manually override order status for HITL resolution"""
+    from sk_shared.models.order import OrderStatusHistory
+    
+    order = await db.scalar(
+        select(Order).where(Order.id == order_id, Order.deleted_at.is_(None))
+    )
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+    
+    old_status = order.status
+    order.status = payload.status
+    
+    db.add(OrderStatusHistory(
+        order_id=order_id,
+        from_status=old_status,
+        to_status=payload.status,
+        reason=f"admin_override:{payload.reason}",
+    ))
+    
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_orders",
+        action="status_override",
+        target_id=order_id,
+        changes={
+            "from_status": old_status,
+            "to_status": payload.status,
+            "reason": payload.reason,
+        },
+    )
+    
+    await db.commit()
+    return {"order_id": order_id, "status": payload.status, "previous_status": old_status}
+
+
+# ============================================================================
+# TASK-21: Admin Order Installments View
+# ============================================================================
+
+@router.get("/{order_id}/installments")
+async def get_order_installments(
+    order_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Admin endpoint to view all installments for an order's loan"""
+    q = text("""
+        SELECT i.id, i.installment_number, i.total_amount, i.due_date,
+               i.status, i.paid_at, i.days_overdue, i.late_fee_amount,
+               l.loan_number, l.id as loan_id
+        FROM installments i
+        JOIN loans l ON i.loan_id = l.id
+        WHERE l.order_id = :order_id AND i.deleted_at IS NULL
+        ORDER BY i.installment_number ASC
+    """)
+    try:
+        rows = (await db.execute(q, {"order_id": order_id})).mappings().all()
+    except Exception:
+        rows = []
+    
+    return {
+        "order_id": order_id,
+        "installments": [
+            {
+                "id": dict(r)["id"],
+                "number": dict(r)["installment_number"],
+                "amount": float(dict(r)["total_amount"]),
+                "due_date": _iso(dict(r)["due_date"]),
+                "status": dict(r)["status"],
+                "paid_at": _iso(dict(r)["paid_at"]) if dict(r)["paid_at"] else None,
+                "days_overdue": dict(r)["days_overdue"],
+                "late_fee": float(dict(r)["late_fee_amount"] or 0),
+                "loan_number": dict(r)["loan_number"],
+            }
+            for r in rows
+        ],
+    }

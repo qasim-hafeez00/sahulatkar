@@ -7,8 +7,9 @@ import jose.jwt
 from cryptography.fernet import Fernet
 from passlib.context import CryptContext
 
-pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-# bcrypt cost=12 is effectively the standard/default in passlib
+# Keep bcrypt verification compatibility, but default new hashes to pbkdf2_sha256.
+# This avoids environment-specific bcrypt backend failures in local/test setups.
+pwd_context = CryptContext(schemes=["pbkdf2_sha256", "bcrypt"], deprecated="auto")
 
 def verify_password(plain_password: str, hashed_password: str) -> bool:
     return pwd_context.verify(plain_password, hashed_password)

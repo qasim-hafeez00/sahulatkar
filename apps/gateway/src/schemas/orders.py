@@ -38,6 +38,7 @@ class OrderSummary(BaseModel):
     status: str
     total_amount: float
     down_payment_amount: Optional[float] = None
+    installment_count: Optional[int] = None
     created_at: datetime
 
 

@@ -21,8 +21,18 @@ class AdminLoginResponse(BaseModel):
 class CreateAdminRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
-    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
+    # TASK-19: Sync with full RBAC role map
+    role: Literal[
+        "super_admin", "risk_officer", "kyc_reviewer", "analyst", "support",
+        "operations_manager", "credit_risk_analyst", "fraud_analyst", "cs_agent",
+        "finance_analyst", "compliance_officer", "marketing_manager"
+    ] = "analyst"
 
 
 class AssignRoleRequest(BaseModel):
-    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
+    # TASK-19: Sync with full RBAC role map
+    role: Literal[
+        "super_admin", "risk_officer", "kyc_reviewer", "analyst", "support",
+        "operations_manager", "credit_risk_analyst", "fraud_analyst", "cs_agent",
+        "finance_analyst", "compliance_officer", "marketing_manager"
+    ] = "analyst"

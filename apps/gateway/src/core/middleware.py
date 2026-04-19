@@ -1,7 +1,10 @@
 import uuid
 import time
+from urllib.parse import urlparse
 from fastapi import Request
+from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from src.config import settings
 from .logging import logger
 
 class RequestIDMiddleware(BaseHTTPMiddleware):
@@ -19,6 +22,21 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # SEC-07: Defense-in-depth origin check for admin state-changing calls.
+        if (
+            settings.ENVIRONMENT == "production"
+            and request.url.path.startswith("/api/v1/admin")
+            and request.method in {"POST", "PUT", "PATCH", "DELETE"}
+            and not request.url.path.startswith("/api/v1/admin/auth/login")
+        ):
+            allowed_host = urlparse(settings.ADMIN_ALLOWED_ORIGIN).netloc.lower()
+            origin = request.headers.get("Origin", "")
+            referer = request.headers.get("Referer", "")
+            origin_host = urlparse(origin).netloc.lower() if origin else ""
+            referer_host = urlparse(referer).netloc.lower() if referer else ""
+            if origin_host != allowed_host and referer_host != allowed_host:
+                return JSONResponse(status_code=403, content={"detail": "ADMIN_ORIGIN_FORBIDDEN"})
+
         response = await call_next(request)
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"

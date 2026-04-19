@@ -1,9 +1,11 @@
 import pytest
 import hashlib
+import pyotp
 from httpx import AsyncClient
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import get_password_hash
 from sk_shared.models.auth import AdminUser
+from src.core.kms import KMSProvider
 from tests.conftest import TestingSessionLocal
 
 pytestmark = pytest.mark.asyncio
@@ -77,3 +79,32 @@ async def test_assign_role_invalidates_sessions(client: AsyncClient, test_admin,
     
     # Verify session is GONE (invalidation logic)
     assert await redis_mock.get(f"sk:auth:admin_session:{token_hash}") is None
+
+
+async def test_admin_totp_lockout_after_failed_attempts(client: AsyncClient):
+    secret = pyotp.random_base32()
+    encrypted_secret = KMSProvider().encrypt(secret)
+
+    async with TestingSessionLocal() as session:
+        admin = AdminUser(
+            email="totp-lock@test.com",
+            password_hash=get_password_hash("ValidPass123"),
+            mfa_enabled=True,
+            mfa_secret_encrypted=encrypted_secret,
+        )
+        session.add(admin)
+        await session.commit()
+
+    payload = {
+        "email": "totp-lock@test.com",
+        "password": "ValidPass123",
+        "totp_code": "000000",
+    }
+
+    for _ in range(5):
+        response = await client.post("/api/v1/admin/auth/login", json=payload)
+        assert response.status_code == 401
+
+    locked = await client.post("/api/v1/admin/auth/login", json=payload)
+    assert locked.status_code == 429
+    assert locked.json()["detail"] == "TOTP_LOCKED_TOO_MANY_ATTEMPTS"

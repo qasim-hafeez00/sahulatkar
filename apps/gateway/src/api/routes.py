@@ -9,6 +9,7 @@ from src.api.v1.admin_analytics import router as admin_analytics_router
 from src.api.v1.admin_users import router as admin_users_router
 from src.api.v1.admin_orders import router as admin_orders_router
 from src.api.v1.admin_payments import router as admin_payments_router
+from src.api.v1.admin_installments import router as admin_installments_router
 from src.api.v1.admin_risk import router as admin_risk_router
 from src.api.v1.admin_system import router as admin_system_router
 from src.api.v1.contracts import router as contracts_router
@@ -30,6 +31,7 @@ api_router.include_router(admin_analytics_router, prefix="/v1")
 api_router.include_router(admin_users_router, prefix="/v1")
 api_router.include_router(admin_orders_router, prefix="/v1")
 api_router.include_router(admin_payments_router, prefix="/v1")
+api_router.include_router(admin_installments_router, prefix="/v1")
 api_router.include_router(admin_risk_router, prefix="/v1")
 api_router.include_router(admin_system_router, prefix="/v1")
 api_router.include_router(contracts_router, prefix="/v1")

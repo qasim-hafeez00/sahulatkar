@@ -11,7 +11,7 @@ from sk_shared.models.credit import CreditLimitHistory, RiskAssessment
 from sk_shared.models.payment import Installment, Loan
 from src.core.logging import logger
 
-from src.core.dependencies import get_current_admin, get_db, RequirePermission
+from src.core.dependencies import get_current_admin, get_current_admin_token_payload, get_db, RequirePermission
 from src.core.audit import record_audit_event
 
 router = APIRouter(prefix="/admin/users", tags=["Admin Users"])
@@ -112,6 +112,7 @@ async def list_admin_users(
 async def get_admin_user_detail(
     user_id: int,
     current_admin: AdminUser = Depends(RequirePermission("read_user")),
+    payload: dict = Depends(get_current_admin_token_payload),
     db: AsyncSession = Depends(get_db),
 ) -> dict[str, object]:
     query = text(
@@ -127,14 +128,18 @@ async def get_admin_user_detail(
     except Exception:
         row = None
 
+    # BUG-04 FIX: Return HTTP 404 when user not found, not 200 with null payload
     if row is None:
-        return {
-            "requested_by": {
-                "admin_id": current_admin.id,
-                "email": current_admin.email,
-            },
-            "user": None,
-        }
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    permissions = set(payload.get("permissions", []))
+    if "all_actions" in permissions:
+        permissions.update({"read_user_financials", "manage_kyc_queue"})
+    tabs = ["personal", "orders", "activity"]
+    if "read_user_financials" in permissions:
+        tabs.extend(["financial", "payments"])
+    if "manage_kyc_queue" in permissions or "read_user" in permissions:
+        tabs.append("kyc")
 
     return {
         "requested_by": {
@@ -149,7 +154,7 @@ async def get_admin_user_detail(
             "failed_login_attempts": row["failed_login_attempts"],
             "locked_until": row["locked_until"],
         },
-        "tabs": ["personal", "financial", "kyc", "orders", "payments", "activity"],
+        "tabs": tabs,
     }
 
 
@@ -250,6 +255,18 @@ async def get_user_kyc_summary(
         logger.warning("KYC summary lookup failed for user %s: %s", user_id, exc)
         profile = None
         verification = None
+
+    # BUG-07 FIX: Decrypt CNIC if it's stored as encrypted bytes
+    if profile and profile.get("cnic"):
+        raw_cnic = profile["cnic"]
+        if isinstance(raw_cnic, (bytes, bytearray)):
+            try:
+                from src.core.kms import KMSProvider
+                profile = dict(profile)
+                profile["cnic"] = KMSProvider().decrypt(raw_cnic)
+            except Exception as exc:
+                logger.warning("CNIC decryption failed for user %s: %s", user_id, exc)
+                profile["cnic"] = "DECRYPTION_ERROR"
 
     return {
         "user_id": user_id,
@@ -499,4 +516,120 @@ async def get_user_audit_log(
             for r in rows
         ],
         "pagination": {"page": page, "limit": limit, "total": total},
+    }
+
+# ============================================================================
+# TASK-22: Admin User Risk History
+# ============================================================================
+
+@router.get("/{user_id}/risk-history")
+async def get_user_risk_history(
+    user_id: int,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    current_admin: AdminUser = Depends(RequirePermission("read_user_financials")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Admin endpoint to view all risk assessments for a user"""
+    offset = (page - 1) * limit
+    q = text("""
+        SELECT id, risk_band, decision, recommended_limit, assessment_type, created_at
+        FROM risk_assessments
+        WHERE user_id = :user_id AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    count_q = text("SELECT COUNT(*) FROM risk_assessments WHERE user_id = :user_id AND deleted_at IS NULL")
+    try:
+        rows = (await db.execute(q, {"user_id": user_id, "limit": limit, "offset": offset})).mappings().all()
+        total = int((await db.execute(count_q, {"user_id": user_id})).scalar_one() or 0)
+    except Exception:
+        rows, total = [], 0
+    
+    return {
+        "user_id": user_id,
+        "items": [
+            {
+                "id": dict(r)["id"],
+                "risk_band": dict(r)["risk_band"],
+                "decision": dict(r)["decision"],
+                "recommended_limit": float(dict(r)["recommended_limit"] or 0),
+                "assessment_type": dict(r)["assessment_type"],
+                "created_at": dict(r)["created_at"].isoformat() if dict(r)["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "pagination": {"page": page, "limit": limit, "total": total},
+    }
+
+
+@router.get("/{user_id}/risk")
+async def get_user_risk_history_alias(
+    user_id: int,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    current_admin: AdminUser = Depends(RequirePermission("read_user_financials")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    return await get_user_risk_history(
+        user_id=user_id,
+        page=page,
+        limit=limit,
+        current_admin=current_admin,
+        db=db,
+    )
+
+
+@router.get("/{user_id}/contracts")
+async def get_user_contracts(
+    user_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("read_user")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from sk_shared.models.auth import User as UserModel
+    from sk_shared.models.contracts import MurabahaContract, WakalahAgreement
+
+    user = await db.scalar(select(UserModel).where(UserModel.id == user_id, UserModel.deleted_at.is_(None)))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    wakalah_rows = (
+        await db.execute(
+            select(WakalahAgreement)
+            .where(WakalahAgreement.user_id == user_id, WakalahAgreement.deleted_at.is_(None))
+            .order_by(WakalahAgreement.created_at.desc())
+        )
+    ).scalars().all()
+    murabaha_rows = (
+        await db.execute(
+            select(MurabahaContract)
+            .where(MurabahaContract.user_id == user_id, MurabahaContract.deleted_at.is_(None))
+            .order_by(MurabahaContract.created_at.desc())
+        )
+    ).scalars().all()
+
+    return {
+        "user_id": user_id,
+        "wakalah": [
+            {
+                "id": row.id,
+                "order_id": row.order_id,
+                "contract_number": row.contract_number,
+                "signed_at": row.signed_at.isoformat() if row.signed_at else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in wakalah_rows
+        ],
+        "murabaha": [
+            {
+                "id": row.id,
+                "order_id": row.order_id,
+                "contract_number": row.contract_number,
+                "total_sale_price": float(row.total_sale_price or 0),
+                "installment_count": row.installment_count,
+                "signed_at": row.signed_at.isoformat() if row.signed_at else None,
+                "created_at": row.created_at.isoformat() if row.created_at else None,
+            }
+            for row in murabaha_rows
+        ],
     }

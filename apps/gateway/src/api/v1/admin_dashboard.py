@@ -17,9 +17,14 @@ router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard"])
 
 
 async def _fetch_scalar(db: AsyncSession, query: str) -> float:
-    result = await db.execute(text(query))
-    value = result.scalar_one_or_none()
-    return float(value or 0)
+    try:
+        result = await db.execute(text(query))
+        value = result.scalar_one_or_none()
+        return float(value or 0)
+    except Exception as e:
+        # M-04 FIX: Explicitly log DB errors instead of silent abandonment
+        logger.error("Dashboard scalar fetch failed for query [%s]: %s", query, e)
+        return 0.0
 
 
 @router.get("")

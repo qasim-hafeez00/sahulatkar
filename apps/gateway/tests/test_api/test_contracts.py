@@ -1,8 +1,11 @@
 import pytest
+from datetime import datetime, timedelta, timezone
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select
 
 from sk_shared.constants import OrderState, RedisNS
 from sk_shared.models.contracts import MurabahaContract
+from sk_shared.models.contracts import WakalahAgreement
 from sk_shared.models.order import Order
 from sk_shared.models.product import Merchant, Product
 from sk_shared.security import hash_otp
@@ -138,6 +141,39 @@ async def test_signing_invalid_otp_returns_400(client, test_user, redis_mock):
     )
     assert r_wk_sign.status_code == 400
     assert r_wk_sign.json()["detail"] == "INVALID_OTP"
+
+
+async def test_murabaha_generate_rejects_expired_wakalah(client, test_user, db_session, redis_mock):
+    user, token = test_user
+    order = await _seed_order(user.id)
+
+    r_wk_gen = await client.post(
+        "/api/v1/contracts/wakalah/generate",
+        headers=_auth(token),
+        json={"order_id": order.id},
+    )
+    assert r_wk_gen.status_code == 200
+    wk_contract_id = r_wk_gen.json()["contract_id"]
+
+    await redis_mock.set(f"{RedisNS.CONTRACT_OTP}:wakalah:{wk_contract_id}:{user.id}", hash_otp("123456"), 180)
+    r_wk_sign = await client.post(
+        "/api/v1/contracts/wakalah/sign",
+        headers=_auth(token),
+        json={"contract_id": wk_contract_id, "otp_code": "123456"},
+    )
+    assert r_wk_sign.status_code == 200
+
+    wakalah = await db_session.scalar(select(WakalahAgreement).where(WakalahAgreement.id == wk_contract_id))
+    wakalah.valid_until = datetime.now(timezone.utc) - timedelta(hours=1)
+    await db_session.commit()
+
+    response = await client.post(
+        "/api/v1/contracts/murabaha/generate",
+        headers=_auth(token),
+        json={"order_id": order.id, "installment_count": 4},
+    )
+    assert response.status_code == 410
+    assert response.json()["detail"] == "WAKALAH_EXPIRED"
 
 
 async def test_verify_contract_integrity_fail_on_mismatch(client, test_user):

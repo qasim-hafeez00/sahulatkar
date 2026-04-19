@@ -59,6 +59,11 @@ async def _submit_installment_payment(
     if loan is None:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="INSTALLMENT_NOT_OWNED")
 
+    # TASK-10: Validate that amount matches expected installment amount (tolerance: 1 PKR)
+    expected_amount = float(installment.total_amount)
+    if abs(float(amount_pkr) - expected_amount) > 1.0:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INSTALLMENT_AMOUNT_MISMATCH")
+
     payment = PaymentTransaction(
         user_id=current_user.id,
         order_id=loan.order_id,
@@ -174,12 +179,13 @@ async def create_down_payment(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    # Lock order row to make duplicate down-payment initiation race-safe.
     order = await db.scalar(
         select(Order).where(
             Order.id == req.order_id,
             Order.user_id == current_user.id,
             Order.deleted_at.is_(None),
-        )
+        ).with_for_update()
     )
     if order is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
@@ -190,16 +196,20 @@ async def create_down_payment(
     if abs(float(req.amount_pkr) - expected) > 1:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="DOWN_PAYMENT_AMOUNT_MISMATCH")
 
-    old_status = order.status
-    order.status = OrderState.DOWN_PAYMENT_RECEIVED
-    db.add(
-        OrderStatusHistory(
-            order_id=order.id,
-            from_status=old_status,
-            to_status=OrderState.DOWN_PAYMENT_RECEIVED,
-            reason="down_payment_initiated",
+    # Check for existing pending payment transactions (prevent duplicates)
+    existing_txn = await db.scalar(
+        select(PaymentTransaction).where(
+            PaymentTransaction.order_id == order.id,
+            PaymentTransaction.transaction_type == "down_payment",
+            PaymentTransaction.status.in_(["initiated", "pending"]),
+            PaymentTransaction.deleted_at.is_(None),
         )
     )
+    if existing_txn:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="DOWN_PAYMENT_ALREADY_INITIATED")
+
+    # BUG-01 FIX: Do NOT change order status here. Order stays in CONTRACTS_SIGNED.
+    # Status will be updated only when payment is confirmed in payment_confirmed_callback
 
     payment = PaymentTransaction(
         user_id=current_user.id,
@@ -329,3 +339,50 @@ async def pay_installment_legacy(
         db=db,
         redis=redis,
     )
+
+
+# ============================================================================
+# TASK-24: VCN Status Endpoint
+# ============================================================================
+
+@router.get("/vcn/status/{order_id}")
+async def vcn_status(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Endpoint for customers to check VCN issuance status"""
+    from sk_shared.models.payment import VirtualCard
+    
+    order = await db.scalar(
+        select(Order).where(
+            Order.id == order_id,
+            Order.user_id == current_user.id,
+            Order.deleted_at.is_(None),
+        )
+    )
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+    
+    vcn = await db.scalar(
+        select(VirtualCard).where(
+            VirtualCard.order_id == order_id,
+            VirtualCard.deleted_at.is_(None),
+        )
+    )
+    
+    if not vcn:
+        return {
+            "order_id": order_id,
+            "vcn_status": "not_issued",
+            "order_status": order.status,
+        }
+    
+    return {
+        "order_id": order_id,
+        "vcn_status": getattr(vcn, "status", "unknown"),
+        "masked_number": getattr(vcn, "masked_number", None),
+        "expiry_month": getattr(vcn, "expiry_month", None),
+        "expiry_year": getattr(vcn, "expiry_year", None),
+        "order_status": order.status,
+    }

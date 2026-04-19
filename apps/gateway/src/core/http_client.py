@@ -26,4 +26,5 @@ class InternalServiceClient:
         return {
             "X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN,
             "X-Request-ID": request_id or str(uuid.uuid4()),
+            "Content-Type": "application/json",
         }

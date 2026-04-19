@@ -36,6 +36,7 @@ class Settings(BaseSettings):
     ADMIN_SESSION_TTL: int = 28800  # 8 hours
     ADMIN_RATE_LIMIT_PER_MIN: int = 30  # per-admin IP rate cap
     REQUIRE_ADMIN_MFA: bool = True
+    ADMIN_ALLOWED_ORIGIN: str = "https://admin.sahulatkar.pk"
 
     # External payment webhooks
     JAZZCASH_WEBHOOK_SECRET: Optional[str] = None

@@ -15,6 +15,7 @@ from sk_shared.models.order import Order
 from sk_shared.models.product import Product
 from sk_shared.storage import get_storage_client
 from src.config import settings
+from src.core.logging import logger
 from src.schemas.contracts import MurabahaGenerateRequest, WakalahGenerateRequest
 from .contract_signer import ContractSignerService
 
@@ -84,7 +85,10 @@ class ContractGeneratorService:
         return buffer.getvalue()
 
     async def _persist_pdf(self, contract_number: str, payload: bytes) -> str:
-        file_key = f"contracts/{contract_number}.pdf"
+        # SEC-03 FIX: Use UUID prefix to prevent predictable URL enumeration
+        file_key = f"contracts/{uuid.uuid4()}/{contract_number}.pdf"
+        if not settings.S3_BUCKET and settings.ENVIRONMENT != "production":
+            logger.warning("CONTRACT_STORAGE_LOCAL_FALLBACK: using local storage for contract PDFs")
         return await self.storage.upload(file_key, payload)
 
     @staticmethod
@@ -214,6 +218,12 @@ class ContractGeneratorService:
         )
         if wakalah is None or wakalah.signed_at is None:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="WAKALAH_NOT_SIGNED")
+        
+        # BUG-06 FIX: Check if Wakalah has expired (24-hour validity window)
+        if wakalah.valid_until:
+            valid_until = wakalah.valid_until if wakalah.valid_until.tzinfo else wakalah.valid_until.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) > valid_until:
+                raise HTTPException(status_code=status.HTTP_410_GONE, detail="WAKALAH_EXPIRED")
 
         existing = await self.db.scalar(
             select(MurabahaContract).where(

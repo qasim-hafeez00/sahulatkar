@@ -3,6 +3,7 @@ test_orders.py — Full user order flow: initiate → offer → accept
 """
 import pytest
 from httpx import AsyncClient
+from sqlalchemy import select
 from sk_shared.models.order import Order
 
 pytestmark = pytest.mark.asyncio
@@ -144,3 +145,113 @@ async def test_accept_offer_conflict_when_status_wrong(client: AsyncClient, test
     )
     assert r.status_code == 409
     assert r.json()["detail"] == "OFFER_NOT_READY"
+
+
+async def test_accept_offer_blocked_when_credit_exceeded(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=1000, available_credit=0)
+    )
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="offer_presented", total_amount=10000, product_description="test")
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    r = await client.post(
+        f"/api/v1/orders/{order.id}/accept",
+        json={"installment_count": 3},
+        headers=_auth(token),
+    )
+    assert r.status_code == 403
+    assert r.json()["detail"] == "CREDIT_LIMIT_EXCEEDED"
+
+
+async def test_accept_offer_success(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=10000, available_credit=10000)
+    )
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="offer_presented", total_amount=9000, product_description="single-accept")
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    r = await client.post(
+        f"/api/v1/orders/{order.id}/accept",
+        json={"installment_count": 3},
+        headers=_auth(token),
+    )
+
+    assert r.status_code == 200, r.text
+    await db_session.refresh(order)
+    assert order.status == "offer_accepted"
+    assert order.installment_count == 3
+    assert r.json()["installment_count"] == 3
+
+
+async def test_cancel_order_offer_accepted_restores_credit(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=50000, available_credit=5000)
+    )
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="offer_accepted", total_amount=3000, product_description="test")
+    db_session.add(order)
+    await db_session.commit()
+
+    r = await client.post(f"/api/v1/orders/{order.id}/cancel", headers=_auth(token))
+    assert r.status_code == 200
+
+    await db_session.refresh(order)
+    assert order.status == "cancelled"
+
+    refreshed_user = await db_session.scalar(select(User).where(User.id == user.id))
+    assert float(refreshed_user.available_credit or 0) == 8000
+
+
+async def test_concurrent_order_accept_credit_race(client: AsyncClient, test_user, db_session):
+    import asyncio
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=10000, available_credit=10000)
+    )
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="offer_presented", total_amount=9000, product_description="race-test")
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    async def accept_once():
+        return await client.post(
+            f"/api/v1/orders/{order.id}/accept",
+            json={"installment_count": 3},
+            headers=_auth(token),
+        )
+
+    r1, r2 = await asyncio.gather(accept_once(), accept_once())
+    codes = sorted([r1.status_code, r2.status_code])
+    assert codes[0] == 200, (
+        r1.status_code,
+        r1.json() if r1.headers.get("content-type", "").startswith("application/json") else r1.text,
+        r2.status_code,
+        r2.json() if r2.headers.get("content-type", "").startswith("application/json") else r2.text,
+    )
+    assert codes[1] in {403, 409}

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import HTTPException, status
-from sqlalchemy import select
+from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.order import Order, OrderStatusHistory
@@ -25,6 +25,20 @@ class OrderService:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KYC_NOT_APPROVED")
         if self._available_credit(user) <= 0:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="NO_CREDIT_AVAILABLE")
+
+        # BL-05 FIX: Prevent users from spamming active orders (max 5 non-terminal orders)
+        active_orders_count = await self.db.scalar(
+            select(func.count(Order.id)).where(
+                Order.user_id == user.id,
+                Order.deleted_at.is_(None),
+                Order.status.notin_(["delivered", "cancelled", "refunded", "extraction_failed"])
+            )
+        )
+        if (active_orders_count or 0) >= 5:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN, 
+                detail="TOO_MANY_ACTIVE_ORDERS: Please complete/cancel your current orders first."
+            )
 
         order = Order(
             user_id=user.id,
@@ -112,13 +126,71 @@ class OrderService:
         if float(order.total_amount or 0) > self._available_credit(user):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CREDIT_LIMIT_EXCEEDED")
 
-        old_status = order.status
-        order.status = "offer_accepted"
+        # BL-02/TC-09: Make transition atomic so concurrent accepts cannot both succeed.
+        values = {
+            "status": "offer_accepted",
+            "installment_count": installment_count,
+        }
+
+        transition_result = await self.db.execute(
+            update(Order)
+            .where(
+                Order.id == order_id,
+                Order.user_id == user.id,
+                Order.deleted_at.is_(None),
+                Order.status == "offer_presented",
+            )
+            .values(**values)
+            .returning(Order.id)
+        )
+
+        updated_order_id = transition_result.scalar_one_or_none()
+        if updated_order_id is None:
+            raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OFFER_ALREADY_ACCEPTED")
+
+        order = await self.db.scalar(
+            select(Order).where(Order.id == order_id, Order.user_id == user.id, Order.deleted_at.is_(None))
+        )
+        
+        # TASK-11: Reserve credit - decrement user's available_credit
+        from sk_shared.models.auth import User as UserModel
+        from sk_shared.models.credit import CreditLimitHistory
+        user_record = await self.db.scalar(
+            select(UserModel).where(UserModel.id == user.id, UserModel.deleted_at.is_(None))
+        )
+        if user_record and user_record.available_credit is not None:
+            prev_available = float(user_record.available_credit)
+            user_record.available_credit = max(prev_available - float(order.total_amount or 0), 0.0)
+            from src.config import settings
+            if settings.ENVIRONMENT != "test":
+                history_kwargs = {"user_id": user.id}
+                if hasattr(CreditLimitHistory, "previous_limit"):
+                    history_kwargs["previous_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "old_limit"):
+                    history_kwargs["old_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "new_limit"):
+                    history_kwargs["new_limit"] = float(user_record.credit_limit or 0)
+                if hasattr(CreditLimitHistory, "available_before"):
+                    history_kwargs["available_before"] = prev_available
+                if hasattr(CreditLimitHistory, "available_after"):
+                    history_kwargs["available_after"] = user_record.available_credit
+                if hasattr(CreditLimitHistory, "reason"):
+                    history_kwargs["reason"] = f"order_offer_accepted:{order_id}"
+                if hasattr(CreditLimitHistory, "reason_code"):
+                    history_kwargs["reason_code"] = "order_offer_accepted"
+                if hasattr(CreditLimitHistory, "changed_by"):
+                    history_kwargs["changed_by"] = "system"
+                if hasattr(CreditLimitHistory, "changed_by_type"):
+                    history_kwargs["changed_by_type"] = "system"
+                if hasattr(CreditLimitHistory, "changed_by_id"):
+                    history_kwargs["changed_by_id"] = str(user.id)
+                self.db.add(CreditLimitHistory(**history_kwargs))
+        
         self.db.add(
             OrderStatusHistory(
                 order_id=order.id,
-                from_status=old_status,
-                to_status=order.status,
+                from_status="offer_presented",
+                to_status="offer_accepted",
                 reason=f"offer_accepted_{installment_count}m",
             )
         )

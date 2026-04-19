@@ -7,7 +7,7 @@ class RBACService:
         "super_admin": ["all_actions"],
         "risk_officer": [
             "manage_risk", "read_blacklist", "read_risk", "read_user_financials",
-            "read_reports", "read_user",
+            "read_reports", "read_user", "manage_system",  # TASK-18: Added manage_system
         ],
         "kyc_reviewer": [
             "manage_kyc_queue", "read_user", "read_compliance", "read_audit",

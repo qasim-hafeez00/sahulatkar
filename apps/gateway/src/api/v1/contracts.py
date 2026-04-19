@@ -98,7 +98,7 @@ async def generate_murabaha(
             profit_amount=float(contract.profit_amount),
             total_sale_price=float(contract.total_sale_price),
             profit_rate_pct=float(contract.profit_rate_pct),
-            currency=contract.currency,
+            currency=getattr(contract, "currency", "PKR"),
             installment_count=contract.installment_count,
         ),
         otp_sent=True,
@@ -248,7 +248,7 @@ async def get_contract_status(
             profit_amount=float(murabaha.profit_amount),
             total_sale_price=float(murabaha.total_sale_price),
             profit_rate_pct=float(murabaha.profit_rate_pct),
-            currency=murabaha.currency,
+            currency=getattr(murabaha, "currency", "PKR"),
             installment_count=murabaha.installment_count,
         )
         if murabaha

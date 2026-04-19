@@ -16,6 +16,7 @@ class Order(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="contracts_pending")
     total_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
     down_payment_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
+    installment_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     status_history: Mapped[list["OrderStatusHistory"]] = relationship(

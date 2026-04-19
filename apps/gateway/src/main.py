@@ -124,11 +124,27 @@ setup_metrics(app)
 async def health_check(db = Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
+        
+        # M-03 FIX: Check background delivery listener task health
+        listener_healthy = True
+        if hasattr(app.state, "delivery_listener_task"):
+            if app.state.delivery_listener_task.done():
+                listener_healthy = False
+                # Log the failure if possible
+                try:
+                    app.state.delivery_listener_task.result()
+                except Exception as e:
+                    logger.error("Delivery listener task failed: %s", e)
+
         try:
             if hasattr(app.state, "redis") and app.state.redis is not None:
                 await app.state.redis.redis.ping()
         except Exception:
-            return {"status": "degraded", "service": "gateway"}
+            return {"status": "degraded", "service": "gateway", "redis": "unreachable"}
+            
+        if not listener_healthy:
+            return {"status": "degraded", "service": "gateway", "listener": "down"}
+            
         return {"status": "ok", "service": "gateway"}
     except Exception:
-        return JSONResponse(status_code=503, content={"status": "degraded", "service": "gateway"})
+        return JSONResponse(status_code=503, content={"status": "degraded", "service": "gateway", "db": "unreachable"})
