@@ -38,6 +38,7 @@ class UserKycVerification(Base, UUIDMixin, TimestampMixin):
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     
     status: Mapped[KycStatus] = mapped_column(Enum(KycStatus), default=KycStatus.PENDING, nullable=False)
+    attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     cnic_front_image_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     cnic_back_image_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     liveness_video_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -46,6 +47,8 @@ class UserKycVerification(Base, UUIDMixin, TimestampMixin):
     shufti_verification_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     
     rejection_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    rejection_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    nadra_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User")
     

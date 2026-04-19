@@ -2,7 +2,7 @@ import asyncio
 import contextlib
 import json
 from contextlib import asynccontextmanager
-from fastapi import FastAPI
+from fastapi import FastAPI, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from sqlalchemy import text
@@ -10,6 +10,7 @@ from src.core.rate_limit import rate_limit_middleware
 from src.api.routes import api_router
 from src.config import settings
 from sk_shared.database import SessionLocal
+from src.core.dependencies import get_db
 from sk_shared.events import EVENT_DELIVERY_CONFIRMED, EVENT_DELIVERY_STATUS_CHANGED, event_channel
 from sk_shared.redis_client import get_redis_client
 from src.services.delivery_events import apply_delivery_confirmed_envelope, apply_delivery_status_envelope
@@ -120,11 +121,14 @@ app.include_router(api_router, prefix="/api")
 setup_metrics(app)
 
 @app.get("/health", tags=["system"])
-async def health_check():
+async def health_check(db = Depends(get_db)):
     try:
-        async with SessionLocal() as db:
-            await db.execute(text("SELECT 1"))
-        await app.state.redis.redis.ping()
+        await db.execute(text("SELECT 1"))
+        try:
+            if hasattr(app.state, "redis") and app.state.redis is not None:
+                await app.state.redis.redis.ping()
+        except Exception:
+            return {"status": "degraded", "service": "gateway"}
         return {"status": "ok", "service": "gateway"}
     except Exception:
         return JSONResponse(status_code=503, content={"status": "degraded", "service": "gateway"})

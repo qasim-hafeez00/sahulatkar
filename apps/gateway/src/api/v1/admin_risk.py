@@ -114,6 +114,7 @@ async def add_to_blacklist(
             "reason": payload.reason,
         },
     )
+    await db.commit()
     return dict(row)
 
 
@@ -127,7 +128,7 @@ async def remove_from_blacklist(
     q = text(
         """
         UPDATE risk_blacklist
-        SET deleted_at = NOW()
+        SET deleted_at = CURRENT_TIMESTAMP
         WHERE id = :entry_id AND deleted_at IS NULL
         RETURNING id
         """
@@ -152,4 +153,5 @@ async def remove_from_blacklist(
         target_id=entry_id,
         changes={},
     )
+    await db.commit()
     return {"removed_id": entry_id}

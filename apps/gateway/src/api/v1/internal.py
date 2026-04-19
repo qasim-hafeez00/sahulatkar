@@ -6,10 +6,12 @@ from typing import Optional
 from datetime import datetime, timezone
 
 from sk_shared.models.order import Order, OrderStatusHistory
+from sk_shared.models.product import Product
 from sk_shared.constants import OrderState
 from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_db, get_redis
 from src.config import settings
+from src.core.logging import logger
 
 router = APIRouter(prefix="/internal", tags=["internal"])
 
@@ -21,10 +23,10 @@ def _require_internal(request: Request):
 
 
 class ProductExtractedPayload(BaseModel):
-    product_id: int
-    name: str
-    cost_price: float
-    sale_price: float
+    product_id: Optional[int] = None
+    name: Optional[str] = None
+    cost_price: Optional[float] = None
+    sale_price: Optional[float] = None
     currency: str = "PKR"
     down_payment_pct: float = 25.0
     in_stock: bool = True
@@ -52,10 +54,18 @@ async def product_extracted_callback(
     if not order:
         raise HTTPException(status_code=404, detail="ORDER_NOT_FOUND")
 
+    if payload.product_id is None or payload.cost_price is None or payload.sale_price is None:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="INVALID_PRODUCT_PAYLOAD")
+
     if order.status not in {OrderState.URL_RECEIVED, "url_received", "processing"}:
         return {"status": "already_processed", "current_status": order.status}
 
     old_status = order.status
+    product = await db.scalar(select(Product).where(Product.id == payload.product_id))
+    if product is None:
+        logger.error("Product %s not found while processing order %s", payload.product_id, order_id)
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXTRACTED_PRODUCT_NOT_FOUND_IN_DB")
+    
     order.product_id = payload.product_id
     order.total_amount = payload.sale_price
     
@@ -117,8 +127,15 @@ async def payment_confirmed_callback(
 
     txn.status = payload.status
     txn.gateway_txn_id = payload.gateway_txn_id
+    
+    # GAP-10: Populate missing metadata if it wasn't set during initiation
+    if not txn.transaction_type:
+        txn.transaction_type = "unknown_internal"
+    if not txn.provider and txn.gateway:
+        txn.provider = txn.gateway
+        
     if payload.failure_reason:
-        txn.error_message = payload.failure_reason
+        txn.failure_message = payload.failure_reason
 
     # Publish event for Ledger orchestrator ingestion completely efficiently!
     if payload.status == "confirmed":

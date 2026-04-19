@@ -1,7 +1,7 @@
 import pytest
 from httpx import AsyncClient
 from sk_shared.models.payment import PaymentTransaction
-import uuid
+from sk_shared.models.auth import User
 
 pytestmark = pytest.mark.asyncio
 
@@ -10,23 +10,26 @@ def _auth(token: str) -> dict:
 
 async def test_list_admin_payments(client: AsyncClient, db_session, test_admin):
     _, admin_token = test_admin
+    user = User(phone="+923001111111", status="active")
+    db_session.add(user)
+    await db_session.commit()
     
     # 1. Seed payments
     p1 = PaymentTransaction(
-        transaction_id="TXN-101",
+        user_id=user.id,
+        gateway_txn_id="TXN-101",
         amount=500.0,
         currency="PKR",
         status="confirmed",
-        method="jazzcash",
         gateway="jazzcash",
         order_id=1
     )
     p2 = PaymentTransaction(
-        transaction_id="TXN-102",
+        user_id=user.id,
+        gateway_txn_id="TXN-102",
         amount=1000.0,
         currency="PKR",
         status="pending",
-        method="easypaisa",
         gateway="easypaisa",
         order_id=2
     )
@@ -43,13 +46,18 @@ async def test_list_admin_payments(client: AsyncClient, db_session, test_admin):
 
 async def test_get_admin_payment_detail(client: AsyncClient, db_session, test_admin):
     _, admin_token = test_admin
+    user = User(phone="+923001111112", status="active")
+    db_session.add(user)
+    await db_session.commit()
     
     p = PaymentTransaction(
-        transaction_id="TXN-DET-1",
+        user_id=user.id,
+        gateway_txn_id="TXN-DET-1",
         amount=1500.0,
         status="failed",
-        error_code="INSUFFICIENT_FUNDS",
-        error_message="Not enough balance",
+        failure_code="INSUFFICIENT_FUNDS",
+        failure_message="Not enough balance",
+        gateway="manual",
         order_id=3
     )
     db_session.add(p)
@@ -64,8 +72,11 @@ async def test_get_admin_payment_detail(client: AsyncClient, db_session, test_ad
 
 async def test_filter_admin_payments_by_gateway(client: AsyncClient, db_session, test_admin):
     _, admin_token = test_admin
+    user = User(phone="+923001111113", status="active")
+    db_session.add(user)
+    await db_session.commit()
     
-    p = PaymentTransaction(transaction_id="TXN-GW", gateway="manual", amount=100, order_id=4)
+    p = PaymentTransaction(user_id=user.id, gateway_txn_id="TXN-GW", gateway="manual", amount=100, order_id=4)
     db_session.add(p)
     await db_session.commit()
     

@@ -159,7 +159,7 @@ class AuthService:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
             
         # Check lockout
-        if admin.locked_until:
+        if getattr(admin, "locked_until", None):
             locked_until = admin.locked_until if admin.locked_until.tzinfo else admin.locked_until.replace(tzinfo=timezone.utc)
             if locked_until > datetime.now(timezone.utc):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
@@ -189,7 +189,7 @@ class AuthService:
         permissions = RBACService.get_role_permissions(role_name)
         
         acc_token = create_access_token(
-            {"admin_id": admin.id, "role": role_name, "permissions": permissions}, 
+            {"admin_id": admin.id, "role": role_name, "permissions": permissions, "token_type": "admin"}, 
             settings.JWT_PRIVATE_KEY, 
             timedelta(seconds=settings.ADMIN_SESSION_TTL)
         )
@@ -200,7 +200,7 @@ class AuthService:
             await redis.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
             await redis.redis.expire(f"sk:auth:admin_sessions:{admin.id}", settings.ADMIN_SESSION_TTL)
         
-        return AdminAuthResponse(access_token=acc_token, admin_id=admin.id, role=role_name)
+        return AdminAuthResponse(access_token=acc_token, token_type="bearer", admin_id=admin.id, role=role_name)
 
     @staticmethod
     async def login(req: LoginRequest, db: AsyncSession, redis: RedisClient) -> AuthResponse:

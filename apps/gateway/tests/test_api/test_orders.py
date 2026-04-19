@@ -3,6 +3,7 @@ test_orders.py — Full user order flow: initiate → offer → accept
 """
 import pytest
 from httpx import AsyncClient
+from sk_shared.models.order import Order
 
 pytestmark = pytest.mark.asyncio
 
@@ -34,8 +35,12 @@ async def test_initiate_order_succeeds_for_active_user(client: AsyncClient, test
     from sk_shared.models.auth import User
     from sqlalchemy import update
     user, token = test_user
-    # Activate the user
-    await db_session.execute(update(User).where(User.id == user.id).values(status="active"))
+    # Activate the user and give credit (GAP-13/17 alignment)
+    await db_session.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(status="active", credit_limit=100000, available_credit=100000)
+    )
     await db_session.commit()
 
     r = await client.post(
@@ -47,6 +52,47 @@ async def test_initiate_order_succeeds_for_active_user(client: AsyncClient, test
     body = r.json()
     assert "order_id" in body
     assert body["status"] == "processing"
+
+
+async def test_get_order_tracking_returns_shipment(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.delivery import Shipment, TrackingEvent
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(update(User).where(User.id == user.id).values(status="active"))
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="delivery_pending", total_amount=1000, product_description="https://test.com")
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    shipment = Shipment(
+        order_id=order.id,
+        courier_name="TCS",
+        tracking_number="TRK-123",
+        status="in_transit",
+    )
+    db_session.add(shipment)
+    await db_session.commit()
+    await db_session.refresh(shipment)
+
+    event = TrackingEvent(
+        shipment_id=shipment.id,
+        event_code="IN_TRANSIT",
+        event_description="Parcel is moving",
+        location_city="Lahore",
+        event_time=shipment.created_at,
+    )
+    db_session.add(event)
+    await db_session.commit()
+
+    r = await client.get(f"/api/v1/orders/{order.id}/tracking", headers=_auth(token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["shipment"]["tracking_number"] == "TRK-123"
+    assert body["shipment"]["last_event"]["event_code"] == "IN_TRANSIT"
 
 
 async def test_get_order_offer_returns_pending_when_no_product(client: AsyncClient, test_user, db_session):

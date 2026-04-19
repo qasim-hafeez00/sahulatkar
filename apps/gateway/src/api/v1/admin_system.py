@@ -31,6 +31,8 @@ _DEFAULTS: dict[str, Any] = {
     "kyc_auto_approve_enabled": False,
     "notification_sms_enabled": True,
     "maintenance_mode": False,
+    "require_admin_mfa": True,
+    "admin_rate_limit_per_min": 30,
 }
 
 
@@ -79,18 +81,28 @@ async def update_system_parameters(
             detail=f"Unknown parameter keys: {sorted(unknown_keys)}",
         )
 
-    q = text(
-        """
-        INSERT INTO system_parameters (param_key, param_value)
-        VALUES (:key, :value)
-        ON CONFLICT (param_key) DO UPDATE
-        SET param_value = EXCLUDED.param_value, updated_at = NOW()
-        """
-    )
+    dialect = db.bind.dialect.name if hasattr(db.bind, "dialect") else "postgresql"
+    if dialect == "sqlite":
+        q = text(
+            """
+            INSERT INTO system_parameters (param_key, param_value)
+            VALUES (:key, :value)
+            ON CONFLICT (param_key) DO UPDATE
+            SET param_value = excluded.param_value, updated_at = CURRENT_TIMESTAMP
+            """
+        )
+    else:
+        q = text(
+            """
+            INSERT INTO system_parameters (param_key, param_value)
+            VALUES (:key, :value)
+            ON CONFLICT (param_key) DO UPDATE
+            SET param_value = EXCLUDED.param_value, updated_at = NOW()
+            """
+        )
     try:
         for key, value in payload.parameters.items():
             await db.execute(q, {"key": key, "value": str(value)})
-        await db.commit()
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_501_NOT_IMPLEMENTED,
@@ -109,4 +121,5 @@ async def update_system_parameters(
         target_id=None,
         changes=payload.parameters,
     )
+    await db.commit()
     return {"updated": list(payload.parameters.keys()), "status": "ok"}

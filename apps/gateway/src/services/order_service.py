@@ -106,7 +106,7 @@ class OrderService:
         )
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
-        if order.status not in {"offer_presented", "url_received", "processing"}:
+        if order.status != "offer_presented":
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="OFFER_NOT_READY")
 
         if float(order.total_amount or 0) > self._available_credit(user):

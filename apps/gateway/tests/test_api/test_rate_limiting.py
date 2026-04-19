@@ -11,7 +11,7 @@ pytestmark = pytest.mark.asyncio
 
 
 def _auth(token: str) -> dict:
-    return {"Authorization": f"Bearer {token}"}
+    return {"Authorization": f"Bearer {token}", "X-Test-Rate-Limit": "1"}
 
 
 async def test_global_rate_limit_returns_429_after_threshold(client: AsyncClient):
@@ -25,16 +25,17 @@ async def test_global_rate_limit_returns_429_after_threshold(client: AsyncClient
     We use a very tight loop to fill the fixed window bucket.
     """
     # Send 100 requests (fills the bucket)
+    # Note: we use a generic path that doesn't have a stricter 10/min limit like /auth/login
     for _ in range(100):
-        await client.post(
-            "/api/v1/auth/login",
-            json={"phone": "+923001111111", "password": "wrongpass"},
+        await client.get(
+            "/api/v1/health-check",
+            headers={"X-Test-Rate-Limit": "1"}
         )
 
     # The 101st should be rate-limited
-    r = await client.post(
-        "/api/v1/auth/login",
-        json={"phone": "+923001111111", "password": "wrongpass"},
+    r = await client.get(
+        "/api/v1/health-check",
+        headers={"X-Test-Rate-Limit": "1"}
     )
     assert r.status_code == 429
 
@@ -47,11 +48,13 @@ async def test_auth_endpoint_rate_limit_returns_429_after_10(client: AsyncClient
         await client.post(
             "/api/v1/auth/verify-otp",
             json={"otp_token": "fake-token", "otp_code": "123456"},
+            headers={"X-Test-Rate-Limit": "1"}
         )
 
     r = await client.post(
         "/api/v1/auth/verify-otp",
         json={"otp_token": "fake-token", "otp_code": "123456"},
+        headers={"X-Test-Rate-Limit": "1"}
     )
     assert r.status_code == 429
 
@@ -69,6 +72,17 @@ async def test_per_user_rate_limit_returns_429_after_60(client: AsyncClient, tes
 
     # 61st should be blocked
     r = await client.get("/api/v1/auth/me", headers=headers)
+    assert r.status_code == 429
+
+
+async def test_per_admin_rate_limit_returns_429_after_30(client: AsyncClient, test_admin):
+    _, token = test_admin
+    headers = _auth(token)
+
+    for _ in range(30):
+        await client.get("/api/v1/admin/dashboard", headers=headers)
+
+    r = await client.get("/api/v1/admin/dashboard", headers=headers)
     assert r.status_code == 429
 
 

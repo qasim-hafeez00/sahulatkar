@@ -2,6 +2,7 @@
 
 class OrderState:
     URL_SUBMITTED = "url_submitted"
+    URL_RECEIVED = "url_received"
     EXTRACTING = "extracting"
     EXTRACTION_FAILED = "extraction_failed"
     OFFER_PRESENTED = "offer_presented"
@@ -46,6 +47,8 @@ class RedisNS:
 class QueueName:
     CHECKOUT = "sk:queue:checkout"
     SCRAPING = "sk:queue:scraping"
+    PAYMENT_INITIATE = "sk:queue:payment_initiate"
+    PAYMENT_WEBHOOK = "sk:queue:payment_webhook"
     VCN_ISSUE = "sk:queue:vcn_issue"
     BILLING_SWEEP = "sk:queue:billing_sweep"
     BILLING_RETRY = "sk:queue:billing_retry"

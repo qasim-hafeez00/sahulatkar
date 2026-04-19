@@ -95,7 +95,7 @@ async def resubmit_kyc(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="KYC_NOT_REJECTED")
 
     kyc.status = KycStatus.PENDING
-    kyc.attempt_number = (kyc.attempt_number or 1) + 1
+    kyc.attempt_number = (getattr(kyc, "attempt_number", 1) or 1) + 1
     kyc.rejection_reason = None
     if hasattr(kyc, "rejection_code"):
         kyc.rejection_code = None

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from typing import Literal
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy import text
@@ -9,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
+from src.core.logging import logger
 from src.core.dependencies import RequirePermission, get_db, get_redis
 
 router = APIRouter(prefix="/admin/analytics", tags=["Admin Analytics"])
@@ -37,22 +39,41 @@ async def gmv_trend(
         except Exception:
             pass
 
-    interval = _INTERVAL[period]
-    q = text(
-        f"""
-        SELECT date_trunc('day', created_at)::date AS d, COALESCE(SUM(total_amount), 0) AS gmv
-        FROM orders
-        WHERE deleted_at IS NULL
-          AND created_at > NOW() - INTERVAL '{interval}'
-          AND status NOT IN ('cancelled', 'refunded')
-        GROUP BY 1
-        ORDER BY 1 ASC
-        """
-    )
+    interval_days = int(period.replace("d", ""))
+    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+
+    dialect = db.bind.dialect.name if hasattr(db.bind, "dialect") else "postgresql"
+    
+    if dialect == "sqlite":
+        q = text(
+            """
+            SELECT date(created_at) AS d, COALESCE(SUM(total_amount), 0) AS gmv
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND created_at > :threshold
+              AND status NOT IN ('cancelled', 'refunded')
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """
+        )
+    else:
+        q = text(
+            f"""
+            SELECT date_trunc('day', created_at)::date AS d, COALESCE(SUM(total_amount), 0) AS gmv
+            FROM orders
+            WHERE deleted_at IS NULL
+              AND created_at > :threshold
+              AND status NOT IN ('cancelled', 'refunded')
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """
+        )
+        
     try:
-        rows = (await db.execute(q)).mappings().all()
+        rows = (await db.execute(q, {"threshold": threshold})).mappings().all()
         series = [{"date": str(r["d"]), "gmv": float(r["gmv"] or 0)} for r in rows]
-    except Exception:
+    except Exception as exc:
+        logger.error("Analytics gmv query failed: %s", exc, exc_info=True)
         series = []
 
     payload = {"period": period, "series": series}
@@ -75,20 +96,23 @@ async def approval_funnel(
         except Exception:
             pass
 
-    interval = _INTERVAL[period]
+    interval_days = int(period.replace("d", ""))
+    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+
     q = text(
-        f"""
+        """
         SELECT status, COUNT(*) AS c
         FROM orders
         WHERE deleted_at IS NULL
-          AND created_at > NOW() - INTERVAL '{interval}'
+          AND created_at > :threshold
         GROUP BY status
         """
     )
     try:
-        rows = (await db.execute(q)).mappings().all()
+        rows = (await db.execute(q, {"threshold": threshold})).mappings().all()
         steps = {str(r["status"]): int(r["c"]) for r in rows}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Approval funnel query failed: %s", exc, exc_info=True)
         steps = {}
 
     payload = {"period": period, "steps": steps}
@@ -110,18 +134,20 @@ async def credit_band_distribution(
         except Exception:
             pass
 
+    threshold = datetime.now(timezone.utc) - timedelta(days=90)
     q = text(
         """
         SELECT COALESCE(risk_band, 'unknown') AS band, COUNT(*) AS c
         FROM risk_assessments
-        WHERE created_at > NOW() - INTERVAL '90 days'
+        WHERE created_at > :threshold
         GROUP BY 1
         """
     )
     try:
-        rows = (await db.execute(q)).mappings().all()
+        rows = (await db.execute(q, {"threshold": threshold})).mappings().all()
         bands = {str(r["band"]): int(r["c"]) for r in rows}
-    except Exception:
+    except Exception as exc:
+        logger.warning("Credit band distribution query failed: %s", exc, exc_info=True)
         bands = {}
 
     payload = {"bands": bands}
@@ -144,23 +170,44 @@ async def default_rate_trend(
         except Exception:
             pass
 
-    interval = _INTERVAL[period]
-    q = text(
-        f"""
-        SELECT date_trunc('week', created_at)::date AS w,
-               SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END)::float
-               / NULLIF(COUNT(*), 0) * 100 AS rate_pct
-        FROM installments
-        WHERE deleted_at IS NULL
-          AND created_at > NOW() - INTERVAL '{interval}'
-        GROUP BY 1
-        ORDER BY 1 ASC
-        """
-    )
+    interval_days = int(period.replace("d", ""))
+    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+    
+    dialect = db.bind.dialect.name if hasattr(db.bind, "dialect") else "postgresql"
+
+    if dialect == "sqlite":
+        # SQLite: manual rate calculation as it lacks Postgres casting/complex date_trunc
+        q = text(
+            """
+            SELECT date(created_at, 'weekday 1', '-6 days') AS w,
+                   SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END) * 100.0
+                   / NULLIF(COUNT(*), 0) AS rate_pct
+            FROM installments
+            WHERE deleted_at IS NULL
+              AND created_at > :threshold
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """
+        )
+    else:
+        q = text(
+            """
+            SELECT date_trunc('week', created_at)::date AS w,
+                   SUM(CASE WHEN status = 'overdue' THEN 1 ELSE 0 END)::float
+                   / NULLIF(COUNT(*), 0) * 100 AS rate_pct
+            FROM installments
+            WHERE deleted_at IS NULL
+              AND created_at > :threshold
+            GROUP BY 1
+            ORDER BY 1 ASC
+            """
+        )
+        
     try:
-        rows = (await db.execute(q)).mappings().all()
+        rows = (await db.execute(q, {"threshold": threshold})).mappings().all()
         series = [{"week": str(r["w"]), "default_rate_pct": float(r["rate_pct"] or 0)} for r in rows]
-    except Exception:
+    except Exception as exc:
+        logger.warning("Default rate trend query failed: %s", exc, exc_info=True)
         series = []
 
     payload = {"period": period, "series": series}

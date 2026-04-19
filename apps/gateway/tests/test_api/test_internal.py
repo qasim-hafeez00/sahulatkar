@@ -9,6 +9,23 @@ pytestmark = pytest.mark.asyncio
 
 async def test_product_extracted_callback_success(client: AsyncClient, db_session, test_user):
     user, _ = test_user
+    from sk_shared.models.product import Merchant, Product
+
+    merchant = Merchant(name="Demo Merchant", normalized_name="demo-merchant", domain="example.com")
+    db_session.add(merchant)
+    await db_session.flush()
+    product = Product(
+        merchant_id=merchant.id,
+        name="IPhone 15",
+        url="https://example.com/item",
+        currency="PKR",
+        cost_price=90000.0,
+        sale_price=100000.0,
+        in_stock=True,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
     # 1. Create a dummy order in 'url_received' state
     order = Order(
         user_id=user.id,
@@ -23,7 +40,7 @@ async def test_product_extracted_callback_success(client: AsyncClient, db_sessio
     # 2. Call internal callback
     headers = {"X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN}
     payload = {
-        "product_id": 101,
+        "product_id": product.id,
         "name": "IPhone 15",
         "cost_price": 90000.0,
         "sale_price": 100000.0,
@@ -46,13 +63,13 @@ async def test_product_extracted_callback_success(client: AsyncClient, db_sessio
     assert order.status == OrderState.OFFER_PRESENTED
     assert float(order.total_amount) == 100000.0
     assert float(order.down_payment_amount) == 25000.0
-    assert order.product_id == 101
+    assert order.product_id == product.id
 
 async def test_product_extracted_invalid_token(client: AsyncClient, test_user):
     headers = {"X-Internal-Token": "wrong-token"}
     response = await client.post(
         "/api/v1/internal/orders/1/product-extracted",
-        json={},
+        json={"product_id": 1, "name": "x", "cost_price": 1, "sale_price": 1},
         headers=headers
     )
     assert response.status_code == 401
@@ -89,12 +106,11 @@ async def test_payment_confirmed_callback(client: AsyncClient, db_session, test_
     
     from sk_shared.models.payment import PaymentTransaction
     txn = PaymentTransaction(
-        order_id=order.id,
         user_id=user.id,
+        order_id=order.id,
         amount=250,
-        transaction_type="down_payment",
         status="pending",
-        provider="manual"
+        gateway="manual"
     )
     db_session.add(txn)
     await db_session.commit()

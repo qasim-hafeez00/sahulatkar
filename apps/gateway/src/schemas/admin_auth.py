@@ -1,0 +1,28 @@
+from __future__ import annotations
+
+from typing import Literal, Optional
+
+from pydantic import BaseModel, Field
+
+
+class AdminLoginRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    totp_code: Optional[str] = Field(default=None, min_length=6, max_length=6)
+
+
+class AdminLoginResponse(BaseModel):
+    access_token: str
+    token_type: str = "bearer"
+    admin_id: int
+    role: str
+
+
+class CreateAdminRequest(BaseModel):
+    email: str = Field(..., min_length=5, max_length=255)
+    password: str = Field(..., min_length=8, max_length=128)
+    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
+
+
+class AssignRoleRequest(BaseModel):
+    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"

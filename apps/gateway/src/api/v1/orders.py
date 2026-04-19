@@ -5,6 +5,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import User
+from sk_shared.models.delivery import Shipment, TrackingEvent
 from sk_shared.models.order import Order
 from src.core.dependencies import get_current_user, get_db
 from src.schemas.orders import (
@@ -27,7 +28,7 @@ async def initiate_order(
     db: AsyncSession = Depends(get_db),
 ):
     order = await OrderService(db).initiate(current_user, str(req.product_url))
-    return OrderInitiateResponse(order_id=order.id, status=order.status)
+    return OrderInitiateResponse(order_id=order.id, status="processing") # GAP-05
 
 
 @router.get("/{order_id}/offer", response_model=OrderOfferResponse)
@@ -101,3 +102,54 @@ async def get_my_order_detail(
         product_id=order.product_id,
         product_description=order.product_description,
     )
+
+
+@router.get("/{order_id}/tracking")
+async def get_order_tracking(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    order = await db.scalar(
+        select(Order).where(Order.id == order_id, Order.user_id == current_user.id, Order.deleted_at.is_(None))
+    )
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    shipment = await db.scalar(
+        select(Shipment).where(Shipment.order_id == order_id, Shipment.deleted_at.is_(None))
+    )
+    if shipment is None:
+        return {
+            "order_id": order_id,
+            "order_status": order.status,
+            "shipment": None,
+            "message": "Shipment not yet dispatched",
+        }
+
+    latest_event = await db.scalar(
+        select(TrackingEvent)
+        .where(TrackingEvent.shipment_id == shipment.id)
+        .order_by(TrackingEvent.event_time.desc())
+    )
+
+    return {
+        "order_id": order_id,
+        "order_status": order.status,
+        "shipment": {
+            "tracking_number": shipment.tracking_number,
+            "courier": shipment.courier_name,
+            "status": shipment.status,
+            "estimated_delivery": shipment.estimated_delivery.isoformat() if shipment.estimated_delivery else None,
+            "last_event": (
+                {
+                    "event_code": latest_event.event_code,
+                    "event_description": latest_event.event_description,
+                    "location_city": latest_event.location_city,
+                    "event_time": latest_event.event_time.isoformat(),
+                }
+                if latest_event
+                else None
+            ),
+        },
+    }

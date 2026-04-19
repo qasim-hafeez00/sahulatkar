@@ -54,7 +54,10 @@ async def test_admin_me_endpoint(client: AsyncClient, test_admin):
     admin, token = test_admin
     response = await client.get("/api/v1/admin/auth/me", headers=_auth(token))
     assert response.status_code == 200
-    assert response.json()["email"] == admin.email
+    data = response.json()
+    assert data["email"] == admin.email
+    assert data["mfa_enabled"] is False
+    assert "all_actions" in data["permissions"]
 
 async def test_assign_role_invalidates_sessions(client: AsyncClient, test_admin, redis_mock):
     admin, token = test_admin
@@ -64,8 +67,8 @@ async def test_assign_role_invalidates_sessions(client: AsyncClient, test_admin,
     assert await redis_mock.get(f"sk:auth:admin_session:{token_hash}") is not None
     
     # Assign new role
-    payload = {"role_id": "manager"}
-    response = await client.post(
+    payload = {"role": "analyst"}
+    response = await client.put(
         f"/api/v1/admin/auth/admins/{admin.id}/role",
         json=payload,
         headers=_auth(token)

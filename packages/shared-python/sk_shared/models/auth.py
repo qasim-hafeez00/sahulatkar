@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, SmallInteger, String
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, SmallInteger, String
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
@@ -18,6 +18,12 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     status: Mapped[str] = mapped_column(String(20), default="pending_kyc")
     failed_login_attempts: Mapped[int] = mapped_column(SmallInteger, default=0)
     locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Credit & Risk (GAP-13, GAP-17)
+    credit_limit: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0.0)
+    available_credit: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0.0)
+    risk_band: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
+    next_review_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     sessions: Mapped[list["UserSession"]] = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     devices: Mapped[list["UserDevice"]] = relationship("UserDevice", back_populates="user", cascade="all, delete-orphan")
@@ -43,6 +49,7 @@ class AdminUser(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     mfa_secret_encrypted: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     mfa_enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     force_password_change: Mapped[bool] = mapped_column(Boolean, default=False)
+    locked_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     role_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("roles.id"), nullable=True)
     
     role: Mapped[Optional["Role"]] = relationship("Role", back_populates="admin_users")

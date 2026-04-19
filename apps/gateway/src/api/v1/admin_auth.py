@@ -1,7 +1,6 @@
 import hashlib
 import uuid
 import pyotp
-from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
@@ -10,13 +9,12 @@ from sk_shared.models.auth import AdminUser, Role
 from src.core.kms import KMSProvider
 from src.core.audit import record_audit_event
 from src.schemas.auth import (
-    AdminAuthResponse,
     AdminMfaSetupResponse,
     AdminMfaVerifyRequest,
 )
 from src.services.auth import AuthService
 from src.services.rbac import RBACService
-from src.core.dependencies import get_db, get_redis, get_current_admin, RequirePermission
+from src.core.dependencies import get_db, get_redis, get_current_admin, get_current_admin_token_payload, RequirePermission
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import get_password_hash
 from src.schemas.admin_auth import AdminLoginRequest, AdminLoginResponse, AssignRoleRequest, CreateAdminRequest
@@ -29,13 +27,40 @@ from src.schemas.admin_auth import AdminLoginRequest, AdminLoginResponse, Assign
 
 router = APIRouter(prefix="/admin/auth", tags=["Admin Auth"])
 
-@router.post("/login", response_model=AdminAuthResponse)
+class AdminMeResponse(BaseModel):
+    admin_id: int
+    email: str
+    role: str | None = None
+    mfa_enabled: bool
+    permissions: list[str]
+
+
+@router.post("/login", response_model=AdminLoginResponse)
 async def admin_login(
     req: AdminLoginRequest,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis)
 ):
-    return await AuthService.admin_login(req, db, redis)
+    response = await AuthService.admin_login(req, db, redis)
+    token_hash = hashlib.sha256(response.access_token.encode()).hexdigest()
+    if hasattr(redis, "redis"):
+        await redis.redis.sadd(f"sk:auth:admin_sessions:{response.admin_id}", token_hash)
+        await redis.redis.expire(f"sk:auth:admin_sessions:{response.admin_id}", 28800)
+    return response
+
+
+@router.get("/me", response_model=AdminMeResponse)
+async def admin_me(
+    current_admin: AdminUser = Depends(get_current_admin),
+    payload: dict = Depends(get_current_admin_token_payload),
+) -> AdminMeResponse:
+    return AdminMeResponse(
+        admin_id=current_admin.id,
+        email=current_admin.email,
+        role=payload.get("role"),
+        mfa_enabled=current_admin.mfa_enabled,
+        permissions=payload.get("permissions", []),
+    )
 
 @router.post("/logout", status_code=204)
 async def admin_logout(
@@ -45,8 +70,7 @@ async def admin_logout(
 ):
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
-        token = auth_header.split(" ")[1]
-        import hashlib
+        token = auth_header.split(" ", 1)[1]
         token_hash = hashlib.sha256(token.encode()).hexdigest()
         await redis.delete(f"sk:auth:admin_session:{token_hash}")
     return
@@ -86,18 +110,7 @@ async def verify_mfa(
     admin.mfa_enabled = True
     await db.commit()
     return {"enabled": True}
-
-
 # ── Admin RBAC Management (GAP-29) ───────────────────────────────────────────
-
-class CreateAdminRequest(BaseModel):
-    email: str = Field(..., min_length=5, max_length=255)
-    password: str = Field(..., min_length=8, max_length=128)
-    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
-
-
-class AssignRoleRequest(BaseModel):
-    role: Literal["super_admin", "risk_officer", "kyc_reviewer", "analyst", "support"] = "analyst"
 
 
 @router.post("/admins", status_code=status.HTTP_201_CREATED)
@@ -179,7 +192,8 @@ async def assign_admin_role(
     sessions_key = f"sk:auth:admin_sessions:{admin_id}"
     session_hashes = await redis.redis.smembers(sessions_key)
     for h in session_hashes:
-        await redis.delete(f"sk:auth:admin_session:{h.decode()}")
+        token_hash = h.decode() if isinstance(h, bytes) else str(h)
+        await redis.delete(f"sk:auth:admin_session:{token_hash}")
     await redis.delete(sessions_key)
 
     return {
@@ -190,6 +204,7 @@ async def assign_admin_role(
     }
 
 
+# No local class definitions here; using src.schemas.admin_auth imports.
 @router.get("/roles")
 async def list_roles(
     current_admin: AdminUser = Depends(RequirePermission("manage_admins")),

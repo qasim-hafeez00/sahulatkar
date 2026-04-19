@@ -81,6 +81,8 @@ async def get_current_admin_token_payload(credentials: HTTPAuthorizationCredenti
         payload = decode_access_token(credentials.credentials, settings.JWT_PUBLIC_KEY)
         if "admin_id" not in payload:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload for admin")
+        if payload.get("token_type") != "admin":
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload for admin")
         return payload
     except Exception:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate admin credentials")

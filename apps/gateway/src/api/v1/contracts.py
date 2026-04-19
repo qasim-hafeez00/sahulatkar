@@ -1,7 +1,8 @@
 import hashlib
 from pathlib import Path
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from fastapi import Query
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser, User
@@ -11,7 +12,7 @@ from sk_shared.redis_client import RedisClient
 from sk_shared.storage import get_storage_client
 from src.config import settings
 from src.core.audit import record_audit_event
-from src.core.dependencies import get_current_admin, get_current_user, get_db, get_redis
+from src.core.dependencies import RequirePermission, get_current_admin, get_current_user, get_db, get_redis
 from src.schemas.contracts import (
     AdminContractResponse,
     ContractDisclosure,
@@ -75,6 +76,9 @@ async def sign_wakalah(
         target_id=contract.id,
         changes={"order_id": order.id, "contract_number": contract.contract_number},
     )
+    await db.commit()
+    await db.refresh(contract)
+    await db.refresh(order)
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
 
@@ -130,6 +134,9 @@ async def sign_murabaha(
         target_id=contract.id,
         changes={"order_id": order.id, "contract_number": contract.contract_number},
     )
+    await db.commit()
+    await db.refresh(contract)
+    await db.refresh(order)
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
 
@@ -138,22 +145,54 @@ async def sign_murabaha(
 # --- Admin Routes ---
 
 
-@router.get("/admin/wakalah", response_model=list[AdminContractResponse])
+@router.get("/admin/wakalah")
 async def list_wakalah(
-    current_admin: AdminUser = Depends(get_current_admin),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    user_id: int | None = Query(default=None),
+    signed: bool | None = Query(default=None),
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(WakalahAgreement).order_by(WakalahAgreement.created_at.desc()).limit(100))
-    return result.scalars().all()
+    offset = (page - 1) * limit
+    stmt = select(WakalahAgreement).where(WakalahAgreement.deleted_at.is_(None))
+    if user_id is not None:
+        stmt = stmt.where(WakalahAgreement.user_id == user_id)
+    if signed is not None:
+        stmt = stmt.where(WakalahAgreement.signed_at.is_not(None) if signed else WakalahAgreement.signed_at.is_(None))
+    total = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = (
+        await db.execute(stmt.order_by(WakalahAgreement.created_at.desc()).offset(offset).limit(limit))
+    ).scalars().all()
+    return {
+        "items": rows,
+        "pagination": {"page": page, "limit": limit, "total": total},
+    }
 
 
-@router.get("/admin/murabaha", response_model=list[AdminContractResponse])
+@router.get("/admin/murabaha")
 async def list_murabaha(
-    current_admin: AdminUser = Depends(get_current_admin),
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    user_id: int | None = Query(default=None),
+    signed: bool | None = Query(default=None),
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
     db: AsyncSession = Depends(get_db),
 ):
-    result = await db.execute(select(MurabahaContract).order_by(MurabahaContract.created_at.desc()).limit(100))
-    return result.scalars().all()
+    offset = (page - 1) * limit
+    stmt = select(MurabahaContract).where(MurabahaContract.deleted_at.is_(None))
+    if user_id is not None:
+        stmt = stmt.where(MurabahaContract.user_id == user_id)
+    if signed is not None:
+        stmt = stmt.where(MurabahaContract.signed_at.is_not(None) if signed else MurabahaContract.signed_at.is_(None))
+    total = int(await db.scalar(select(func.count()).select_from(stmt.subquery())) or 0)
+    rows = (
+        await db.execute(stmt.order_by(MurabahaContract.created_at.desc()).offset(offset).limit(limit))
+    ).scalars().all()
+    return {
+        "items": rows,
+        "pagination": {"page": page, "limit": limit, "total": total},
+    }
 
 
 @router.get("/admin/{contract_type}/{contract_id}/pdf")

@@ -73,6 +73,7 @@ async def submit_decision(
                 "queue_id": queue_id,
             },
         )
+        await db.commit()
         return kyc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))

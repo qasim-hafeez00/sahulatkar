@@ -10,6 +10,7 @@ class Order(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "orders"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_number: Mapped[str] = mapped_column(String(30), unique=True, nullable=True) # GAP-11
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     product_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("products.id", ondelete="SET NULL"), nullable=True)
     status: Mapped[str] = mapped_column(String(50), nullable=False, default="contracts_pending")

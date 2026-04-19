@@ -99,3 +99,33 @@ async def test_admin_list_users_returns_paginated_result(client: AsyncClient, te
     body = r.json()
     assert "items" in body
     assert "pagination" in body
+
+
+async def test_get_user_financial_summary(client: AsyncClient, test_user, test_admin):
+    user, _ = test_user
+    _, admin_token = test_admin
+    r = await client.get(f"/api/v1/admin/users/{user.id}/financial-summary", headers=_auth(admin_token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == user.id
+    assert "credit_limit" in body
+
+
+async def test_get_user_kyc_summary(client: AsyncClient, test_user, test_admin):
+    user, _ = test_user
+    _, admin_token = test_admin
+    r = await client.get(f"/api/v1/admin/users/{user.id}/kyc", headers=_auth(admin_token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == user.id
+    assert "profile" in body
+
+
+async def test_get_user_activity(client: AsyncClient, test_user, test_admin):
+    user, _ = test_user
+    _, admin_token = test_admin
+    r = await client.get(f"/api/v1/admin/users/{user.id}/activity", headers=_auth(admin_token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == user.id
+    assert "items" in body

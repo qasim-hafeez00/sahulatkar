@@ -13,6 +13,10 @@ from src.core.dependencies import get_current_admin, get_db, RequirePermission
 router = APIRouter(prefix="/admin/orders", tags=["Admin Orders"])
 
 
+def _iso(value):
+    return value.isoformat() if hasattr(value, "isoformat") else value
+
+
 @router.get("")
 async def list_admin_orders(
     page: int = Query(default=1, ge=1),
@@ -31,7 +35,7 @@ async def list_admin_orders(
     params: dict[str, object] = {"limit": limit, "offset": offset}
     
     if q:
-        where_clauses.append("(LOWER(orders.order_number) LIKE LOWER(:q) OR LOWER(users.email) LIKE LOWER(:q))")
+        where_clauses.append("(LOWER(CAST(orders.id AS TEXT)) LIKE LOWER(:q) OR LOWER('ORD-' || CAST(orders.id AS TEXT)) LIKE LOWER(:q) OR LOWER(users.phone) LIKE LOWER(:q))")
         params["q"] = f"%{q}%"
     
     if status:
@@ -41,7 +45,7 @@ async def list_admin_orders(
     where_clause = " AND ".join(where_clauses)
     sort_column_map = {
         "id": "id",
-        "order_number": "order_number",
+        "order_number": "id",
         "status": "status",
         "total_amount": "total_amount",
         "created_at": "created_at",
@@ -52,10 +56,10 @@ async def list_admin_orders(
     query = text(
         f"""
         SELECT 
-            orders.id, orders.order_number, orders.status, 
+            orders.id, orders.status, 
             orders.total_amount, orders.down_payment_amount, 
             orders.created_at,
-            users.email as user_email,
+            users.phone as user_phone,
             products.name as product_name
         FROM orders
         LEFT JOIN users ON orders.user_id = users.id
@@ -86,13 +90,13 @@ async def list_admin_orders(
         "orders": [
             {
                 "id": row["id"],
-                "order_number": row["order_number"],
-                "user_email": row["user_email"] or "Unknown",
+                "order_number": f"ORD-{row['id']}",
+                "user_phone": row["user_phone"] or "Unknown",
                 "product_name": row["product_name"] or "N/A",
                 "status": row["status"],
                 "total_amount": float(row["total_amount"]),
-                "down_payment": float(row["down_payment_amount"]),
-                "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+                "down_payment": float(row["down_payment_amount"] or 0),
+                "created_at": _iso(row["created_at"]),
             }
             for row in rows
         ],
@@ -112,10 +116,10 @@ async def get_admin_order_detail(
     query = text(
         """
         SELECT 
-            orders.id, orders.order_number, orders.status, 
+            orders.id, orders.status, 
             orders.total_amount, orders.down_payment_amount,
             orders.created_at, orders.user_id,
-            users.email as user_email, users.phone as user_phone,
+            users.phone as user_phone,
             products.name as product_name, products.sale_price
         FROM orders
         LEFT JOIN users ON orders.user_id = users.id
@@ -134,11 +138,10 @@ async def get_admin_order_detail(
     
     return {
         "id": row["id"],
-        "order_number": row["order_number"],
+        "order_number": f"ORD-{row['id']}",
         "status": row["status"],
         "user": {
             "id": row["user_id"],
-            "email": row["user_email"],
             "phone": row["user_phone"],
         },
         "product": {
@@ -147,8 +150,8 @@ async def get_admin_order_detail(
         },
         "totals": {
             "total_amount": float(row["total_amount"]),
-            "down_payment": float(row["down_payment_amount"]),
-            "remaining": float(row["total_amount"]) - float(row["down_payment_amount"]),
+            "down_payment": float(row["down_payment_amount"] or 0),
+            "remaining": float(row["total_amount"]) - float(row["down_payment_amount"] or 0),
         },
-        "created_at": row["created_at"].isoformat() if row["created_at"] else None,
+        "created_at": _iso(row["created_at"]),
     }

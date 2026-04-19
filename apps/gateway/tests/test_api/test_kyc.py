@@ -46,6 +46,7 @@ async def _seed_full_kyc(user_id: int, *, nadra_reject: bool = False) -> None:
         kyc = UserKycVerification(
             user_id=user_id,
             status=KycStatus.IN_REVIEW,
+            attempt_number=1,
             cnic_front_image_url="/tmp/front.jpg",
             cnic_back_image_url="/tmp/back.jpg",
             liveness_video_url="/tmp/video.mp4",
@@ -159,6 +160,7 @@ async def test_kyc_submit_rejected_by_liveness(client: AsyncClient, test_user):
         kyc = UserKycVerification(
             user_id=user.id,
             status=KycStatus.PENDING,
+            attempt_number=1,
             cnic_front_image_url="/tmp/ok_front.jpg",
             cnic_back_image_url="/tmp/ok_back.jpg",
             liveness_video_url="/tmp/spoof_video.mp4",  # triggers mock rejection

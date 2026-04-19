@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 from decimal import Decimal
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends
 from sqlalchemy import text
@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
+from src.core.logging import logger
 
 router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard"])
 
@@ -37,7 +38,7 @@ async def get_dashboard_summary(
         except Exception:
             pass
 
-    # 2. Compute dynamic Live KPIs
+        # 2. Compute dynamic Live KPIs
     try:
         active_users = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND status = 'active'"))
         total_orders = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM orders WHERE deleted_at IS NULL AND status NOT IN ('cancelled', 'refunded')"))
@@ -53,14 +54,28 @@ async def get_dashboard_summary(
         
         paid_installments = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status = 'paid'"))
         total_finished = overdue_installments + paid_installments
-        approved_risk = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM risk_assessments WHERE decision = 'approved' AND created_at > NOW() - INTERVAL '30 days'"))
-        total_risk = int(await _fetch_scalar(db, "SELECT COUNT(*) FROM risk_assessments WHERE created_at > NOW() - INTERVAL '30 days'"))
+        
+        # Portable threshold calculation
+        threshold_30d = datetime.now(timezone.utc) - timedelta(days=30)
+        
+        approved_risk_result = await db.execute(
+            text("SELECT COUNT(*) FROM risk_assessments WHERE decision = 'approved' AND created_at > :threshold"),
+            {"threshold": threshold_30d}
+        )
+        approved_risk = int(approved_risk_result.scalar_one_or_none() or 0)
+        
+        total_risk_result = await db.execute(
+            text("SELECT COUNT(*) FROM risk_assessments WHERE created_at > :threshold"),
+            {"threshold": threshold_30d}
+        )
+        total_risk = int(total_risk_result.scalar_one_or_none() or 0)
+        
         approval_rate = round((approved_risk / total_risk * 100), 2) if total_risk > 0 else 0.0
         
         default_rate = round((overdue_installments / total_finished * 100), 2) if total_finished > 0 else 0.0
 
     except Exception as e:
-        print(f"DASHBOARD ERROR: {e}")
+        logger.warning("Dashboard KPI query failed: %s", e, exc_info=True)
         active_users, total_orders, gmv_raw, pending_installments, overdue_installments, overdue_amount_pkr, default_rate, approval_rate = 0, 0, 0.0, 0, 0, 0.0, 0.0, 0.0
 
     response_payload = {

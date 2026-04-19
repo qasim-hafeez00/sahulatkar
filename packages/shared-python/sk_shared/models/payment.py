@@ -97,6 +97,7 @@ class PaymentTransaction(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "payment_transactions"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    order_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("orders.id", ondelete="SET NULL"), nullable=True)
     loan_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("loans.id", ondelete="SET NULL"), nullable=True)
     installment_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("installments.id", ondelete="SET NULL"), nullable=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
@@ -105,6 +106,8 @@ class PaymentTransaction(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR")
     gateway: Mapped[str] = mapped_column(String(20), nullable=False)
     gateway_txn_id: Mapped[Optional[str]] = mapped_column(String(255), unique=True, nullable=True)
+    transaction_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True) # GAP-10
+    provider: Mapped[Optional[str]] = mapped_column(String(30), nullable=True) # GAP-10 (e.g. manual, system)
     gateway_response: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="initiated")
     failure_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)

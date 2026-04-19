@@ -37,6 +37,10 @@ class Settings(BaseSettings):
     ADMIN_RATE_LIMIT_PER_MIN: int = 30  # per-admin IP rate cap
     REQUIRE_ADMIN_MFA: bool = True
 
+    # External payment webhooks
+    JAZZCASH_WEBHOOK_SECRET: Optional[str] = None
+    SAFEPAY_WEBHOOK_SECRET: Optional[str] = None
+
     # Inter-service security (P4-3)
     INTERNAL_SERVICE_TOKEN: str = "local-internal-token"
 

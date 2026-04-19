@@ -27,7 +27,10 @@ from sk_shared.models import order  # registers order models with Base.metadata
 from sk_shared.models import contracts  # registers contract models with Base.metadata
 from sk_shared.models import hitl       # HitlQueue
 from sk_shared.models import payment    # Loan, Installment, PaymentTransaction, VirtualCard
-from sk_shared.models import delivery   # Shipment, TrackingEvent
+try:
+    from sk_shared.models import delivery   # Shipment, TrackingEvent
+except ImportError:
+    delivery = None
 from sk_shared.models import audit      # AuditTrail
 from src.main import app
 from src.config import settings
@@ -71,7 +74,8 @@ def generate_test_keys():
 
 # ── In-memory database ────────────────────────────────────────────────────────
 
-test_engine = create_async_engine("sqlite+aiosqlite:///./test.db", echo=False)
+# ── In-memory database (Cache=shared is critical for concurrency in SQLite) ────────
+test_engine = create_async_engine("sqlite+aiosqlite:///:memory:?cache=shared", echo=False)
 TestingSessionLocal = async_sessionmaker(
     autocommit=False, autoflush=False, bind=test_engine, expire_on_commit=False
 )
@@ -91,6 +95,17 @@ def setup_test_keys():
     settings.JWT_PUBLIC_KEY = pub
 
 
+@pytest.fixture(scope="session", autouse=True)
+def configure_test_environment():
+    orig_env = settings.ENVIRONMENT
+    orig_mfa = settings.REQUIRE_ADMIN_MFA
+    settings.ENVIRONMENT = "test"
+    settings.REQUIRE_ADMIN_MFA = False
+    yield
+    settings.ENVIRONMENT = orig_env
+    settings.REQUIRE_ADMIN_MFA = orig_mfa
+
+
 @pytest.fixture
 def redis_mock() -> RedisClient:
     from fakeredis.aioredis import FakeRedis
@@ -102,7 +117,8 @@ from src.core.dependencies import get_db as gateway_get_db
 @pytest.fixture
 def override_dependencies(db_session: AsyncSession, redis_mock: RedisClient):
     async def shared_get_db() -> AsyncGenerator[AsyncSession, None]:
-        yield db_session
+        async with TestingSessionLocal() as session:
+            yield session
 
     app.dependency_overrides[gateway_get_db] = shared_get_db
     app.state.redis = redis_mock
@@ -118,11 +134,29 @@ def override_dependencies(db_session: AsyncSession, redis_mock: RedisClient):
 
 @pytest.fixture(autouse=True)
 async def db_setup():
-    async with test_engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    yield
+    # In-memory DB is clean on each startup, but shared cache persists across connections.
+    # We clear it explicitly at the start of each test.
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+        await conn.run_sync(Base.metadata.create_all)
+        await conn.exec_driver_sql(
+            """
+            CREATE TABLE IF NOT EXISTS risk_blacklist (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entry_type VARCHAR(20) NOT NULL,
+                value VARCHAR(255) NOT NULL,
+                reason VARCHAR(500) NOT NULL,
+                user_id INTEGER NULL,
+                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                deleted_at DATETIME NULL
+            )
+            """
+        )
+    yield
+    # No explicit drop needed at end for in-memory, but good for cleanliness.
+    # async with test_engine.begin() as conn:
+    #     await conn.run_sync(Base.metadata.drop_all)
 
 
 @pytest.fixture
@@ -191,7 +225,7 @@ async def test_admin(redis_mock: RedisClient):
         await session.refresh(admin)
 
     token = create_access_token(
-        {"admin_id": admin.id, "role": "super_admin", "permissions": ["all_actions"]},
+        {"admin_id": admin.id, "role": "super_admin", "permissions": ["all_actions"], "token_type": "admin"},
         settings.JWT_PRIVATE_KEY,
         timedelta(seconds=3600),
     )
@@ -202,5 +236,8 @@ async def test_admin(redis_mock: RedisClient):
         f"{admin.id}:super_admin",
         3600,
     )
+    if hasattr(redis_mock, "redis"):
+        await redis_mock.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
+        await redis_mock.redis.expire(f"sk:auth:admin_sessions:{admin.id}", 3600)
     
     return admin, token

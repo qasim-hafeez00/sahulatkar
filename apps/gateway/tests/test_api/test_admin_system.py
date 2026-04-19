@@ -21,6 +21,7 @@ async def test_get_system_parameters_defaults(client: AsyncClient, test_admin, r
     # Verify a couple of defaults
     assert data["parameters"]["max_credit_limit_pkr"] == 500000
     assert data["parameters"]["maintenance_mode"] is False
+    assert data["parameters"]["require_admin_mfa"] is True
     assert data["cached"] is False
 
 async def test_update_parameters_validation(client: AsyncClient, test_admin):
