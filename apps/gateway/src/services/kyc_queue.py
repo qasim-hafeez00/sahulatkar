@@ -8,6 +8,7 @@ from sk_shared.constants import QueueName
 from sk_shared.models.auth import User
 from sk_shared.models.kyc import KycStatus, KycVerificationQueue, UserKycVerification
 from sk_shared.redis_client import RedisClient
+from src.core.logging import logger
 
 
 class KycQueueService:
@@ -69,15 +70,19 @@ class KycQueueService:
             if user:
                 user.status = "active"
 
-            if self.redis and user:
+            if user and self.redis and hasattr(self.redis, "redis"):
                 job = {
                     "event": "kyc.approved",
                     "triggered_at": datetime.now(timezone.utc).isoformat(),
                     "user_id": str(user.uuid),
                     "kyc_verification_id": kyc.id,
                 }
-                if hasattr(self.redis, "redis"):
-                    await self.redis.redis.lpush(QueueName.CREDIT_ASSESS, json.dumps(job))
+                await self.redis.redis.lpush(QueueName.CREDIT_ASSESS, json.dumps(job))
+            elif user:
+                logger.error(
+                    "REDIS_MISSING: KYC approved for user %s but credit assess job not queued",
+                    user.id,
+                )
         else:
             kyc.status = KycStatus.REJECTED
             kyc.rejection_reason = reason or "Rejected by admin."

@@ -47,12 +47,16 @@ class RedisNS:
 class QueueName:
     CHECKOUT = "sk:queue:checkout"
     SCRAPING = "sk:queue:scraping"
+    # Compatibility alias used by gateway audit plan wording.
+    PRODUCT_EXTRACT = "sk:queue:scraping"
     PAYMENT_INITIATE = "sk:queue:payment_initiate"
     PAYMENT_WEBHOOK = "sk:queue:payment_webhook"
     VCN_ISSUE = "sk:queue:vcn_issue"
     BILLING_SWEEP = "sk:queue:billing_sweep"
     BILLING_RETRY = "sk:queue:billing_retry"
     NOTIFICATION_SMS = "sk:queue:notification_sms"
+    # Generic notification alias for publishers that do not choose a channel.
+    NOTIFICATION = "sk:queue:notification_sms"
     NOTIFICATION_PUSH = "sk:queue:notification_push"
     NOTIFICATION_EMAIL = "sk:queue:notification_email"
     NOTIFICATION_WHATSAPP = "sk:queue:notification_whatsapp"

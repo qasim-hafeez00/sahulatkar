@@ -2,9 +2,11 @@
 test_orders.py — Full user order flow: initiate → offer → accept
 """
 import pytest
+from datetime import datetime, timedelta, timezone
 from httpx import AsyncClient
 from sqlalchemy import select
 from sk_shared.models.order import Order
+from sk_shared.models.audit import AuditTrail
 
 pytestmark = pytest.mark.asyncio
 
@@ -53,6 +55,49 @@ async def test_initiate_order_succeeds_for_active_user(client: AsyncClient, test
     body = r.json()
     assert "order_id" in body
     assert body["status"] == "processing"
+
+
+async def test_initiate_order_blocked_for_prohibited_category(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=100000, available_credit=100000)
+    )
+    await db_session.commit()
+
+    r = await client.post(
+        "/api/v1/orders/initiate",
+        json={"product_url": "https://example.com/shop/alcohol-special-offer"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 422
+    assert "PROHIBITED_PRODUCT_CATEGORY" in r.json()["detail"]
+
+
+async def test_too_many_active_orders_blocked(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=100000, available_credit=100000)
+    )
+    await db_session.commit()
+
+    active_statuses = ["url_received", "offer_presented", "offer_accepted", "contracts_pending", "contracts_signed"]
+    for idx, status_value in enumerate(active_statuses, start=1):
+        db_session.add(Order(user_id=user.id, status=status_value, total_amount=1000 * idx, product_description=f"seed-{idx}"))
+    await db_session.commit()
+
+    r = await client.post(
+        "/api/v1/orders/initiate",
+        json={"product_url": "https://example.com/products/allowed-item"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 403
+    assert "TOO_MANY_ACTIVE_ORDERS" in r.json()["detail"]
 
 
 async def test_get_order_tracking_returns_shipment(client: AsyncClient, test_user, db_session):
@@ -113,6 +158,25 @@ async def test_get_order_offer_returns_pending_when_no_product(client: AsyncClie
     r = await client.get(f"/api/v1/orders/{order.id}/offer", headers=_auth(token))
     assert r.status_code == 200
     assert r.json()["status"] == "pending"
+
+
+async def test_get_order_offer_times_out_to_extraction_failed(client: AsyncClient, test_user, db_session):
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    await db_session.execute(update(User).where(User.id == user.id).values(status="active"))
+    await db_session.commit()
+
+    order = Order(user_id=user.id, status="url_received", total_amount=0, product_description="https://test.com")
+    order.created_at = datetime.now(timezone.utc) - timedelta(minutes=12)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    r = await client.get(f"/api/v1/orders/{order.id}/offer", headers=_auth(token))
+    assert r.status_code == 200
+    assert r.json()["status"] == "extraction_failed"
 
 
 async def test_list_orders_empty_for_new_user(client: AsyncClient, test_user):
@@ -221,6 +285,16 @@ async def test_cancel_order_offer_accepted_restores_credit(client: AsyncClient, 
 
     refreshed_user = await db_session.scalar(select(User).where(User.id == user.id))
     assert float(refreshed_user.available_credit or 0) == 8000
+
+    audit = await db_session.scalar(
+        select(AuditTrail).where(
+            AuditTrail.customer_user_id == user.id,
+            AuditTrail.module == "orders",
+            AuditTrail.action == "order_cancelled",
+            AuditTrail.target_id == order.id,
+        )
+    )
+    assert audit is not None
 
 
 async def test_concurrent_order_accept_credit_race(client: AsyncClient, test_user, db_session):

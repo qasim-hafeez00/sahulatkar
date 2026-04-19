@@ -33,11 +33,13 @@ async def test_update_parameters_validation(client: AsyncClient, test_admin):
     assert response.status_code == 400
     assert "Unknown parameter keys" in response.json()["detail"]
     
-    # 2. Valid key but DB missing (should return 501 in test sqlite environment)
+    # 2. Valid key should upsert successfully with ORM-backed system_parameters table
     payload = {"parameters": {"maintenance_mode": True}}
     response = await client.put("/api/v1/admin/system/parameters", json=payload, headers=_auth(admin_token))
-    assert response.status_code == 501
-    assert "SYSTEM_PARAMS_TABLE_MISSING" in response.json()["detail"]
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "ok"
+    assert "maintenance_mode" in data["updated"]
 
 async def test_get_parameters_cached(client: AsyncClient, test_admin, redis_mock):
     _, admin_token = test_admin

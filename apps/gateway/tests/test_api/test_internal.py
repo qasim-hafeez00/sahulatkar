@@ -303,6 +303,7 @@ async def test_checkout_failed_creates_hitl(client: AsyncClient, db_session, tes
     assert order.status == OrderState.PURCHASE_FAILED
     hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.order_id == order.id))
     assert hitl is not None
+    assert hitl.sla_deadline is not None
 
 
 async def test_checkout_succeeded_updates_order_status(client: AsyncClient, db_session, test_user):

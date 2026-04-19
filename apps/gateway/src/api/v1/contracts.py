@@ -199,6 +199,7 @@ async def list_murabaha(
 async def get_contract_pdf(
     contract_id: int,
     contract_type: str,
+    request: Request,
     current_admin: AdminUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
 ):
@@ -207,8 +208,34 @@ async def get_contract_pdf(
     if not contract:
         raise HTTPException(status_code=404, detail="CONTRACT_NOT_FOUND")
 
-    # In a real app, return a presigned S3 URL
-    return {"pdf_path": contract.contract_pdf_path, "download_url": "https://s3.example.com/placeholder-presigned-url"}
+    storage = get_storage_client(settings)
+    raw_path = str(contract.contract_pdf_path)
+    key = raw_path
+    if raw_path.startswith("s3://"):
+        parts = raw_path.split("/", 3)
+        key = parts[3] if len(parts) > 3 else ""
+
+    if hasattr(storage, "base_dir") and Path(raw_path).exists():
+        download_url = f"file://{Path(raw_path).absolute()}"
+    else:
+        download_url = await storage.get_download_url(key, expires_in=900)
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="contracts",
+        action="admin_contract_pdf_accessed",
+        target_id=contract_id,
+        changes={"contract_type": contract_type},
+    )
+    await db.commit()
+
+    return {
+        "pdf_path": contract.contract_pdf_path,
+        "download_url": download_url,
+        "expires_in": 900,
+    }
 
 
 @router.get("/{order_id}", response_model=ContractStatusResponse)

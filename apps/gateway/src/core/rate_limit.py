@@ -1,4 +1,5 @@
 import time
+import hashlib
 from fastapi import Request, HTTPException, status
 from fastapi.responses import JSONResponse
 from sk_shared.redis_client import RedisClient
@@ -16,22 +17,23 @@ class RateLimiter:
         :param limit: Maximum number of requests allowed in the window
         :param window: Window size in seconds
         """
-        # Simplified sliding window using Redis sorted sets or fixed window using INCR
-        # We'll use fixed window for simplicity and performance in this sprint
-        current_time = int(time.time())
-        window_key = f"sk:rate_limit:{key}:{current_time // window}"
-        
-        count = await self.redis.incr(window_key)
-        if count == 1:
-            await self.redis.expire(window_key, window)
-        
-        if count > limit:
+        current_time = time.time()
+        window_key = f"sk:rate_limit:{key}"
+        redis_instance = self.redis.redis if hasattr(self.redis, "redis") else self.redis
+
+        await redis_instance.zremrangebyscore(window_key, 0, current_time - window)
+        current_count = await redis_instance.zcard(window_key)
+        if current_count >= limit:
             return False
+
+        member = f"{current_time}:{time.monotonic_ns()}"
+        await redis_instance.zadd(window_key, {member: current_time})
+        await redis_instance.expire(window_key, window)
         return True
 
 async def rate_limit_middleware(request: Request, call_next):
     # Global bypass for health check
-    if request.url.path == "/health":
+    if request.url.path in {"/health", "/api/v1/health-check"}:
         return await call_next(request)
     
     # TASK-17 FIX: Bypass rate limiting for internal service endpoints
@@ -47,11 +49,12 @@ async def rate_limit_middleware(request: Request, call_next):
     redis = request.app.state.redis
     limiter = RateLimiter(redis)
     
-    ip = request.client.host
+    ip = request.client.host if request.client and request.client.host else "unknown"
+    ip_key = hashlib.md5(ip.encode("utf-8")).hexdigest()[:16]
     path = request.url.path
     
     # Global limit: 100 requests per minute
-    is_allowed = await limiter.check_rate_limit(f"global:{ip}", 100, 60)
+    is_allowed = await limiter.check_rate_limit(f"global:{ip_key}", 100, 60)
     if not is_allowed:
         return JSONResponse(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
@@ -61,7 +64,7 @@ async def rate_limit_middleware(request: Request, call_next):
     # Endpoint specific limits
     if "/auth/verify-otp" in path or "/auth/login" in path:
         # 10 attempts per minute
-        if not await limiter.check_rate_limit(f"auth:{ip}", 10, 60):
+        if not await limiter.check_rate_limit(f"auth:{ip_key}", 10, 60):
             return JSONResponse(
                 status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                 content={"detail": "Too many authentication attempts. Please wait a minute."}
@@ -85,9 +88,7 @@ async def rate_limit_middleware(request: Request, call_next):
 
         admin_id = payload.get("admin_id")
         if admin_id and payload.get("token_type") == "admin":
-            # M-08: apply a tiny safety buffer to avoid edge flakiness at exact threshold.
-            effective_limit = max(int(settings.ADMIN_RATE_LIMIT_PER_MIN) - 1, 1)
-            if not await limiter.check_rate_limit(f"admin:{admin_id}", effective_limit, 60):
+            if not await limiter.check_rate_limit(f"admin:{admin_id}", int(settings.ADMIN_RATE_LIMIT_PER_MIN), 60):
                 return JSONResponse(
                     status_code=status.HTTP_429_TOO_MANY_REQUESTS,
                     content={"detail": "Admin rate limit exceeded."},

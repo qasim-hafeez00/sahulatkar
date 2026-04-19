@@ -11,8 +11,11 @@ from sk_shared.models.credit import CreditLimitHistory, RiskAssessment
 from sk_shared.models.payment import Installment, Loan
 from src.core.logging import logger
 
-from src.core.dependencies import get_current_admin, get_current_admin_token_payload, get_db, RequirePermission
+from src.core.dependencies import get_current_admin, get_current_admin_token_payload, get_db, get_redis, RequirePermission
 from src.core.audit import record_audit_event
+from sk_shared.redis_client import RedisClient
+from sk_shared.constants import QueueName
+import json
 
 router = APIRouter(prefix="/admin/users", tags=["Admin Users"])
 
@@ -323,13 +326,18 @@ async def update_user_status(
     user_id: int,
     payload: UpdateUserStatusRequest,
     request: Request,
-    current_admin: AdminUser = Depends(RequirePermission("update_user")),
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
+    await db.execute(
+        text("UPDATE users SET status = :status WHERE id = :user_id AND deleted_at IS NULL"),
+        {"status": payload.status, "user_id": user_id},
+    )
     row = (
         await db.execute(
-            text("UPDATE users SET status = :status WHERE id = :user_id AND deleted_at IS NULL RETURNING id, status"),
-            {"status": payload.status, "user_id": user_id},
+            text("SELECT id, status FROM users WHERE id = :user_id AND deleted_at IS NULL"),
+            {"user_id": user_id},
         )
     ).mappings().one_or_none()
     if row is None:
@@ -344,6 +352,18 @@ async def update_user_status(
         target_id=user_id,
         changes={"status": payload.status},
     )
+
+    if hasattr(redis, "redis"):
+        notification_event = json.dumps(
+            {
+                "event": "account.status_changed",
+                "user_id": user_id,
+                "new_status": payload.status,
+                "admin_id": current_admin.id,
+            }
+        )
+        await redis.redis.lpush(QueueName.NOTIFICATION_SMS, notification_event)
+
     await db.commit()
     return {"user_id": row["id"], "status": row["status"]}
 
@@ -469,6 +489,55 @@ async def get_user_loans(
                 "total_repayable": float(r["total_repayable"] or 0),
                 "installment_count": r["installment_count"],
                 "created_at": r["created_at"],
+            }
+            for r in rows
+        ],
+        "pagination": {"page": page, "limit": limit, "total": total},
+    }
+
+
+@router.get("/{user_id}/installments")
+async def get_user_installments(
+    user_id: int,
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=25, ge=1, le=100),
+    current_admin: AdminUser = Depends(RequirePermission("read_user_financials")),
+    db: AsyncSession = Depends(get_db),
+) -> dict[str, object]:
+    offset = (page - 1) * limit
+    q = text(
+        """
+        SELECT i.id, i.loan_id, i.installment_number, i.total_amount, i.paid_amount,
+               i.due_date, i.paid_at, i.status, i.days_overdue, i.late_fee_amount,
+               l.loan_number, l.order_id
+        FROM installments i
+        JOIN loans l ON i.loan_id = l.id
+        WHERE i.user_id = :user_id AND i.deleted_at IS NULL
+        ORDER BY i.due_date ASC
+        LIMIT :limit OFFSET :offset
+        """
+    )
+    count_q = text("SELECT COUNT(*) FROM installments WHERE user_id = :user_id AND deleted_at IS NULL")
+
+    rows = (await db.execute(q, {"user_id": user_id, "limit": limit, "offset": offset})).mappings().all()
+    total = int((await db.execute(count_q, {"user_id": user_id})).scalar_one() or 0)
+
+    return {
+        "user_id": user_id,
+        "items": [
+            {
+                "id": r["id"],
+                "loan_id": r["loan_id"],
+                "loan_number": r["loan_number"],
+                "order_id": r["order_id"],
+                "installment_number": r["installment_number"],
+                "total_amount": float(r["total_amount"] or 0),
+                "paid_amount": float(r["paid_amount"] or 0),
+                "due_date": r["due_date"],
+                "paid_at": r["paid_at"],
+                "status": r["status"],
+                "days_overdue": r["days_overdue"],
+                "late_fee_amount": float(r["late_fee_amount"] or 0),
             }
             for r in rows
         ],

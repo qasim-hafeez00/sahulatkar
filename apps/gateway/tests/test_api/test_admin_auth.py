@@ -108,3 +108,26 @@ async def test_admin_totp_lockout_after_failed_attempts(client: AsyncClient):
     locked = await client.post("/api/v1/admin/auth/login", json=payload)
     assert locked.status_code == 429
     assert locked.json()["detail"] == "TOTP_LOCKED_TOO_MANY_ATTEMPTS"
+
+
+async def test_create_admin_endpoint(client: AsyncClient, test_admin):
+    _, admin_token = test_admin
+    payload = {
+        "email": "newadmin@test.com",
+        "password": "StrongPass123",
+        "role": "analyst",
+    }
+    response = await client.post("/api/v1/admin/auth/admins", json=payload, headers=_auth(admin_token))
+    assert response.status_code == 201
+    data = response.json()
+    assert data["email"] == "newadmin@test.com"
+    assert "admin_id" in data
+
+
+async def test_list_admin_roles_endpoint(client: AsyncClient, test_admin):
+    _, admin_token = test_admin
+    response = await client.get("/api/v1/admin/auth/roles", headers=_auth(admin_token))
+    assert response.status_code == 200
+    data = response.json()
+    assert "roles" in data
+    assert any(role["name"] == "super_admin" for role in data["roles"])

@@ -24,7 +24,7 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         # SEC-07: Defense-in-depth origin check for admin state-changing calls.
         if (
-            settings.ENVIRONMENT == "production"
+            settings.ENVIRONMENT in {"production", "staging"}
             and request.url.path.startswith("/api/v1/admin")
             and request.method in {"POST", "PUT", "PATCH", "DELETE"}
             and not request.url.path.startswith("/api/v1/admin/auth/login")
@@ -41,4 +41,5 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+        response.headers["Content-Security-Policy"] = "default-src 'none'"
         return response

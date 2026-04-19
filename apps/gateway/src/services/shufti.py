@@ -1,5 +1,6 @@
 import logging
 import asyncio
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -10,7 +11,8 @@ class ShuftiClientMock:
         """
         Mock document OCR extraction.
         """
-        await asyncio.sleep(1.0)  # Simulate network call
+        if settings.ENVIRONMENT != "test":
+            await asyncio.sleep(1.0)  # Simulate network call
         
         if "invalid" in front_image_url.lower():
             return {"success": False, "reason": "Blurry document"}
@@ -28,7 +30,8 @@ class ShuftiClientMock:
         """
         Mock liveness check.
         """
-        await asyncio.sleep(1.5) # Simulate processing
+        if settings.ENVIRONMENT != "test":
+            await asyncio.sleep(1.5) # Simulate processing
         
         if "spoof" in video_url.lower():
              return {"success": False, "reason": "Face spoofing detected"}

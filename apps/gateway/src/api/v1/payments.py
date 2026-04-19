@@ -1,12 +1,13 @@
 import json
 from datetime import datetime, timezone
 from decimal import Decimal
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, HTTPException, Request, Header, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import OrderState, QueueName
+from sk_shared.constants import RedisNS
 from sk_shared.models.auth import User
 from sk_shared.models.order import Order, OrderStatusHistory
 from sk_shared.models.payment import Installment, Loan, PaymentTransaction
@@ -23,6 +24,45 @@ from src.schemas.payments import (
 )
 
 router = APIRouter(prefix="/payments", tags=["payments"])
+IDEMPOTENCY_TTL_SECONDS = 24 * 60 * 60
+
+
+def _idempotency_cache_key(user_id: int, scope: str, idempotency_key: str) -> str:
+    return f"{RedisNS.PAYMENT_IDEMPOTENT}:{scope}:{user_id}:{idempotency_key}"
+
+
+async def _idempotency_get_cached(
+    redis: RedisClient,
+    user_id: int,
+    scope: str,
+    idempotency_key: str | None,
+) -> DownPaymentResponse | None:
+    if not idempotency_key:
+        return None
+    cached = await redis.get(_idempotency_cache_key(user_id, scope, idempotency_key))
+    if not cached:
+        return None
+    try:
+        payload = json.loads(cached)
+        return DownPaymentResponse(**payload)
+    except Exception:
+        return None
+
+
+async def _idempotency_set_cached(
+    redis: RedisClient,
+    user_id: int,
+    scope: str,
+    idempotency_key: str | None,
+    response: DownPaymentResponse,
+) -> None:
+    if not idempotency_key:
+        return
+    await redis.set(
+        _idempotency_cache_key(user_id, scope, idempotency_key),
+        response.model_dump_json(),
+        IDEMPOTENCY_TTL_SECONDS,
+    )
 
 
 class InstallmentPayBody(BaseModel):
@@ -42,7 +82,17 @@ async def _submit_installment_payment(
     current_user: User,
     db: AsyncSession,
     redis: RedisClient,
+    idempotency_key: str | None = None,
 ) -> DownPaymentResponse:
+    cached = await _idempotency_get_cached(
+        redis,
+        current_user.id,
+        f"installment:{installment_id}",
+        idempotency_key,
+    )
+    if cached is not None:
+        return cached
+
     installment = await db.scalar(
         select(Installment).where(
             Installment.id == installment_id,
@@ -103,12 +153,20 @@ async def _submit_installment_payment(
     if hasattr(redis, "redis"):
         await redis.redis.lpush(QueueName.PAYMENT_INITIATE, payment_job)
 
-    return DownPaymentResponse(
+    response = DownPaymentResponse(
         payment_id=payment.id,
         status=payment.status,
         transaction_id=getattr(payment, "gateway_txn_id", None),
         checkout_url=None,
     )
+    await _idempotency_set_cached(
+        redis,
+        current_user.id,
+        f"installment:{installment_id}",
+        idempotency_key,
+        response,
+    )
+    return response
 
 
 @router.post("/vcn/issue", response_model=VcnIssueResponse)
@@ -175,10 +233,20 @@ async def issue_vcn(
 async def create_down_payment(
     req: DownPaymentRequest,
     request: Request,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    cached = await _idempotency_get_cached(
+        redis,
+        current_user.id,
+        f"down_payment:{req.order_id}",
+        idempotency_key,
+    )
+    if cached is not None:
+        return cached
+
     # Lock order row to make duplicate down-payment initiation race-safe.
     order = await db.scalar(
         select(Order).where(
@@ -252,12 +320,20 @@ async def create_down_payment(
     if hasattr(redis, "redis"):
         await redis.redis.lpush(QueueName.PAYMENT_INITIATE, payment_job)
 
-    return DownPaymentResponse(
+    response = DownPaymentResponse(
         payment_id=payment.id,
         status=payment.status,
         transaction_id=getattr(payment, "gateway_txn_id", None),
         checkout_url=None, # Will be set by webhook or orchestrator
     )
+    await _idempotency_set_cached(
+        redis,
+        current_user.id,
+        f"down_payment:{req.order_id}",
+        idempotency_key,
+        response,
+    )
+    return response
 
 
 @router.get("/schedule/{order_id}", response_model=PaymentScheduleResponse)
@@ -307,6 +383,7 @@ async def pay_installment(
     installment_id: int,
     payload: InstallmentPayBody,
     request: Request,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
@@ -319,6 +396,7 @@ async def pay_installment(
         current_user=current_user,
         db=db,
         redis=redis,
+        idempotency_key=idempotency_key,
     )
 
 
@@ -326,6 +404,7 @@ async def pay_installment(
 async def pay_installment_legacy(
     payload: InstallmentPayRequest,
     request: Request,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
@@ -338,6 +417,7 @@ async def pay_installment_legacy(
         current_user=current_user,
         db=db,
         redis=redis,
+        idempotency_key=idempotency_key,
     )
 
 

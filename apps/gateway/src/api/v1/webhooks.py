@@ -17,11 +17,13 @@ router = APIRouter(prefix="/webhooks", tags=["webhooks"])
 
 
 def _verify_signature(secret: str | None, raw_body: bytes, signature: str) -> None:
-    # M-02 FIX: Warn if secret is missing instead of silently skipping
     if not secret:
-        logger.warning("WEBHOOK_SECRET_MISSING: Signature verification skipped because secret is not configured")
-        return
-    expected = hmac.new(secret.encode(), raw_body, hashlib.sha256).hexdigest()
+        logger.error("WEBHOOK_SECRET_MISSING: refusing webhook because secret is not configured")
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="WEBHOOK_SECRET_NOT_CONFIGURED",
+        )
+    expected = hmac.new(secret.encode(), raw_body, digestmod=hashlib.sha256).hexdigest()
     if not hmac.compare_digest(expected, signature):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_WEBHOOK_SIGNATURE")
 
@@ -36,6 +38,14 @@ def _enforce_json_content_type(request: Request) -> None:
         )
 
 
+def _enforce_payload_size(raw_body: bytes) -> None:
+    if len(raw_body) > settings.WEBHOOK_MAX_BODY_SIZE:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail="WEBHOOK_PAYLOAD_TOO_LARGE",
+        )
+
+
 async def _enqueue_webhook(redis: RedisClient, payload: dict) -> None:
     if hasattr(redis, "redis"):
         await redis.redis.lpush(QueueName.PAYMENT_WEBHOOK, json.dumps(payload)) # GAP-09
@@ -45,6 +55,7 @@ async def _enqueue_webhook(redis: RedisClient, payload: dict) -> None:
 async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
     _enforce_json_content_type(request)
     raw_body = await request.body()
+    _enforce_payload_size(raw_body)
     _verify_signature(settings.JAZZCASH_WEBHOOK_SECRET, raw_body, request.headers.get("X-JazzCash-Signature", ""))
     payload = await request.json()
     status_value = "confirmed" if str(payload.get("pp_ResponseCode")) == "000" else "failed"
@@ -65,6 +76,7 @@ async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_re
 async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
     _enforce_json_content_type(request)
     raw_body = await request.body()
+    _enforce_payload_size(raw_body)
     _verify_signature(settings.SAFEPAY_WEBHOOK_SECRET, raw_body, request.headers.get("X-SafePay-Signature", ""))
     payload = await request.json()
     await _enqueue_webhook(

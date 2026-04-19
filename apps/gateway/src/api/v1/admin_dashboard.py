@@ -109,7 +109,11 @@ async def get_dashboard_summary(
         "cached": False
     }
 
-    # 3. Cache Population (TTL: 5 mins)
-    await redis.set(CACHE_KEY, json.dumps({**response_payload, "cached": True}), 300)
+    # 3. Cache Population (short TTL to keep operational metrics fresh)
+    await redis.set(
+        CACHE_KEY,
+        json.dumps({**response_payload, "cached": True}),
+        int(settings.ADMIN_DASHBOARD_CACHE_TTL),
+    )
 
     return response_payload

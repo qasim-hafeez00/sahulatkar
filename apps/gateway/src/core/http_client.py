@@ -14,12 +14,20 @@ class InternalServiceClient:
     async def stop(cls):
         if cls.client:
             await cls.client.aclose()
+            cls.client = None
 
     @classmethod
     def get_client(cls) -> httpx.AsyncClient:
         if not cls.client:
              raise RuntimeError("InternalServiceClient is not initialized")
         return cls.client
+
+    @classmethod
+    async def reset_for_tests(cls) -> None:
+        """Best-effort explicit reset for test isolation."""
+        if cls.client:
+            await cls.client.aclose()
+        cls.client = None
 
     @staticmethod
     def signed_headers(request_id: str | None = None) -> dict[str, str]:

@@ -4,6 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 from typing import Optional
 from datetime import datetime, timezone
+from datetime import timedelta
 import secrets
 import json
 
@@ -456,6 +457,8 @@ async def checkout_status_callback(
         }
         if hasattr(HitlQueue, "failure_type"):
             hitl_kwargs["failure_type"] = payload.failure_type
+        if hasattr(HitlQueue, "sla_deadline"):
+            hitl_kwargs["sla_deadline"] = datetime.now(timezone.utc) + timedelta(hours=4)
         hitl = HitlQueue(**hitl_kwargs)
         db.add(hitl)
 

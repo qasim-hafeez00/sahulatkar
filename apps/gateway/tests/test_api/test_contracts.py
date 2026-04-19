@@ -7,6 +7,7 @@ from sk_shared.constants import OrderState, RedisNS
 from sk_shared.models.contracts import MurabahaContract
 from sk_shared.models.contracts import WakalahAgreement
 from sk_shared.models.order import Order
+from sk_shared.models.payment import Installment, Loan
 from sk_shared.models.product import Merchant, Product
 from sk_shared.security import hash_otp
 from tests.conftest import TestingSessionLocal
@@ -105,6 +106,26 @@ async def test_contracts_happy_path(client, test_user, redis_mock):
     assert status_data["wakalah_signed"] is True
     assert status_data["murabaha_signed"] is True
     assert status_data["financial_summary"]["total_sale_price"] == 10400.0
+
+    async with TestingSessionLocal() as session:
+        loan = await session.scalar(select(Loan).where(Loan.order_id == order.id, Loan.user_id == user.id))
+        assert loan is not None
+        assert float(loan.total_paid or 0) == 0.0
+        assert float(loan.total_outstanding or 0) > 0
+        assert float(loan.late_fee_total or 0) == 0.0
+
+        installments = (
+            await session.execute(
+                select(Installment).where(Installment.loan_id == loan.id).order_by(Installment.installment_number.asc())
+            )
+        ).scalars().all()
+        assert len(installments) == 4
+        for inst in installments:
+            assert float(inst.paid_amount or 0) == 0.0
+            assert int(inst.days_overdue or 0) == 0
+            assert float(inst.late_fee_amount or 0) == 0.0
+            assert bool(inst.late_fee_waived) is False
+            assert int(inst.retry_count or 0) == 0
 
 
 async def test_murabaha_generate_requires_wakalah_signed(client, test_user):
@@ -231,4 +252,27 @@ async def test_shariah_compliance_requires_disclosure_fields(test_user):
 
         with pytest.raises(IntegrityError):
             await session.commit()
+
+
+async def test_admin_contract_pdf_returns_download_url(client, test_user, test_admin):
+    user, token = test_user
+    _, admin_token = test_admin
+    order = await _seed_order(user.id)
+
+    r_wk_gen = await client.post(
+        "/api/v1/contracts/wakalah/generate",
+        headers=_auth(token),
+        json={"order_id": order.id},
+    )
+    assert r_wk_gen.status_code == 200
+    wk_contract_id = r_wk_gen.json()["contract_id"]
+
+    r_pdf = await client.get(
+        f"/api/v1/contracts/admin/wakalah/{wk_contract_id}/pdf",
+        headers=_auth(admin_token),
+    )
+    assert r_pdf.status_code == 200
+    data = r_pdf.json()
+    assert "download_url" in data
+    assert data["download_url"]
 

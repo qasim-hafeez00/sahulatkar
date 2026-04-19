@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import json
+
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sk_shared.constants import QueueName
 from sk_shared.models.order import Order, OrderStatusHistory
 from sk_shared.models.product import Product
+from sk_shared.redis_client import RedisClient
 from src.core.http_client import InternalServiceClient
+from src.core.logging import logger
+
+PROHIBITED_KEYWORDS = [
+    "tobacco",
+    "cigarette",
+    "alcohol",
+    "liquor",
+    "gambling",
+    "casino",
+    "betting",
+    "lottery",
+]
 
 
 class OrderService:
@@ -20,11 +36,28 @@ class OrderService:
             return 1_000_000_000.0
         return float(credit)
 
-    async def initiate(self, user, product_url: str) -> Order:
+    @staticmethod
+    def _check_prohibited_url(url: str) -> None:
+        url_lower = url.lower()
+        for keyword in PROHIBITED_KEYWORDS:
+            if keyword in url_lower:
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"PROHIBITED_PRODUCT_CATEGORY: {keyword}",
+                )
+
+    async def initiate(
+        self,
+        user,
+        product_url: str,
+        redis: RedisClient | None = None,
+        request_id: str | None = None,
+    ) -> Order:
         if user.status != "active":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="KYC_NOT_APPROVED")
         if self._available_credit(user) <= 0:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="NO_CREDIT_AVAILABLE")
+        self._check_prohibited_url(product_url)
 
         # BL-05 FIX: Prevent users from spamming active orders (max 5 non-terminal orders)
         active_orders_count = await self.db.scalar(
@@ -59,16 +92,24 @@ class OrderService:
         await self.db.commit()
         await self.db.refresh(order)
 
+        if redis and hasattr(redis, "redis"):
+            job = {
+                "event": "product.extract_requested",
+                "order_id": order.id,
+                "product_url": product_url,
+            }
+            await redis.redis.lpush(QueueName.PRODUCT_EXTRACT, json.dumps(job))
+
         # Best-effort internal kickoff; do not fail user request if unavailable.
         try:
             client = InternalServiceClient.get_client()
             await client.post(
-                "/internal/product/extract",
-                json={"order_id": order.id, "product_url": product_url},
-                headers=InternalServiceClient.signed_headers(),
+                "/v1/products/extract",
+                json={"raw_url": product_url},
+                headers=InternalServiceClient.signed_headers(request_id=request_id),
             )
-        except Exception:
-            pass
+        except Exception as exc:
+            logger.warning("PRODUCT_EXTRACT_NUDGE_FAILED order=%s error=%s", order.id, exc)
 
         return order
 

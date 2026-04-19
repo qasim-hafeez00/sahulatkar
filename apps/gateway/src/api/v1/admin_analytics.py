@@ -157,7 +157,7 @@ async def credit_band_distribution(
 
 @router.get("/default-rate-trend")
 async def default_rate_trend(
-    period: Period = Query(default="90d"),
+    period: Period = Query(default="30d"),
     current_admin: AdminUser = Depends(RequirePermission("read_reports")),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),

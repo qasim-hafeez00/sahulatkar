@@ -11,7 +11,7 @@ class BaseStorage(ABC):
         pass
 
     @abstractmethod
-    async def get_download_url(self, file_path: str) -> str:
+    async def get_download_url(self, file_path: str, expires_in: int = 3600) -> str:
         """Return a URL for downloading the file."""
         pass
 
@@ -27,7 +27,7 @@ class LocalStorage(BaseStorage):
         full_path.write_bytes(data)
         return str(full_path.absolute())
 
-    async def get_download_url(self, file_path: str) -> str:
+    async def get_download_url(self, file_path: str, expires_in: int = 3600) -> str:
         # For local storage, we just return the local file URI or a placeholder
         full_path = self.base_dir / file_path
         return f"file://{full_path.absolute()}"
@@ -54,11 +54,11 @@ class S3Storage(BaseStorage):
         self.s3.put_object(Bucket=self.bucket, Key=file_path, Body=data)
         return f"s3://{self.bucket}/{file_path}"
 
-    async def get_download_url(self, file_path: str) -> str:
+    async def get_download_url(self, file_path: str, expires_in: int = 3600) -> str:
         return self.s3.generate_presigned_url(
             "get_object",
             Params={"Bucket": self.bucket, "Key": file_path},
-            ExpiresIn=3600,
+            ExpiresIn=expires_in,
         )
 
 

@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON
+from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin, UUIDMixin, SoftDeleteMixin
@@ -21,7 +21,7 @@ class WakalahAgreement(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     
     # Principal (Customer) Details for Legal Validity
     principal_name: Mapped[str] = mapped_column(String(200), nullable=True) # Legal name from KYC
-    principal_cnic: Mapped[str] = mapped_column(String(20), nullable=True) # Masked CNIC
+    principal_cnic: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     principal_phone: Mapped[str] = mapped_column(String(20), nullable=True)
     
     # Agent (SahulatKar) Details

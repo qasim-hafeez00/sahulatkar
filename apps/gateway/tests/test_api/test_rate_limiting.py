@@ -24,20 +24,25 @@ async def test_global_rate_limit_returns_429_after_threshold(client: AsyncClient
     /api/v1/auth/login (unauthenticated) which does count.
     We use a very tight loop to fill the fixed window bucket.
     """
-    # Send 100 requests (fills the bucket)
-    # Note: we use a generic path that doesn't have a stricter 10/min limit like /auth/login
+    # Send 100 requests (fills the bucket) to an endpoint that participates in global limits.
     for _ in range(100):
         await client.get(
-            "/api/v1/health-check",
+            "/api/v1/auth/me",
             headers={"X-Test-Rate-Limit": "1"}
         )
 
     # The 101st should be rate-limited
     r = await client.get(
-        "/api/v1/health-check",
+        "/api/v1/auth/me",
         headers={"X-Test-Rate-Limit": "1"}
     )
     assert r.status_code == 429
+
+
+async def test_v1_health_check_not_rate_limited(client: AsyncClient):
+    for _ in range(120):
+        r = await client.get("/api/v1/health-check", headers={"X-Test-Rate-Limit": "1"})
+        assert r.status_code == 200
 
 
 async def test_auth_endpoint_rate_limit_returns_429_after_10(client: AsyncClient):

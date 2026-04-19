@@ -36,5 +36,8 @@ async def test_generate_wakalah_fetches_customer_profile(test_user, redis_mock):
         contract = await svc.generate_wakalah(user.id, req, redis_mock)
         assert contract is not None
         assert contract.principal_name == "Test Profile"
-        assert contract.principal_cnic == "42101-1234567-1"
+
+        from src.core.kms import KMSProvider
+        assert isinstance(contract.principal_cnic, (bytes, bytearray))
+        assert KMSProvider().decrypt(contract.principal_cnic) == "42101-1234567-1"
         assert contract.valid_until is not None

@@ -22,7 +22,7 @@ class OfferPlan(BaseModel):
 
 
 class OrderOfferResponse(BaseModel):
-    status: Literal["pending", "ready", "declined"]
+    status: Literal["pending", "ready", "declined", "extraction_failed"]
     order_id: int
     product: Optional[dict] = None
     financing: Optional[dict] = None

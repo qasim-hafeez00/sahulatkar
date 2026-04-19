@@ -2,6 +2,8 @@ import pytest
 from httpx import AsyncClient
 from sk_shared.models.order import Order
 from sk_shared.models.auth import User
+from sk_shared.models.order import OrderStatusHistory
+from sk_shared.models.payment import Loan, PaymentTransaction
 import uuid
 
 pytestmark = pytest.mark.asyncio
@@ -70,3 +72,88 @@ async def test_admin_orders_search_ilike_compatibility(client: AsyncClient, db_s
     assert response.status_code == 200
     data = response.json()
     assert any(o["order_number"] == f"ORD-{order.id}" for o in data["orders"])
+
+
+async def test_get_admin_order_timeline(client: AsyncClient, db_session, test_admin, test_user):
+    _, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="offer_accepted", total_amount=1200)
+    db_session.add(order)
+    await db_session.flush()
+    db_session.add(OrderStatusHistory(order_id=order.id, from_status=None, to_status="url_received", reason="init"))
+    db_session.add(OrderStatusHistory(order_id=order.id, from_status="url_received", to_status="offer_accepted", reason="offer"))
+    await db_session.commit()
+
+    response = await client.get(f"/api/v1/admin/orders/{order.id}/timeline", headers=_auth(admin_token))
+    assert response.status_code == 200
+    assert len(response.json()["items"]) == 2
+
+
+async def test_get_admin_order_payments(client: AsyncClient, db_session, test_admin, test_user):
+    _, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="contracts_signed", total_amount=5000)
+    db_session.add(order)
+    await db_session.flush()
+    loan = Loan(
+        order_id=order.id,
+        user_id=user.id,
+        loan_number="L-TEST-001",
+        principal_amount=4000,
+        profit_amount=200,
+        total_repayable=4200,
+        down_payment_amount=800,
+        balance_financed=4000,
+        profit_rate_pct=5,
+        plan_type="murabaha",
+        installment_count=4,
+        installment_amount=1050,
+        total_paid=0,
+        total_outstanding=4200,
+        late_fee_total=0,
+        status="active",
+    )
+    db_session.add(loan)
+    await db_session.flush()
+    db_session.add(
+        PaymentTransaction(
+            user_id=user.id,
+            order_id=order.id,
+            loan_id=loan.id,
+            amount=800,
+            gateway="jazzcash",
+            status="confirmed",
+            transaction_type="down_payment",
+            gateway_txn_id="TXN-001",
+        )
+    )
+    await db_session.commit()
+
+    response = await client.get(f"/api/v1/admin/orders/{order.id}/payments", headers=_auth(admin_token))
+    assert response.status_code == 200
+    items = response.json()["items"]
+    assert len(items) == 1
+    assert items[0]["gateway_txn_id"] == "TXN-001"
+
+
+async def test_admin_refund_order_queued(client: AsyncClient, db_session, test_admin, test_user):
+    _, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="delivered", total_amount=2500)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    response = await client.post(
+        f"/api/v1/admin/orders/{order.id}/refund",
+        json={"reason": "customer return after delivery"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["order_id"] == order.id
+    assert data["status"] == "refund_requested"
+    assert data["queued"] is True

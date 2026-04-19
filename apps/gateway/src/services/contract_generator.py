@@ -15,6 +15,7 @@ from sk_shared.models.order import Order
 from sk_shared.models.product import Product
 from sk_shared.storage import get_storage_client
 from src.config import settings
+from src.core.kms import KMSProvider
 from src.core.logging import logger
 from src.schemas.contracts import MurabahaGenerateRequest, WakalahGenerateRequest
 from .contract_signer import ContractSignerService
@@ -35,7 +36,12 @@ class ContractGeneratorService:
         c.setFont("Helvetica-Bold", 16)
         c.drawCentredString(300, 800, "SahulatKar (Pvt) Ltd.")
         c.setFont("Helvetica", 10)
-        c.drawCentredString(300, 785, "SECP License: SECP-L-12345 | Shariah Compliant BNPL Platform")
+        license_label = (
+            f"SECP License: {settings.SECP_LICENSE_NUMBER}"
+            if settings.SECP_LICENSE_NUMBER
+            else "SECP Licensed Entity"
+        )
+        c.drawCentredString(300, 785, f"{license_label} | Shariah Compliant BNPL Platform")
         c.line(50, 775, 550, 775)
 
         # Title
@@ -122,7 +128,6 @@ class ContractGeneratorService:
             raw_cnic = getattr(profile, "cnic", None)
             if raw_cnic and isinstance(raw_cnic, (bytes, bytearray)):
                 try:
-                    from src.core.kms import KMSProvider
                     principal_cnic = KMSProvider().decrypt(raw_cnic)
                 except Exception:
                     principal_cnic = ""
@@ -160,7 +165,11 @@ class ContractGeneratorService:
         lines = [
             f"Contract Number: {contract_number}",
             f"Principal: {principal_info['name']} (CNIC: {principal_info['cnic']})",
-            f"Agent: SahulatKar (Pvt) Ltd. (License: SECP-L-12345)",
+            (
+                f"Agent: SahulatKar (Pvt) Ltd. (License: {settings.SECP_LICENSE_NUMBER})"
+                if settings.SECP_LICENSE_NUMBER
+                else "Agent: SahulatKar (Pvt) Ltd."
+            ),
             f"Merchant: {product.merchant.name if product and product.merchant else 'Direct Merchant'}",
             f"Authorized Amount: PKR {order.total_amount:,.2f}",
             f"Price Variance Tolerance: 5.00%",
@@ -188,7 +197,7 @@ class ContractGeneratorService:
             otp_reference=str(uuid.uuid4()),
             principal_name=principal_info["name"],
             agent_name="SahulatKar (Pvt) Ltd.",
-            principal_cnic=principal_info["cnic"],
+            principal_cnic=KMSProvider().encrypt(principal_info["cnic"]),
             principal_phone=principal_info["phone"],
             product_description=product.name if product else "Product",
             merchant_name=product.merchant.name if product and product.merchant else "Merchant",

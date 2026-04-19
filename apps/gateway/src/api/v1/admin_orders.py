@@ -7,8 +7,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.auth import AdminUser
 from sk_shared.models.order import Order
 from sk_shared.models.auth import User
+from sk_shared.redis_client import RedisClient
+from sk_shared.constants import QueueName
 
-from src.core.dependencies import get_current_admin, get_db, RequirePermission
+from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
 
 router = APIRouter(prefix="/admin/orders", tags=["Admin Orders"])
 
@@ -120,10 +122,13 @@ async def get_admin_order_detail(
             orders.total_amount, orders.down_payment_amount,
             orders.created_at, orders.user_id,
             users.phone as user_phone,
-            products.name as product_name, products.sale_price
+            products.name as product_name, products.sale_price,
+            loans.loan_number, loans.principal_amount, loans.profit_amount,
+            loans.total_repayable, loans.total_outstanding, loans.installment_count
         FROM orders
         LEFT JOIN users ON orders.user_id = users.id
         LEFT JOIN products ON orders.product_id = products.id
+        LEFT JOIN loans ON loans.order_id = orders.id AND loans.deleted_at IS NULL
         WHERE orders.id = :order_id AND orders.deleted_at IS NULL
         """
     )
@@ -153,6 +158,14 @@ async def get_admin_order_detail(
             "down_payment": float(row["down_payment_amount"] or 0),
             "remaining": float(row["total_amount"]) - float(row["down_payment_amount"] or 0),
         },
+        "financial_summary": {
+            "loan_number": row["loan_number"],
+            "principal": float(row["principal_amount"] or 0),
+            "profit": float(row["profit_amount"] or 0),
+            "total_repayable": float(row["total_repayable"] or 0),
+            "outstanding": float(row["total_outstanding"] or 0),
+            "installment_count": row["installment_count"],
+        },
         "created_at": _iso(row["created_at"]),
     }
 
@@ -165,10 +178,15 @@ from pydantic import BaseModel, Field
 from fastapi import HTTPException, status, Request
 from datetime import datetime, timezone
 from src.core.audit import record_audit_event
+import json
 
 
 class AdminOrderStatusRequest(BaseModel):
     status: str = Field(..., min_length=1, max_length=50)
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+class AdminOrderRefundRequest(BaseModel):
     reason: str = Field(..., min_length=5, max_length=500)
 
 
@@ -259,3 +277,156 @@ async def get_order_installments(
             for r in rows
         ],
     }
+
+
+@router.get("/{order_id}/payments")
+async def get_order_payments(
+    order_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    q = text(
+        """
+        SELECT id, gateway_txn_id, amount, currency, status, gateway,
+               transaction_type, created_at, reconciled_at, failure_code, failure_message
+        FROM payment_transactions
+        WHERE order_id = :order_id AND deleted_at IS NULL
+        ORDER BY created_at DESC
+        """
+    )
+    rows = (await db.execute(q, {"order_id": order_id})).mappings().all()
+    return {
+        "order_id": order_id,
+        "items": [
+            {
+                "id": r["id"],
+                "gateway_txn_id": r["gateway_txn_id"],
+                "amount": float(r["amount"] or 0),
+                "currency": r["currency"],
+                "status": r["status"],
+                "gateway": r["gateway"],
+                "transaction_type": r["transaction_type"],
+                "created_at": _iso(r["created_at"]),
+                "reconciled_at": _iso(r["reconciled_at"]),
+                "failure_code": r["failure_code"],
+                "failure_message": r["failure_message"],
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/{order_id}/timeline")
+async def get_order_status_timeline(
+    order_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    q = text(
+        """
+        SELECT from_status, to_status, reason, created_at
+        FROM order_status_history
+        WHERE order_id = :order_id
+        ORDER BY created_at ASC
+        """
+    )
+    rows = (await db.execute(q, {"order_id": order_id})).mappings().all()
+    return {
+        "order_id": order_id,
+        "items": [
+            {
+                "from_status": r["from_status"],
+                "to_status": r["to_status"],
+                "reason": r["reason"],
+                "created_at": _iso(r["created_at"]),
+            }
+            for r in rows
+        ],
+    }
+
+
+@router.get("/{order_id}/vcn")
+async def get_order_vcn(
+    order_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    q = text(
+        """
+        SELECT id, status, masked_number, card_expiry, expires_at, authorized_amount, loaded_amount,
+               charged_amount, issued_at, used_at
+        FROM virtual_cards
+        WHERE order_id = :order_id AND deleted_at IS NULL
+        """
+    )
+    row = (await db.execute(q, {"order_id": order_id})).mappings().one_or_none()
+    if not row:
+        return {"order_id": order_id, "vcn_status": "not_issued"}
+    return {
+        "order_id": order_id,
+        "vcn_id": row["id"],
+        "vcn_status": row["status"],
+        "masked_number": row["masked_number"],
+        "card_expiry": _iso(row["card_expiry"]),
+        "expires_at": _iso(row["expires_at"]),
+        "authorized_amount": float(row["authorized_amount"] or 0),
+        "loaded_amount": float(row["loaded_amount"] or 0),
+        "charged_amount": float(row["charged_amount"] or 0),
+        "issued_at": _iso(row["issued_at"]),
+        "used_at": _iso(row["used_at"]),
+    }
+
+
+@router.post("/{order_id}/refund")
+async def request_order_refund(
+    order_id: int,
+    payload: AdminOrderRefundRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    order = await db.scalar(select(Order).where(Order.id == order_id, Order.deleted_at.is_(None)))
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    refundable_statuses = {
+        "purchase_confirmed",
+        "delivery_pending",
+        "in_transit",
+        "delivered",
+        "completed",
+    }
+    if str(order.status) not in refundable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"ORDER_NOT_REFUNDABLE (current status: {order.status})",
+        )
+
+    if hasattr(redis, "redis"):
+        event = {
+            "event": "payment.refund_requested",
+            "order_id": order.id,
+            "user_id": order.user_id,
+            "amount": float(order.total_amount or 0),
+            "reason": payload.reason,
+            "requested_by_admin_id": current_admin.id,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis.redis.lpush(QueueName.PAYMENT_INITIATE, json.dumps(event))
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_orders",
+        action="refund_requested",
+        target_id=order.id,
+        changes={
+            "reason": payload.reason,
+            "amount": float(order.total_amount or 0),
+            "order_status": order.status,
+        },
+    )
+    await db.commit()
+    return {"order_id": order.id, "status": "refund_requested", "queued": True}

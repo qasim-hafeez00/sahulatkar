@@ -27,6 +27,7 @@ from sk_shared.models import order  # registers order models with Base.metadata
 from sk_shared.models import contracts  # registers contract models with Base.metadata
 from sk_shared.models import hitl       # HitlQueue
 from sk_shared.models import payment    # Loan, Installment, PaymentTransaction, VirtualCard
+from sk_shared.models import admin      # RiskBlacklist, SystemParameter
 try:
     from sk_shared.models import delivery   # Shipment, TrackingEvent
 except ImportError:
@@ -59,7 +60,8 @@ def _compile_bigint_sqlite(_type, _compiler, **_kw):
 # ── RSA key generation ────────────────────────────────────────────────────────
 
 def generate_test_keys():
-    private_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    # 1024-bit is sufficient for ephemeral test tokens and much faster to generate.
+    private_key = rsa.generate_private_key(public_exponent=65537, key_size=1024)
     private_pem = private_key.private_bytes(
         encoding=serialization.Encoding.PEM,
         format=serialization.PrivateFormat.TraditionalOpenSSL,
@@ -99,11 +101,17 @@ def setup_test_keys():
 def configure_test_environment():
     orig_env = settings.ENVIRONMENT
     orig_mfa = settings.REQUIRE_ADMIN_MFA
+    orig_jazzcash_secret = settings.JAZZCASH_WEBHOOK_SECRET
+    orig_safepay_secret = settings.SAFEPAY_WEBHOOK_SECRET
     settings.ENVIRONMENT = "test"
     settings.REQUIRE_ADMIN_MFA = False
+    settings.JAZZCASH_WEBHOOK_SECRET = "test-jazzcash-webhook-secret"
+    settings.SAFEPAY_WEBHOOK_SECRET = "test-safepay-webhook-secret"
     yield
     settings.ENVIRONMENT = orig_env
     settings.REQUIRE_ADMIN_MFA = orig_mfa
+    settings.JAZZCASH_WEBHOOK_SECRET = orig_jazzcash_secret
+    settings.SAFEPAY_WEBHOOK_SECRET = orig_safepay_secret
 
 
 @pytest.fixture
@@ -139,20 +147,6 @@ async def db_setup():
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
         await conn.run_sync(Base.metadata.create_all)
-        await conn.exec_driver_sql(
-            """
-            CREATE TABLE IF NOT EXISTS risk_blacklist (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                entry_type VARCHAR(20) NOT NULL,
-                value VARCHAR(255) NOT NULL,
-                reason VARCHAR(500) NOT NULL,
-                user_id INTEGER NULL,
-                created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                updated_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-                deleted_at DATETIME NULL
-            )
-            """
-        )
     yield
     # No explicit drop needed at end for in-memory, but good for cleanliness.
     # async with test_engine.begin() as conn:

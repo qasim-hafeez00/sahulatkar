@@ -1,13 +1,15 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import User
 from sk_shared.models.delivery import Shipment, TrackingEvent
 from sk_shared.models.order import Order, OrderStatusHistory
+from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_current_user, get_db
+from src.core.dependencies import get_redis
 from src.schemas.orders import (
     OrderAcceptRequest,
     OrderDetailResponse,
@@ -17,6 +19,7 @@ from src.schemas.orders import (
     OrderSummary,
 )
 from src.services.order_service import OrderService
+from src.core.audit import record_audit_event
 
 router = APIRouter(prefix="/orders", tags=["orders"])
 
@@ -24,10 +27,17 @@ router = APIRouter(prefix="/orders", tags=["orders"])
 @router.post("/initiate", response_model=OrderInitiateResponse)
 async def initiate_order(
     req: OrderInitiateRequest,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
-    order = await OrderService(db).initiate(current_user, str(req.product_url))
+    order = await OrderService(db).initiate(
+        current_user,
+        str(req.product_url),
+        redis=redis,
+        request_id=getattr(request.state, "request_id", None),
+    )
     return OrderInitiateResponse(order_id=order.id, status="processing") # GAP-05
 
 
@@ -161,6 +171,7 @@ async def get_order_tracking(
 @router.post("/{order_id}/cancel")
 async def cancel_order(
     order_id: int,
+    request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
@@ -235,5 +246,19 @@ async def cancel_order(
             reason="user_cancelled",
         )
     )
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        customer_user_id=current_user.id,
+        module="orders",
+        action="order_cancelled",
+        target_id=order_id,
+        changes={
+            "previous_status": old_status,
+            "credit_restored": float(order.total_amount or 0),
+        },
+    )
+
     await db.commit()
     return {"order_id": order_id, "status": "cancelled"}

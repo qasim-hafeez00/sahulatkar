@@ -109,7 +109,8 @@ class ContractSignerService:
         old_status = order.status
         signed_at = datetime.now(timezone.utc)
         contract.signed_at = signed_at
-        order.status = OrderState.CONTRACTS_PENDING
+        if old_status != OrderState.CONTRACTS_PENDING:
+            order.status = OrderState.CONTRACTS_PENDING
 
         db.add(
             ContractDigitalSignature(
@@ -122,14 +123,15 @@ class ContractSignerService:
                 signed_at=signed_at,
             )
         )
-        db.add(
-            OrderStatusHistory(
-                order_id=order.id,
-                from_status=old_status,
-                to_status=OrderState.CONTRACTS_PENDING,
-                reason="wakalah_signed",
+        if old_status != OrderState.CONTRACTS_PENDING:
+            db.add(
+                OrderStatusHistory(
+                    order_id=order.id,
+                    from_status=old_status,
+                    to_status=OrderState.CONTRACTS_PENDING,
+                    reason="wakalah_signed",
+                )
             )
-        )
 
         await db.flush()
         return contract, order
@@ -211,6 +213,9 @@ class ContractSignerService:
             plan_type="murabaha",
             installment_count=contract.installment_count,
             installment_amount=(float(contract.total_sale_price) - float(order.down_payment_amount or 0)) / contract.installment_count,
+            total_paid=0.0,
+            total_outstanding=float(contract.total_sale_price) - float(order.down_payment_amount or 0),
+            late_fee_total=0.0,
             status="active"
         )
         db.add(loan)
@@ -256,7 +261,12 @@ class ContractSignerService:
                 profit_portion=float(contract.profit_amount) / contract.installment_count,
                 total_amount=float(sched["amount"]),
                 due_date=(datetime.now(timezone.utc) + timedelta(days=30 * sched["installment_no"])).date(),
-                status="pending"
+                status="pending",
+                paid_amount=0.0,
+                days_overdue=0,
+                late_fee_amount=0.0,
+                late_fee_waived=False,
+                retry_count=0,
             )
             db.add(inst)
 

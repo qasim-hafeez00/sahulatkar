@@ -6,9 +6,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
-from sqlalchemy import text
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sk_shared.models.admin import SystemParameter
 from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
 from src.core.audit import record_audit_event
@@ -17,7 +18,12 @@ from src.core.dependencies import RequirePermission, get_db, get_redis
 router = APIRouter(prefix="/admin/system", tags=["Admin System"])
 
 _PARAM_CACHE_KEY = "sk:admin:system:parameters"
+_PARAM_CACHE_VERSION_KEY = "sk:admin:system:parameters:version"
 _PARAM_CACHE_TTL = 300  # 5 minutes
+
+
+def _cache_key_for_version(version: int) -> str:
+    return f"{_PARAM_CACHE_KEY}:v{version}"
 
 # Default operational parameters (overridden by DB values when available)
 _DEFAULTS: dict[str, Any] = {
@@ -42,24 +48,30 @@ async def get_system_parameters(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ) -> dict:
-    cached = await redis.get(_PARAM_CACHE_KEY)
+    version_raw = await redis.get(_PARAM_CACHE_VERSION_KEY)
+    try:
+        cache_version = int(version_raw or 1)
+    except Exception:
+        cache_version = 1
+    cache_key = _cache_key_for_version(cache_version)
+
+    cached = await redis.get(cache_key)
     if cached:
         try:
-            return {"parameters": json.loads(cached), "cached": True}
+            return {"parameters": json.loads(cached), "cached": True, "cache_version": cache_version}
         except Exception:
             pass
 
-    # Attempt to load from system_parameters table; fall back to defaults if missing.
-    q = text("SELECT param_key, param_value FROM system_parameters WHERE deleted_at IS NULL")
-    try:
-        rows = (await db.execute(q)).mappings().all()
-        db_params = {r["param_key"]: r["param_value"] for r in rows}
-    except Exception:
-        db_params = {}
+    rows = (
+        await db.execute(
+            select(SystemParameter).where(SystemParameter.deleted_at.is_(None))
+        )
+    ).scalars().all()
+    db_params = {r.param_key: r.param_value for r in rows}
 
     params = {**_DEFAULTS, **db_params}
-    await redis.set(_PARAM_CACHE_KEY, json.dumps(params), _PARAM_CACHE_TTL)
-    return {"parameters": params, "cached": False}
+    await redis.set(cache_key, json.dumps(params), _PARAM_CACHE_TTL)
+    return {"parameters": params, "cached": False, "cache_version": cache_version}
 
 
 class UpdateParametersRequest(BaseModel):
@@ -81,36 +93,22 @@ async def update_system_parameters(
             detail=f"Unknown parameter keys: {sorted(unknown_keys)}",
         )
 
-    dialect = db.bind.dialect.name if hasattr(db.bind, "dialect") else "postgresql"
-    if dialect == "sqlite":
-        q = text(
-            """
-            INSERT INTO system_parameters (param_key, param_value)
-            VALUES (:key, :value)
-            ON CONFLICT (param_key) DO UPDATE
-            SET param_value = excluded.param_value, updated_at = CURRENT_TIMESTAMP
-            """
+    for key, value in payload.parameters.items():
+        row = await db.scalar(
+            select(SystemParameter).where(
+                SystemParameter.param_key == key,
+                SystemParameter.deleted_at.is_(None),
+            )
         )
-    else:
-        q = text(
-            """
-            INSERT INTO system_parameters (param_key, param_value)
-            VALUES (:key, :value)
-            ON CONFLICT (param_key) DO UPDATE
-            SET param_value = EXCLUDED.param_value, updated_at = NOW()
-            """
-        )
-    try:
-        for key, value in payload.parameters.items():
-            await db.execute(q, {"key": key, "value": str(value)})
-    except Exception as exc:
-        raise HTTPException(
-            status_code=status.HTTP_501_NOT_IMPLEMENTED,
-            detail=f"SYSTEM_PARAMS_TABLE_MISSING: {exc}",
-        )
+        if row is None:
+            row = SystemParameter(param_key=key, param_value=str(value))
+            db.add(row)
+        else:
+            row.param_value = str(value)
 
-    # Invalidate cache
-    await redis.delete(_PARAM_CACHE_KEY)
+    # Invalidate cache by bumping version and writing to a new key namespace.
+    new_version = await redis.incr(_PARAM_CACHE_VERSION_KEY)
+    await redis.set(_cache_key_for_version(int(new_version)), json.dumps({**_DEFAULTS, **payload.parameters}), _PARAM_CACHE_TTL)
 
     await record_audit_event(
         db=db,

@@ -12,6 +12,7 @@ from src.api.v1.admin_payments import router as admin_payments_router
 from src.api.v1.admin_installments import router as admin_installments_router
 from src.api.v1.admin_risk import router as admin_risk_router
 from src.api.v1.admin_system import router as admin_system_router
+from src.api.v1.admin_compliance import router as admin_compliance_router, audit_router as admin_audit_router
 from src.api.v1.contracts import router as contracts_router
 from src.api.v1.payments import router as payments_router
 from src.api.v1.orders import router as orders_router
@@ -21,6 +22,13 @@ from src.api.v1.webhooks import router as webhooks_router
 from src.api.v1.internal import router as internal_router
 
 api_router = APIRouter()
+
+
+@api_router.get("/v1/health-check", tags=["system"])
+async def v1_health_check() -> dict[str, str]:
+	return {"status": "ok"}
+
+
 api_router.include_router(auth_router, prefix="/v1")
 api_router.include_router(admin_auth_router, prefix="/v1")
 api_router.include_router(kyc_router, prefix="/v1")
@@ -34,6 +42,8 @@ api_router.include_router(admin_payments_router, prefix="/v1")
 api_router.include_router(admin_installments_router, prefix="/v1")
 api_router.include_router(admin_risk_router, prefix="/v1")
 api_router.include_router(admin_system_router, prefix="/v1")
+api_router.include_router(admin_compliance_router, prefix="/v1")
+api_router.include_router(admin_audit_router, prefix="/v1")
 api_router.include_router(contracts_router, prefix="/v1")
 api_router.include_router(payments_router, prefix="/v1")
 api_router.include_router(orders_router, prefix="/v1")

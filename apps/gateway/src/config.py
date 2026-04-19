@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     # Notifications
     NOTIFICATION_SMS_ENABLED: bool = True
+    ADMIN_DASHBOARD_CACHE_TTL: int = 60
+    SECP_LICENSE_NUMBER: str = ""
     
     # Admin
     ADMIN_SESSION_TTL: int = 28800  # 8 hours
@@ -41,6 +43,7 @@ class Settings(BaseSettings):
     # External payment webhooks
     JAZZCASH_WEBHOOK_SECRET: Optional[str] = None
     SAFEPAY_WEBHOOK_SECRET: Optional[str] = None
+    WEBHOOK_MAX_BODY_SIZE: int = 1_048_576
 
     # Inter-service security (P4-3)
     INTERNAL_SERVICE_TOKEN: str = "local-internal-token"

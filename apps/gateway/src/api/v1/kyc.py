@@ -17,6 +17,7 @@ from sk_shared.storage import get_storage_client
 from src.config import settings
 
 router = APIRouter(prefix="/kyc", tags=["KYC"])
+MAX_KYC_ATTEMPTS = 3
 
 
 @router.post("/start", response_model=KycVerificationResponse, status_code=status.HTTP_200_OK)
@@ -93,6 +94,11 @@ async def resubmit_kyc(
     kyc = await service.get_or_create_kyc(current_user.id)
     if kyc.status != KycStatus.REJECTED:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="KYC_NOT_REJECTED")
+    if (kyc.attempt_number or 1) >= MAX_KYC_ATTEMPTS:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="KYC_MAX_ATTEMPTS_REACHED: Contact support for manual review.",
+        )
 
     kyc.status = KycStatus.PENDING
     kyc.attempt_number = (getattr(kyc, "attempt_number", 1) or 1) + 1

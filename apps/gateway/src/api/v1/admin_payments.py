@@ -218,7 +218,7 @@ async def manual_pay_installment(
     if hasattr(redis, "redis"):
         from sk_shared.constants import QueueName
         event = json.dumps({
-            "event": "payment.manual_confirmed",
+            "event": "payment.installment_paid",
             "installment_id": installment_id,
             "admin_id": current_admin.id,
             "timestamp": datetime.now(timezone.utc).isoformat()

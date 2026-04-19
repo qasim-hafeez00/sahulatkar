@@ -385,3 +385,23 @@ async def test_profile_cnic_decryption_fallback(client: AsyncClient, test_user, 
     # Should fall back to decode("utf-8") successfully
     assert r.json()["cnic"] == "12345-1234567-1"
 
+
+async def test_kyc_resubmit_max_attempts_blocked(client: AsyncClient, test_user):
+    user, token = test_user
+
+    async with TestingSessionLocal() as session:
+        kyc = UserKycVerification(
+            user_id=user.id,
+            status=KycStatus.REJECTED,
+            attempt_number=3,
+            cnic_front_image_url="/tmp/f.jpg",
+            cnic_back_image_url="/tmp/b.jpg",
+            liveness_video_url="/tmp/v.mp4",
+        )
+        session.add(kyc)
+        await session.commit()
+
+    r = await client.post("/api/v1/kyc/resubmit", headers=_auth(token))
+    assert r.status_code == 403
+    assert "KYC_MAX_ATTEMPTS_REACHED" in r.json()["detail"]
+

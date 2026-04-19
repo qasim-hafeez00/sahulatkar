@@ -148,6 +148,30 @@ async def test_get_user_risk_alias_route(client: AsyncClient, test_user, test_ad
     assert "items" in body
 
 
+async def test_get_user_risk_history_route(client: AsyncClient, test_user, test_admin):
+    user, _ = test_user
+    _, admin_token = test_admin
+    r = await client.get(f"/api/v1/admin/users/{user.id}/risk-history", headers=_auth(admin_token))
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == user.id
+    assert "items" in body
+
+
+async def test_update_user_credit_limit(client: AsyncClient, test_user, test_admin):
+    user, _ = test_user
+    _, admin_token = test_admin
+    r = await client.put(
+        f"/api/v1/admin/users/{user.id}/credit-limit",
+        json={"new_limit": 25000, "reason": "manual override for trusted user"},
+        headers=_auth(admin_token),
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["user_id"] == user.id
+    assert body["new_limit"] == 25000
+
+
 async def test_get_user_contracts_route(client: AsyncClient, test_user, test_admin):
     user, _ = test_user
     _, admin_token = test_admin

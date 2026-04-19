@@ -27,7 +27,7 @@ async def delivery_event_listener(app: FastAPI) -> None:
         while True:
             message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=1.0)
             if message is None:
-                await asyncio.sleep(0.05)
+                await asyncio.sleep(0.01)
                 continue
 
             data = message.get("data")
@@ -55,6 +55,15 @@ async def delivery_event_listener(app: FastAPI) -> None:
         await pubsub.close()
 
 
+async def listener_watchdog(app: FastAPI) -> None:
+    while True:
+        await asyncio.sleep(10)
+        task = getattr(app.state, "delivery_listener_task", None)
+        if task and task.done():
+            logger.error("Delivery listener died, restarting...")
+            app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
+
+
 async def verify_critical_tables():
     """Verify that admin-related tables exist to prevent runtime 501s."""
     tables = ["system_parameters", "risk_blacklist"]
@@ -71,6 +80,7 @@ async def lifespan(app: FastAPI):
     logger.info("Initializing Gateway Lifespan...")
     app.state.redis = get_redis_client(settings.REDIS_URL)
     app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
+    app.state.delivery_watchdog_task = asyncio.create_task(listener_watchdog(app))
     
     # Verify core admin infrastructure
     await verify_critical_tables()
@@ -79,6 +89,9 @@ async def lifespan(app: FastAPI):
     yield
     logger.info("Shutting down Gateway Lifespan...")
     await InternalServiceClient.stop()
+    app.state.delivery_watchdog_task.cancel()
+    with contextlib.suppress(asyncio.CancelledError):
+        await app.state.delivery_watchdog_task
     app.state.delivery_listener_task.cancel()
     with contextlib.suppress(asyncio.CancelledError):
         await app.state.delivery_listener_task
