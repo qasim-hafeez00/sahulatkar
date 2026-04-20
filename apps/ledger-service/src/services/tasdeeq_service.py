@@ -6,6 +6,7 @@ import io
 import json
 from dataclasses import dataclass
 from datetime import date, datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 import logging
@@ -18,6 +19,7 @@ from sqlalchemy.orm import selectinload
 from sk_shared.models.kyc import CustomerProfile
 from sk_shared.models.payment import Loan
 from src.config import settings
+from src.services.tasdeeq_validation import TASDEEQReportRow, TASDEEQCSVValidator, TASDEEQValidationError
 
 
 logger = logging.getLogger(__name__)
@@ -52,39 +54,54 @@ class TasdeeqService:
         }
 
     async def build_report_csv(self, report_date: date) -> tuple[str, int]:
-        rows = await self._fetch_report_rows()
+        """
+        Build TASDEEQ CSV report with full schema validation.
+        
+        Fetches all active loans, builds report rows, validates against TASDEEQ schema,
+        and generates CSV output.
+        
+        Raises:
+            TASDEEQValidationError: If validation fails
+        """
+        raw_rows = await self._fetch_report_rows()
+        
+        # Convert raw data rows to validated TASDEEQReportRow objects
+        validated_rows: list[TASDEEQReportRow] = []
+        for row_data in raw_rows:
+            validated_row = TASDEEQReportRow(
+                report_date=report_date,
+                loan_id=row_data["loan_id"],
+                user_id=row_data["user_id"],
+                cnic=row_data["cnic"],
+                principal=Decimal(str(row_data["principal"])),
+                outstanding=Decimal(str(row_data["outstanding"])),
+                status=row_data["status"],
+                installments_paid=row_data["installments_paid"],
+                total_installments=row_data["total_installments"],
+                last_payment_date=row_data["last_payment_date"],
+            )
+            validated_rows.append(validated_row)
+        
+        # Validate entire report structure
+        validation_stats = TASDEEQCSVValidator.validate_report(validated_rows)
+        logger.info(
+            "TASDEEQ report validated",
+            extra={
+                "total_rows": validation_stats["total_rows"],
+                "valid_rows": validation_stats["valid_rows"],
+                "errors": validation_stats["errors"],
+            }
+        )
+        
+        # Generate CSV from validated rows
         output = io.StringIO()
         writer = csv.writer(output)
-        writer.writerow(
-            [
-                "Report Date",
-                "Loan ID",
-                "User ID",
-                "CNIC",
-                "Principal",
-                "Outstanding",
-                "Status",
-                "Installments Paid",
-                "Total Installments",
-                "Last Payment Date",
-            ]
-        )
-        for row in rows:
-            writer.writerow(
-                [
-                    report_date.isoformat(),
-                    row["loan_id"],
-                    row["user_id"],
-                    row["cnic"],
-                    row["principal"],
-                    row["outstanding"],
-                    row["status"],
-                    row["installments_paid"],
-                    row["total_installments"],
-                    row["last_payment_date"],
-                ]
-            )
-        return output.getvalue(), len(rows)
+        writer.writerow(TASDEEQCSVValidator.get_csv_header())
+        
+        for validated_row in validated_rows:
+            writer.writerow(validated_row.to_csv_row())
+        
+        return output.getvalue(), len(validated_rows)
 
     async def submit_report(self, *, csv_content: str, report_date: date, record_count: int) -> TasdeeqSubmissionResult:
         mode = settings.tasdeeq_mode.strip().lower()

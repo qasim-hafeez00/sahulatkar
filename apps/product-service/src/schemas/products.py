@@ -86,10 +86,24 @@ class OfferResponse(BaseModel):
 
 
 class MultipleOffersResponse(BaseModel):
+    """Returned when plan_months=None: contains all three financing plans.
+
+    NOTE: ``financing_offer`` is intentionally ABSENT here to prevent callers
+    from mistaking the first offer for a "selected" plan.  Callers should
+    iterate ``financing_offers`` to display options to the user.
+    Use the single-­plan endpoint (plan_months=3/6/12) for a definitive choice.
+    """
     product_id: UUID
     upo: UpoResponse
-    financing_offers: list[FinancingOffer]
-    financing_offer: FinancingOffer | None = None
+    financing_offers: list[FinancingOffer]  # always len == 3
+
+
+class SingleOfferResponse(BaseModel):
+    """Returned when plan_months is specified: exactly one financing plan."""
+    product_id: UUID
+    upo: UpoResponse
+    plan_months: int
+    financing_offer: FinancingOffer
 
 
 class ProductRefreshRequest(BaseModel):

@@ -67,6 +67,7 @@ class QueueName:
     RECONCILIATION = "sk:queue:reconciliation"
     CHARITY_DISBURSE = "sk:queue:charity_disburse"
     TRACKING_REGISTER = "sk:queue:tracking_register"
+    VCN_VERIFICATION = "sk:queue:vcn_verification"
 
 class RedisTTL:
     OTP = 180

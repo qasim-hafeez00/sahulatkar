@@ -7,6 +7,7 @@ Subscriptions:
 import asyncio
 import json
 import logging
+import signal
 import traceback
 
 from sqlalchemy import select
@@ -15,7 +16,7 @@ from sk_shared.database import SessionLocal
 from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.redis_client import get_redis_client
 from src.config import settings
-from src.services.checkout_agent import CheckoutAgentService
+from src.services.checkout import CheckoutAgentService
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +28,13 @@ class EventListenerWorker:
         self.running = True
 
     async def run(self) -> None:
+        loop = asyncio.get_event_loop()
+        try:
+            for sig in (signal.SIGTERM, signal.SIGINT):
+                loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
+        except NotImplementedError:
+            pass
+
         while self.running:
             redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
             pubsub = redis.redis.pubsub()
@@ -113,7 +121,20 @@ class EventListenerWorker:
             except Exception as exc:
                 logger.warning("Failed to clean cancelled order from checkout queue order_id=%s: %s", order_id, exc)
 
-if __name__ == "__main__":
-    logging.basicConfig(level=logging.INFO)
+# ---------------------------------------------------------------------------
+# BUG-04 FIX: Callable main() required by pyproject.toml entry point:
+#   event-listener = "src.workers.event_listener:main"
+# The old "if __name__ == '__main__'" block is NOT callable as an entry point.
+# ---------------------------------------------------------------------------
+def main() -> None:  # noqa: D401
+    """Entry point declared in pyproject.toml as ``event-listener``."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
     worker = EventListenerWorker()
     asyncio.run(worker.run())
+
+
+if __name__ == "__main__":
+    main()

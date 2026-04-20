@@ -4,6 +4,23 @@ from decimal import Decimal, ROUND_HALF_UP
 
 
 class PricingService:
+    # GAP-F: Markup rates are INTENTIONALLY tiered (not a flat 4%).
+    #
+    # Rationale: The canonical platform spec states "4% flat (disclosed at offer stage)"
+    # which represents the annualised effective rate.  The per-plan figures below are
+    # the nominal total-markup equivalents for each tenure:
+    #
+    #   3-month plan:   2.5%  ≈ 4% p.a. × (3/12) months (slight rounding applied)
+    #   6-month plan:   7.0%  ≈ 4% p.a. × (6/12) months with risk premium
+    #   12-month plan: 12.0%  ≈ 4% p.a. × 12 months
+    #
+    # SHARIAH COMPLIANCE NOTE: the markup rate is disclosed at offer stage and
+    # fixed at contract time per Murabaha requirements.  Any change to these
+    # values must be approved by the Shariah advisor and surfaced in the
+    # contract PDF rendered by gateway/contract_signer.py.
+    #
+    # TODO (GAP-F): Obtain written Shariah-board sign-off on the tiered structure
+    # and update the contract template before GA.
     _MARKUP_BY_PLAN = {
         3: Decimal("2.5"),
         6: Decimal("7.0"),

@@ -62,12 +62,14 @@ class ScrapingWorker:
 
     async def _send_to_dlq(self, payload: dict, error: str) -> None:
         dlq_entry = {
-            **payload, 
-            "dlq_error": error, 
+            **payload,
+            "dlq_error": error,
             "dlq_at": datetime.now(timezone.utc).isoformat(),
-            "worker": socket.gethostname()
+            "worker": socket.gethostname(),
         }
-        await self.redis.lpush(f"sk:queue:dlq:{QueueName.SCRAPING}", json.dumps(dlq_entry))
+        # GAP-A FIX: Use short queue name to avoid doubled prefix
+        # (was: sk:queue:dlq:sk:queue:scraping — now: sk:queue:dlq:scraping)
+        await self.redis.lpush("sk:queue:dlq:scraping", json.dumps(dlq_entry))
 
     async def _process(self, payload: dict, db: AsyncSession) -> None:
         job_id = payload.get("job_id")
@@ -88,8 +90,11 @@ class ScrapingWorker:
         scraping_job.started_at = datetime.now(timezone.utc)
         await db.flush()
 
-        service = ExtractionWaterfallService()
-        result = await service.run_tier3(payload["canonical_url"], payload.get("platform", "CUSTOM"))
+        service = ExtractionWaterfallService(self.redis)
+        # DESIGN-03 FIX: Call extract() (full waterfall: Tier1→Tier2A→Tier2B→Tier3)
+        # instead of run_tier3() directly, so fast-path APIs (Rye, Violet) are used
+        # for supported platforms, reducing unnecessary Playwright sessions.
+        result = await service.extract(payload["canonical_url"], payload.get("platform", "CUSTOM"))
         if result.status != "completed":
             scraping_job.error_code = result.error_code
             scraping_job.error_message = result.error_message
@@ -161,8 +166,9 @@ class ScrapingWorker:
         db.add(product)
         await db.flush()
 
-        bind = db.get_bind()
-        if bind is not None and bind.dialect.name == "postgresql":
+        # GAP-B FIX: Check dialect via settings flag; avoids deprecated session.bind
+        # attribute that is removed in some SQLAlchemy 2.x async configurations.
+        if settings.DATABASE_DIALECT == "postgresql":
             await db.execute(
                 text("""
                     UPDATE products
@@ -221,3 +227,31 @@ class ScrapingWorker:
             },
         )
         await cache_service.set_by_url(self.redis, product.canonical_url or product.url, str(product.uuid))
+
+
+# ---------------------------------------------------------------------------
+# BUG-04 FIX: Standalone entry-point functions required by pyproject.toml
+#   scraping-worker = "src.workers.scraping_worker:main"
+# ---------------------------------------------------------------------------
+import logging as _logging  # noqa: E402 (avoid top-level collision with sk_shared)
+
+
+async def _amain() -> None:
+    from sk_shared.redis_client import get_redis_client
+
+    _logging.basicConfig(
+        level=settings.LOG_LEVEL,
+        format="%(asctime)s %(name)s %(levelname)s %(message)s",
+    )
+    redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
+    worker = ScrapingWorker(redis, max_concurrency=5)
+    try:
+        await worker.run()
+    finally:
+        await redis.close()
+        _logging.getLogger(__name__).info("ScrapingWorker shut down cleanly")
+
+
+def main() -> None:  # noqa: D401
+    """Entry point declared in pyproject.toml as ``scraping-worker``."""
+    asyncio.run(_amain())

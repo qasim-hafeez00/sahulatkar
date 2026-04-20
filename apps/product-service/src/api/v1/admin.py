@@ -7,6 +7,7 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import and_, desc, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel, Field
 
 from sk_shared.constants import QueueName
 from sk_shared.models.checkout import PurchaseExecution
@@ -16,6 +17,17 @@ from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_db, get_redis, require_service_token
 from src.services.event_publisher import publish_event
 from src.services.s3_service import S3Service
+
+
+class ProhibitedCategoryCreateRequest(BaseModel):
+    """Typed request model for upsert_prohibited_category.
+
+    Using a typed Pydantic model instead of raw ``dict`` prevents
+    injection of unexpected fields and provides input length validation.
+    """
+    category_name: str = Field(min_length=2, max_length=100)
+    keywords: list[str] = Field(min_length=1)
+    shariah_basis: str | None = Field(default=None, max_length=500)
 
 router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_service_token)])
 
@@ -282,19 +294,29 @@ async def list_prohibited_categories(db: AsyncSession = Depends(get_db)):
 
 
 @router.post("/prohibited-categories")
-async def upsert_prohibited_category(payload: dict, db: AsyncSession = Depends(get_db)):
-    category_name = payload.get("category_name")
-    keywords = payload.get("keywords") or []
-    if not category_name or not isinstance(keywords, list):
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="INVALID_PAYLOAD")
+async def upsert_prohibited_category(
+    payload: ProhibitedCategoryCreateRequest,  # Typed model — not raw dict
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Create or merge a prohibited category.
 
-    existing = await db.scalar(select(ProhibitedCategory).where(ProhibitedCategory.category_name == category_name))
+    Keywords are merged (union) with any existing list for the same category_name.
+    """
+    existing = await db.scalar(
+        select(ProhibitedCategory).where(ProhibitedCategory.category_name == payload.category_name)
+    )
     if existing:
-        existing.keywords = sorted(set((existing.keywords or []) + keywords))
+        existing.keywords = sorted(set((existing.keywords or []) + payload.keywords))
+        if payload.shariah_basis is not None:
+            existing.shariah_basis = payload.shariah_basis
         await db.commit()
         return {"status": "updated", "id": existing.id}
 
-    row = ProhibitedCategory(category_name=category_name, keywords=keywords)
+    row = ProhibitedCategory(
+        category_name=payload.category_name,
+        keywords=payload.keywords,
+        shariah_basis=payload.shariah_basis,
+    )
     db.add(row)
     await db.commit()
     await db.refresh(row)
@@ -309,3 +331,23 @@ async def delete_prohibited_category(category_id: int, db: AsyncSession = Depend
     await db.delete(row)
     await db.commit()
     return {"status": "deleted", "category_id": category_id}
+
+
+@router.get("/queue-stats")
+async def get_queue_stats(redis: RedisClient = Depends(get_redis)) -> dict:
+    """Return live depth of the checkout and scraping queues plus their DLQs.
+
+    Use this endpoint to detect backpressure (checkout_queue_depth > 1000)
+    or DLQ overflow (checkout_dlq_depth > 50) before manually triggering
+    KEDA scale-out or HITL review.
+    """
+    checkout_depth = await redis.redis.llen(QueueName.CHECKOUT)
+    scraping_depth = await redis.redis.llen(QueueName.SCRAPING)
+    checkout_dlq = await redis.redis.llen("sk:queue:dlq:checkout")
+    scraping_dlq = await redis.redis.llen("sk:queue:dlq:scraping")
+    return {
+        "checkout_queue_depth": checkout_depth,
+        "scraping_queue_depth": scraping_depth,
+        "checkout_dlq_depth": checkout_dlq,
+        "scraping_dlq_depth": scraping_dlq,
+    }

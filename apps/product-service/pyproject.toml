@@ -32,6 +32,7 @@ dependencies = [
 scraping-worker = "src.workers.scraping_worker:main"
 checkout-worker = "src.workers.checkout_consumer:main"
 event-listener = "src.workers.event_listener:main"
+vcn-verifier = "src.workers.vcn_verification_worker:main"
 
 [project.optional-dependencies]
 test = [

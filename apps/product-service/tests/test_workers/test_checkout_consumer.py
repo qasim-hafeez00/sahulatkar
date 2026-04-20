@@ -12,7 +12,7 @@ from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.constants import QueueName
 
-from src.services.checkout_agent import CheckoutAgentService
+from src.services.checkout import CheckoutAgentService
 from src.workers.checkout_consumer import CheckoutConsumer
 
 
@@ -77,13 +77,17 @@ async def test_checkout_consumer_processes_successful_job(monkeypatch, db_sessio
         return True
 
     monkeypatch.setattr("src.workers.checkout_consumer.SessionLocal", _SingleSessionFactory(db_session))
-    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._run_playwright_checkout", mock_run_checkout)
-    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._verify_vcn_charge", mock_verify_charge)
+    monkeypatch.setattr("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", mock_run_checkout)
+    monkeypatch.setattr("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", mock_verify_charge)
 
     await consumer._process_with_sem(payload, redis_mock)
 
     await db_session.refresh(execution)
-    assert execution.status == "succeeded"
+    assert execution.status == "pending_verification"
+    
+    # Verify enqueued job for VCN worker
+    items = await redis_mock.redis.lrange(QueueName.VCN_VERIFICATION, 0, -1)
+    assert len(items) == 1
 
 
 @pytest.mark.asyncio
@@ -150,7 +154,9 @@ async def test_checkout_consumer_invalid_payload_goes_to_dlq(db_session, redis_m
     payload = {"order_id": 1}  # missing execution_id
     await consumer._process_with_sem(payload, redis_mock)
 
-    dlq_items = await redis_mock.redis.lrange("sk:queue:dlq:sk:queue:checkout", 0, -1)
+    # GAP-A FIX: DLQ key is now correctly "sk:queue:dlq:checkout" (not the
+    # doubled "sk:queue:dlq:sk:queue:checkout" that the old code produced).
+    dlq_items = await redis_mock.redis.lrange("sk:queue:dlq:checkout", 0, -1)
     assert len(dlq_items) == 1
     assert "Missing execution_id" in dlq_items[0].decode("utf-8")
 
@@ -172,7 +178,7 @@ async def test_checkout_consumer_duplicate_processing_is_skipped(monkeypatch, db
     async def fake_process_job(self, payload_arg):
         called["count"] += 1
 
-    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService.process_job", fake_process_job)
+    monkeypatch.setattr("src.services.checkout.agent.CheckoutAgentService.process_job", fake_process_job)
 
     consumer = CheckoutConsumer(max_concurrency=1)
     payload = {"execution_id": str(execution.uuid)}

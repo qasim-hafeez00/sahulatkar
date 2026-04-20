@@ -57,6 +57,20 @@ PROHIBITED_ITEMS_DETECTED_TOTAL = Counter(
     "Prohibited item detections",
     ["category"],
 )
+EXTRACT_RATE_LIMIT_HITS = Counter(
+    "extract_rate_limit_hits_total",
+    "Total extraction rate limit hits",
+    ["tier"],
+)
+VCN_VERIFICATION_TIMEOUT = Counter(
+    "vcn_verification_timeout_total",
+    "Total VCN verification timeouts",
+    ["vcn_id"],
+)
+CHECKOUT_QUEUE_DIRECTION_VIOLATION = Counter(
+    "checkout_queue_direction_violation_total",
+    "Total checkout queue direction violations",
+)
 
 class MetricsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:

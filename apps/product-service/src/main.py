@@ -124,12 +124,35 @@ async def health_ready():
     listener_task = getattr(app.state, "listener_task", None)
     listener_healthy = bool(listener_task and not listener_task.done())
 
+    # Queue depth checks — alert at thresholds but do not mark unready
+    checkout_queue_depth: int = 0
+    scraping_queue_depth: int = 0
+    checkout_dlq_depth: int = 0
+    queue_healthy = True
+    dlq_healthy = True
+
+    if redis_healthy:
+        try:
+            from sk_shared.constants import QueueName
+            checkout_queue_depth = await app.state.redis.redis.llen(QueueName.CHECKOUT)
+            scraping_queue_depth = await app.state.redis.redis.llen(QueueName.SCRAPING)
+            checkout_dlq_depth = await app.state.redis.redis.llen("sk:queue:dlq:checkout")
+            queue_healthy = checkout_queue_depth < 1000   # alert threshold
+            dlq_healthy = checkout_dlq_depth < 50         # DLQ overflow threshold
+        except Exception:
+            pass
+
     ready = db_healthy and redis_healthy and listener_healthy
     payload = {
         "status": "ready" if ready else "not_ready",
         "db": "ok" if db_healthy else "down",
         "redis": "ok" if redis_healthy else "down",
         "event_listener": "ok" if listener_healthy else "down",
+        "checkout_queue_depth": checkout_queue_depth,
+        "scraping_queue_depth": scraping_queue_depth,
+        "checkout_dlq_depth": checkout_dlq_depth,
+        "queue_pressure": "ok" if queue_healthy else "high",
+        "dlq_pressure": "ok" if dlq_healthy else "high",
     }
     if not ready:
         return JSONResponse(content=payload, status_code=503)

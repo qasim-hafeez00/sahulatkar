@@ -8,7 +8,7 @@ from decimal import Decimal
 from uuid import UUID
 
 import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy import desc, func, or_, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -20,14 +20,31 @@ from sk_shared.redis_client import RedisClient
 
 from src.services.event_publisher import publish_event
 from src.core.dependencies import get_current_user_id, get_db, get_redis, require_service_token
-from src.schemas.products import AgentQueueRequest, AgentQueueResponse, ExtractRequest, ExtractResponse, JobStatusResponse, OfferResponse, SearchItem, SearchResponse, UpoResponse, ShippingInfo, ExtractionMeta, ExtractionPricing
-from src.schemas.products import MultipleOffersResponse, ProductRefreshRequest
-from src.services.checkout_agent import CheckoutAgentService
+from src.schemas.products import (
+    AgentQueueRequest,
+    AgentQueueResponse,
+    ExtractRequest,
+    ExtractResponse,
+    JobStatusResponse,
+    MultipleOffersResponse,
+    SingleOfferResponse,
+    OfferResponse,
+    SearchItem,
+    SearchResponse,
+    UpoResponse,
+    ShippingInfo,
+    ExtractionMeta,
+    ExtractionPricing,
+    ProductRefreshRequest,
+)
+from src.services.checkout import CheckoutAgentService
 from src.services.extraction_waterfall import ExtractionWaterfallService
 from src.services.product_cache_service import ProductCacheService
 from src.services.pricing_service import PricingService
 from src.services.prohibited_checker import ProhibitedCheckerService
 from src.services.url_normalizer import UrlNormalizerService
+from src.core.rate_limit import enforce_extract_rate_limit
+from src.config import settings
 
 
 router = APIRouter(prefix="/products", tags=["products"])
@@ -66,13 +83,23 @@ def _build_upo(product: Product) -> UpoResponse:
 
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_product(
+    request: Request,                                         # GAP-C: needed for client IP
     request_payload: ExtractRequest,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     current_user_id: int | None = Depends(get_current_user_id),
 ):
+    # GAP-C FIX: Enforce per-user / per-IP rate limit before any processing.
+    client_ip = request.client.host if request.client else "unknown"
+    await enforce_extract_rate_limit(
+        redis=redis,
+        user_id=current_user_id,
+        ip=client_ip,
+        limit=settings.EXTRACT_RATE_LIMIT_PER_MINUTE,
+        window_seconds=60,
+    )
     normalizer = UrlNormalizerService()
-    waterfall = ExtractionWaterfallService()
+    waterfall = ExtractionWaterfallService(redis)
     prohibited_checker = ProhibitedCheckerService()
     cache_service = ProductCacheService()
 
@@ -181,8 +208,9 @@ async def extract_product(
     await db.commit()
     await db.refresh(product)
 
-    # GAP-13: Populate search_vector (PostgreSQL only)
-    if db.bind.dialect.name == "postgresql":
+    # GAP-B FIX: Use settings.DATABASE_DIALECT instead of the deprecated
+    # session.bind attribute which may be None in SQLAlchemy 2.x async configs.
+    if settings.DATABASE_DIALECT == "postgresql":
         await db.execute(
             text("""
                 UPDATE products
@@ -355,13 +383,18 @@ async def refresh_product(
     return {"status": "queued", "job_id": str(job.uuid), "reason": payload.reason}
 
 
-@router.get("/{upo_id}/offer", response_model=MultipleOffersResponse)
+@router.get("/{upo_id}/offer")
 async def get_offer(
     upo_id: UUID,
     plan_months: int | None = Query(default=None),
     down_payment_pct: Decimal = Query(default=Decimal("30.0")),
     db: AsyncSession = Depends(get_db),
 ):
+    """Return Murabaha financing offer(s) for a product.
+
+    - ``plan_months`` not specified → returns all three plans (``MultipleOffersResponse``).
+    - ``plan_months`` specified (3, 6, or 12) → returns the chosen plan (``SingleOfferResponse``).
+    """
     product = await db.scalar(select(Product).where(Product.uuid == upo_id, Product.deleted_at.is_(None)))
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
@@ -373,27 +406,32 @@ async def get_offer(
     pricing_service = PricingService()
     try:
         if plan_months is None:
+            # DESIGN-06 FIX: Return MultipleOffersResponse — NO financing_offer field
+            # to avoid ambiguity about which plan is "selected".
             offers = pricing_service.calculate_multiple_offers(
                 cost_price=Decimal(str(product.cost_price)),
                 down_payment_pct=down_payment_pct,
             )
+            return MultipleOffersResponse(
+                product_id=product.uuid,
+                upo=_build_upo(product),
+                financing_offers=offers,
+            )
         else:
-            offers = [
-                pricing_service.calculate_offer(
-                    cost_price=Decimal(str(product.cost_price)),
-                    plan_months=plan_months,
-                    down_payment_pct=down_payment_pct,
-                )
-            ]
+            # Single plan — returns SingleOfferResponse for unambiguous selected plan.
+            offer = pricing_service.calculate_offer(
+                cost_price=Decimal(str(product.cost_price)),
+                plan_months=plan_months,
+                down_payment_pct=down_payment_pct,
+            )
+            return SingleOfferResponse(
+                product_id=product.uuid,
+                upo=_build_upo(product),
+                plan_months=plan_months,
+                financing_offer=offer,
+            )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    return MultipleOffersResponse(
-        product_id=product.uuid,
-        upo=_build_upo(product),
-        financing_offers=offers,
-        financing_offer=offers[0] if offers else None,
-    )
 
 
 @router.post("/agent/queue-job", response_model=AgentQueueResponse)

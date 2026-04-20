@@ -1,5 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from sqlalchemy import select
@@ -9,7 +10,7 @@ from sk_shared.models.hitl import HitlQueue
 from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.models.product import Product
-from src.services.checkout_agent import CheckoutAgentService
+from src.services.checkout import CheckoutAgentService
 
 
 async def _seed_order_vcn(db_session):
@@ -51,7 +52,8 @@ async def test_queue_job_reuses_active_execution(db_session, redis_mock):
 
 
 @pytest.mark.asyncio
-async def test_process_job_sets_pending_verification_payload_when_unverified(monkeypatch, db_session, redis_mock):
+async def test_process_job_sets_pending_verification_payload_when_unverified(db_session, redis_mock):
+    """process_job should mark as pending_verification if the verifier returns False."""
     order, vcn = await _seed_order_vcn(db_session)
 
     execution = PurchaseExecution(
@@ -64,23 +66,29 @@ async def test_process_job_sets_pending_verification_payload_when_unverified(mon
     db_session.add(execution)
     await db_session.commit()
 
-    async def fake_checkout(*_args, **_kwargs):
-        return {"merchant_order_id": "SK-1", "merchant_order_url": "https://m.com/order"}
-
-    async def fake_verify(*_args, **_kwargs):
-        return False
-
-    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._run_playwright_checkout", fake_checkout)
-    monkeypatch.setattr("src.services.checkout_agent.CheckoutAgentService._verify_vcn_charge", fake_verify)
-
     service = CheckoutAgentService(db_session, redis_mock)
+    
+    # Mock the internal components of the orchestrator
+    service.form_filler.run_checkout = AsyncMock(return_value={
+        "merchant_order_id": "SK-1",
+        "merchant_order_url": "https://m.com/order"
+    })
+    service.verifier.verify_charge = AsyncMock(return_value=False)
+
     await service.process_job({"execution_id": str(execution.uuid)})
 
     await db_session.refresh(execution)
     assert execution.status == "pending_verification"
-    pending_raw = await redis_mock.get(f"sk:vcn:pending_verification:{vcn.id}")
-    payload = json.loads(pending_raw)
+    
+    # Check that job was enqueued for VCN verification worker.
+    from sk_shared.constants import QueueName
+    # lpush means it's at the head (right side for brpop, left side for lrange 0)
+    # Actually brpop pops from RIGHT, so let's check the list.
+    items = await redis_mock.redis.lrange(QueueName.VCN_VERIFICATION, 0, -1)
+    assert len(items) == 1
+    payload = json.loads(items[0].decode("utf-8"))
     assert payload["execution_id"] == str(execution.uuid)
+    assert payload["vcn_id"] == vcn.id
 
 
 @pytest.mark.asyncio
@@ -122,5 +130,5 @@ async def test_mark_failed_escalates_hitl(db_session, redis_mock):
     await db_session.refresh(execution)
     assert execution.status == "hitl_escalated"
 
-    hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.execution_id == execution.id))
+    hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.order_id == execution.order_id))
     assert hitl is not None

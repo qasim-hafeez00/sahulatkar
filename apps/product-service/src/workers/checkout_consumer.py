@@ -14,7 +14,7 @@ from sk_shared.redis_client import get_redis_client
 
 from src.config import settings
 from src.middleware.metrics import CHECKOUT_JOB_DURATION
-from src.services.checkout_agent import CheckoutAgentService
+from src.services.checkout import CheckoutAgentService
 
 logger = logging.getLogger(__name__)
 
@@ -97,9 +97,11 @@ class CheckoutConsumer:
             **payload,
             "dlq_error": error,
             "dlq_at": datetime.now(timezone.utc).isoformat(),
-            "worker": socket.gethostname()
+            "worker": socket.gethostname(),
         }
-        await redis.lpush(f"sk:queue:dlq:{QueueName.CHECKOUT}", json.dumps(dlq_entry))
+        # GAP-A FIX: Use short queue name to avoid doubled prefix.
+        # Was: sk:queue:dlq:sk:queue:checkout — now: sk:queue:dlq:checkout
+        await redis.lpush("sk:queue:dlq:checkout", json.dumps(dlq_entry))
 
 
 async def main() -> None:

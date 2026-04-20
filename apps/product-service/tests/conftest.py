@@ -1,7 +1,13 @@
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import AsyncGenerator
 from decimal import Decimal
+
+# GAP-B FIX: Override DATABASE_DIALECT before importing app so that the
+# settings.DATABASE_DIALECT == "postgresql" guard in products.py and
+# scraping_worker.py evaluates to False during tests (using SQLite).
+os.environ.setdefault("DATABASE_DIALECT", "sqlite")
 
 import fakeredis.aioredis
 import pytest

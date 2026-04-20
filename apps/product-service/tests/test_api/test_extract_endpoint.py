@@ -10,7 +10,7 @@ from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.models.hitl import HitlQueue
 from sk_shared.models.product import Product, ScrapingJob
 from sk_shared.models.order import Order
-from src.services.checkout_agent import CheckoutAgentService
+from src.services.checkout import CheckoutAgentService
 
 
 @pytest.mark.asyncio

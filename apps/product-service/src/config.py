@@ -1,4 +1,5 @@
 from typing import List, Literal
+import logging
 from decimal import Decimal
 
 from pydantic import Field, model_validator
@@ -10,6 +11,9 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
 
     DATABASE_URL: str = "postgresql+asyncpg://sk_app:password@localhost:5432/sahulatkar"
+    # GAP-B FIX: explicit dialect flag avoids deprecated session.bind usage in SQLAlchemy 2.x.
+    # Set to "sqlite" in test environments via conftest.py / environment variable.
+    DATABASE_DIALECT: str = "postgresql"
     REDIS_URL: str = "redis://localhost:6379/1"
     REDIS_DB: int = 1
 
@@ -45,6 +49,8 @@ class Settings(BaseSettings):
     MIN_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("1"), ge=Decimal("0"))
     MAX_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("200000"), ge=Decimal("1"))
     PRODUCT_CACHE_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
+    # GAP-C: /extract endpoint rate limit (requests per minute per user/IP).
+    EXTRACT_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1, le=1000)
 
     AWS_REGION: str = "ap-south-1"
     S3_BUCKET_SCREENSHOTS: str = "sk-screenshots-dev"

@@ -10,6 +10,7 @@ from fastapi import FastAPI
 from sk_shared.events import EVENT_DELIVERY_STATUS_CHANGED, EVENT_ORDER_PURCHASE_CONFIRMED, EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED, event_channel
 
 from src.core.database import SessionLocal
+from src.core.event_dlq import EventDeadLetterQueue
 from src.services.accounting_service import AccountingService
 
 
@@ -22,6 +23,7 @@ async def run_ledger_event_listener(app: FastAPI) -> None:
         event_channel(EVENT_ORDER_PURCHASE_CONFIRMED),
         event_channel(EVENT_DELIVERY_STATUS_CHANGED),
     ]
+    dlq = EventDeadLetterQueue()
     pubsub = app.state.redis.redis.pubsub()
     await pubsub.subscribe(*channels)
     try:
@@ -41,7 +43,12 @@ async def run_ledger_event_listener(app: FastAPI) -> None:
 
             try:
                 envelope = json.loads(raw)
-            except json.JSONDecodeError:
+            except json.JSONDecodeError as e:
+                await dlq.push(
+                    event_name="UNKNOWN",
+                    payload=raw,
+                    error=e,
+                )
                 continue
 
             event_name = envelope.get("event")
@@ -82,8 +89,13 @@ async def run_ledger_event_listener(app: FastAPI) -> None:
                         logger.info("Delivery status event received", extra={"event": event_name, "payload": payload})
                     else:
                         logger.info("Ignoring unknown event", extra={"event": event_name})
-            except Exception:
+            except Exception as e:
                 logger.exception("Ledger event processing failed", extra={"event": event_name, "payload": payload})
+                await dlq.push(
+                    event_name=event_name or "UNKNOWN",
+                    payload=payload,
+                    error=e,
+                )
     finally:
         with contextlib.suppress(Exception):
             await pubsub.unsubscribe(*channels)

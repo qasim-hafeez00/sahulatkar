@@ -8,7 +8,8 @@ from src.config import settings
 from src.extractors.html_scraper import HtmlScraper
 from src.extractors.rye_client import RyeClient
 from src.extractors.violet_client import VioletClient
-from src.middleware.metrics import EXTRACTION_LATENCY
+from sk_shared.redis_client import RedisClient
+from src.middleware.metrics import EXTRACTION_LATENCY, EXTRACT_RATE_LIMIT_HITS
 
 
 @dataclass(slots=True)
@@ -28,10 +29,41 @@ class ExtractionResult:
 
 
 class ExtractionWaterfallService:
-    def __init__(self) -> None:
+    def __init__(self, redis: RedisClient | None = None) -> None:
+        self.redis = redis
         self._html_scraper = HtmlScraper()
         self._rye_client = RyeClient(api_key=settings.RYE_API_KEY, base_url=settings.RYE_API_URL)
         self._violet_client = VioletClient(api_key=settings.VIOLET_API_KEY, base_url=settings.VIOLET_API_URL)
+
+    async def _check_circuit_breaker(self, tier_name: str) -> bool:
+        """Check if a tier is currently blocked by a circuit breaker.
+        
+        Returns True if blocked, False otherwise.
+        """
+        if not self.redis:
+            return False
+        
+        is_blocked = await self.redis.get(f"sk:cb:blocked:{tier_name}")
+        if is_blocked:
+            EXTRACT_RATE_LIMIT_HITS.labels(tier=tier_name).inc()
+            return True
+        return False
+
+    async def _trip_circuit_breaker(self, tier_name: str):
+        """Increment failure count and trip the breaker if limit reached."""
+        if not self.redis:
+            return
+            
+        key = f"sk:cb:failures:{tier_name}"
+        # Increment failure count. Redis .incr() usually handles key creation.
+        val = await self.redis.redis.incr(key)
+        if val == 1:
+            await self.redis.redis.expire(key, 60) # Failures must happen within 60s
+            
+        if val >= 5: # Threshold
+            # Block for 2 minutes
+            await self.redis.set(f"sk:cb:blocked:{tier_name}", "1", ttl=120)
+            await self.redis.delete(key)
 
     def _validate_extraction(self, result: ExtractionResult) -> ExtractionResult:
         if result.status != "completed":
@@ -94,7 +126,8 @@ class ExtractionWaterfallService:
                 return None
             return validated
 
-        order: list[str]
+        # DARAZ exclusion: We skip Tier1 (Rye) and Tier2A (Violet) for DARAZ 
+        # because these aggregators do not reliably support the Daraz Pakistan DOM structure.
         if normalized_platform in {"WOOCOMMERCE", "BIGCOMMERCE", "MAGENTO"}:
             order = ["tier2a", "tier2b", "tier3"]
         elif normalized_platform == "DARAZ":
@@ -106,9 +139,17 @@ class ExtractionWaterfallService:
 
         for tier in order:
             if tier == "tier1":
+                if await self._check_circuit_breaker("tier1"):
+                    continue
                 candidate = await _run_tier("tier1", lambda: self._tier1_rye(canonical_url, platform))
+                if candidate is None:
+                    await self._trip_circuit_breaker("tier1")
             elif tier == "tier2a":
+                if await self._check_circuit_breaker("tier2a"):
+                    continue
                 candidate = await _run_tier("tier2a", lambda: self._tier2a_violet(canonical_url))
+                if candidate is None:
+                    await self._trip_circuit_breaker("tier2a")
             elif tier == "tier2b":
                 candidate = await _run_tier("tier2b", lambda: self._tier2b_html(canonical_url))
             else:
