@@ -7,13 +7,14 @@ from sqlalchemy import text
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from prometheus_client import generate_latest, CONTENT_TYPE_LATEST
-from starlette.responses import JSONResponse, Response
+from starlette.responses import Response
 from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
 
 from sk_shared.redis_client import get_redis_client
 from sk_shared.database import SessionLocal
 
 from src.api.routes import api_router
+from src.api.v1.health import router as health_router
 from src.config import settings
 from src.core.http_client import close_http_client, init_http_client
 from src.middleware.logging import RequestLoggingMiddleware
@@ -75,6 +76,10 @@ async def lifespan(app: FastAPI):
     if getattr(app.state, "event_listener", None) is not None:
         app.state.event_listener.running = False
     listener_task.cancel()
+    try:
+        await asyncio.wait_for(listener_task, timeout=30)
+    except (asyncio.CancelledError, asyncio.TimeoutError):
+        pass
     await close_http_client()
     await app.state.redis.close()
 
@@ -99,64 +104,7 @@ app.add_middleware(MetricsMiddleware)
 FastAPIInstrumentor.instrument_app(app)
 
 app.include_router(api_router, prefix="/api")
-
-
-@app.get("/health")
-async def health_check():
-    redis_status = "ok" if await _check_redis_health(app.state.redis) else "degraded"
-
-    return {
-        "status": "ok" if redis_status == "ok" else "degraded",
-        "service": "product-service",
-        "redis": redis_status,
-    }
-
-
-@app.get("/health/live")
-async def health_live():
-    return {"status": "ok"}
-
-
-@app.get("/health/ready")
-async def health_ready():
-    db_healthy = bool(getattr(app.state, "db_healthy", False))
-    redis_healthy = await _check_redis_health(app.state.redis)
-    listener_task = getattr(app.state, "listener_task", None)
-    listener_healthy = bool(listener_task and not listener_task.done())
-
-    # Queue depth checks — alert at thresholds but do not mark unready
-    checkout_queue_depth: int = 0
-    scraping_queue_depth: int = 0
-    checkout_dlq_depth: int = 0
-    queue_healthy = True
-    dlq_healthy = True
-
-    if redis_healthy:
-        try:
-            from sk_shared.constants import QueueName
-            checkout_queue_depth = await app.state.redis.redis.llen(QueueName.CHECKOUT)
-            scraping_queue_depth = await app.state.redis.redis.llen(QueueName.SCRAPING)
-            checkout_dlq_depth = await app.state.redis.redis.llen("sk:queue:dlq:checkout")
-            queue_healthy = checkout_queue_depth < 1000   # alert threshold
-            dlq_healthy = checkout_dlq_depth < 50         # DLQ overflow threshold
-        except Exception:
-            pass
-
-    ready = db_healthy and redis_healthy and listener_healthy
-    payload = {
-        "status": "ready" if ready else "not_ready",
-        "db": "ok" if db_healthy else "down",
-        "redis": "ok" if redis_healthy else "down",
-        "event_listener": "ok" if listener_healthy else "down",
-        "checkout_queue_depth": checkout_queue_depth,
-        "scraping_queue_depth": scraping_queue_depth,
-        "checkout_dlq_depth": checkout_dlq_depth,
-        "queue_pressure": "ok" if queue_healthy else "high",
-        "dlq_pressure": "ok" if dlq_healthy else "high",
-    }
-    if not ready:
-        return JSONResponse(content=payload, status_code=503)
-    return payload
+app.include_router(health_router)
 
 @app.get("/metrics", include_in_schema=False)
 async def metrics():

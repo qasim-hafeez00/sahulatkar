@@ -4,11 +4,10 @@ S3 operations for product-service:
   - Upload from URL (product image caching)
   - Generate presigned GET URLs
 """
-import asyncio
 import hashlib
 import logging
 
-import boto3
+import aioboto3
 import httpx
 from botocore.exceptions import ClientError
 
@@ -19,7 +18,7 @@ logger = logging.getLogger(__name__)
 class S3Service:
     def __init__(self) -> None:
         # Region and bucket are pulled from settings
-        self._client = boto3.client("s3", region_name=settings.AWS_REGION)
+        self._session = aioboto3.Session()
         self.bucket_screenshots = settings.S3_BUCKET_SCREENSHOTS
 
     async def upload_bytes(self, data: bytes, key: str, content_type: str = "image/jpeg") -> str:
@@ -34,8 +33,8 @@ class S3Service:
             }
             if settings.AWS_KMS_KEY_ARN:
                 kwargs["SSEKMSKeyId"] = settings.AWS_KMS_KEY_ARN
-            loop = asyncio.get_event_loop()
-            await loop.run_in_executor(None, lambda: self._client.put_object(**kwargs))
+            async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+                await client.put_object(**kwargs)
             return key
         except Exception as exc:
             logger.error("S3 upload failed for key %s: %s", key, exc)
@@ -66,30 +65,25 @@ class S3Service:
             logger.error("Failed to cache product image from %s: %s", image_url, exc)
             return None
 
-    def presign_url(self, key: str, bucket: str | None = None, expires_in: int = 3600) -> str:
+    async def presign_url(self, key: str, bucket: str | None = None, expires_in: int = 3600) -> str:
         """Generate a presigned GET URL for an S3 object."""
         try:
-            return self._client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": bucket or self.bucket_screenshots, "Key": key},
-                ExpiresIn=expires_in,
-            )
+            async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+                return await client.generate_presigned_url(
+                    "get_object",
+                    Params={"Bucket": bucket or self.bucket_screenshots, "Key": key},
+                    ExpiresIn=expires_in,
+                )
         except ClientError as exc:
             logger.error("Presigned URL generation failed: %s", exc)
             return ""
 
     async def delete_object(self, key: str, bucket: str | None = None) -> None:
-        loop = asyncio.get_event_loop()
-        await loop.run_in_executor(
-            None,
-            lambda: self._client.delete_object(Bucket=bucket or self.bucket_screenshots, Key=key),
-        )
+        async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+            await client.delete_object(Bucket=bucket or self.bucket_screenshots, Key=key)
 
     async def list_objects(self, prefix: str, bucket: str | None = None) -> list[str]:
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(
-            None,
-            lambda: self._client.list_objects_v2(Bucket=bucket or self.bucket_screenshots, Prefix=prefix),
-        )
+        async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+            response = await client.list_objects_v2(Bucket=bucket or self.bucket_screenshots, Prefix=prefix)
         contents = response.get("Contents") or []
         return [obj.get("Key") for obj in contents if obj.get("Key")]

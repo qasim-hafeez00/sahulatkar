@@ -38,3 +38,12 @@ def test_checkout_consumer_has_callable_main():
     assert callable(fn), (
         "checkout_consumer.py must define a callable main() function."
     )
+
+
+def test_dlq_monitor_has_callable_main():
+    """dlq_worker.main() must be callable by the new dlq-monitor entry point."""
+    module = importlib.import_module("src.workers.dlq_worker")
+    fn = getattr(module, "main", None)
+    assert callable(fn), (
+        "dlq_worker.py must define a callable main() function for the dlq-monitor entry point."
+    )

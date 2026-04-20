@@ -10,6 +10,7 @@ import logging
 import signal
 import traceback
 
+from opentelemetry import trace
 from sqlalchemy import select
 
 from sk_shared.database import SessionLocal
@@ -19,6 +20,7 @@ from src.config import settings
 from src.services.checkout import CheckoutAgentService
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer("product-service.worker.event-listener")
 
 CHANNEL_VCN_ISSUED = "sk:events:vcn.issued"
 CHANNEL_ORDER_CANCELLED = "sk:events:order.cancelled"
@@ -28,7 +30,7 @@ class EventListenerWorker:
         self.running = True
 
     async def run(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
@@ -58,10 +60,17 @@ class EventListenerWorker:
                         correlation_id = envelope.get("correlation_id")
                         logger.info("event_received event=%s correlation_id=%s", event_name, correlation_id)
 
-                        if event_name == "vcn.issued":
-                            await self._handle_vcn_issued(payload, redis)
-                        elif event_name == "order.cancelled":
-                            await self._handle_order_cancelled(payload, redis)
+                        with tracer.start_as_current_span(
+                            "event_listener.handle",
+                            attributes={
+                                "event_name": str(event_name or ""),
+                                "correlation_id": str(correlation_id or ""),
+                            },
+                        ):
+                            if event_name == "vcn.issued":
+                                await self._handle_vcn_issued(payload, redis)
+                            elif event_name == "order.cancelled":
+                                await self._handle_order_cancelled(payload, redis)
                     except Exception as exc:
                         logger.error("EventListenerWorker: error processing message: %s", exc)
                         logger.error(traceback.format_exc())

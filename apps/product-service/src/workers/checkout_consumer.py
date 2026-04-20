@@ -8,6 +8,7 @@ import socket
 from datetime import datetime, timezone
 import time
 
+from opentelemetry import trace
 from sk_shared.constants import QueueName
 from sk_shared.database import SessionLocal
 from sk_shared.redis_client import get_redis_client
@@ -17,6 +18,7 @@ from src.middleware.metrics import CHECKOUT_JOB_DURATION
 from src.services.checkout import CheckoutAgentService
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer("product-service.worker.checkout")
 
 
 class CheckoutConsumer:
@@ -29,7 +31,7 @@ class CheckoutConsumer:
         logger.info("Starting CheckoutConsumer hostname=%s max_concurrency=%s", socket.gethostname(), self.max_concurrency)
         redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
         
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
@@ -63,29 +65,36 @@ class CheckoutConsumer:
         async with self._sem:
             start = time.perf_counter()
             status_label = "failed"
-            try:
-                execution_id = payload.get("execution_id")
-                if not execution_id:
-                    status_label = "invalid_payload"
-                    await self._send_to_dlq(payload, "Missing execution_id", redis)
-                    return
+            with tracer.start_as_current_span(
+                "checkout_consumer.process",
+                attributes={
+                    "execution_id": str(payload.get("execution_id", "")),
+                    "correlation_id": str(payload.get("correlation_id", "")),
+                },
+            ):
+                try:
+                    execution_id = payload.get("execution_id")
+                    if not execution_id:
+                        status_label = "invalid_payload"
+                        await self._send_to_dlq(payload, "Missing execution_id", redis)
+                        return
 
-                if not await self._check_idempotency(redis, execution_id):
-                    logger.info("Skipping duplicate checkout execution_id=%s", execution_id)
-                    status_label = "duplicate"
-                    return
-                async with SessionLocal() as db:
-                    service = CheckoutAgentService(db, redis)
-                    await service.process_job(payload)
-                    status_label = "processed"
-            except Exception as e:
-                logger.exception("Checkout worker task failed")
-                await self._send_to_dlq(payload, str(e), redis)
-            finally:
-                execution_id = payload.get("execution_id")
-                if execution_id:
-                    await redis.delete(f"sk:checkout:processing:{execution_id}")
-                CHECKOUT_JOB_DURATION.labels(status=status_label).observe(time.perf_counter() - start)
+                    if not await self._check_idempotency(redis, execution_id):
+                        logger.info("Skipping duplicate checkout execution_id=%s", execution_id)
+                        status_label = "duplicate"
+                        return
+                    async with SessionLocal() as db:
+                        service = CheckoutAgentService(db, redis)
+                        await service.process_job(payload)
+                        status_label = "processed"
+                except Exception as e:
+                    logger.exception("Checkout worker task failed")
+                    await self._send_to_dlq(payload, str(e), redis)
+                finally:
+                    execution_id = payload.get("execution_id")
+                    if execution_id:
+                        await redis.delete(f"sk:checkout:processing:{execution_id}")
+                    CHECKOUT_JOB_DURATION.labels(status=status_label).observe(time.perf_counter() - start)
 
     async def _check_idempotency(self, redis, execution_uuid: str) -> bool:
         key = f"sk:checkout:processing:{execution_uuid}"

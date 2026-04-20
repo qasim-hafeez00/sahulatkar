@@ -13,7 +13,7 @@ class HitlQueue(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "hitl_queue"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False)
+    order_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("orders.id", ondelete="CASCADE"), nullable=True)
     execution_id: Mapped[Optional[int]] = mapped_column(
         BigInteger,
         ForeignKey("purchase_executions.id", ondelete="SET NULL"),

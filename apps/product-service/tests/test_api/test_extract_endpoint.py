@@ -3,7 +3,7 @@ from datetime import datetime, timezone
 from uuid import UUID
 
 import pytest
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from sk_shared.constants import QueueName
 from sk_shared.models.checkout import PurchaseExecution
@@ -111,6 +111,43 @@ async def test_extract_blocks_prohibited_category(client, db_session, monkeypatc
 
     products_count = await db_session.scalar(select(func.count(Product.id)))
     assert products_count == 0
+
+
+@pytest.mark.asyncio
+async def test_extract_prohibited_escalates_to_hitl_with_order_id(client, db_session, monkeypatch, user_header):
+    from src.config import settings
+    from src.services.extraction_waterfall import ExtractionResult
+    from src.services.extraction_waterfall import ExtractionWaterfallService
+    from src.services.prohibited_checker import ProhibitedDecision
+    from src.services.prohibited_checker import ProhibitedCheckerService
+
+    async def fake_extract(self, canonical_url: str, platform: str):
+        return ExtractionResult(
+            status="completed",
+            method="json_ld",
+            confidence=Decimal("0.700"),
+            title="Restricted Item",
+            price=Decimal("15000.00"),
+            image_url=None,
+        )
+
+    async def fake_check(*_args, **_kwargs):
+        return ProhibitedDecision(is_prohibited=True, category="Weapons", keyword="gun")
+
+    monkeypatch.setattr(settings, "FEATURE_HITL_ESCALATION", True)
+    monkeypatch.setattr(ExtractionWaterfallService, "extract", fake_extract)
+    monkeypatch.setattr(ProhibitedCheckerService, "check_text", fake_check)
+
+    response = await client.post(
+        "/api/v1/products/extract",
+        headers=user_header,
+        json={"raw_url": "https://example.com/prohibited-item-2", "order_id": 9001},
+    )
+    assert response.status_code == 422
+    assert response.json()["detail"] == "PROHIBITED_CATEGORY"
+
+    hitl_count = await db_session.scalar(select(func.count(HitlQueue.id)).where(HitlQueue.order_id == 9001))
+    assert hitl_count == 1
 
 
 @pytest.mark.asyncio
@@ -234,6 +271,58 @@ async def test_queue_checkout_job_enqueues_and_persists(client, db_session, redi
 
     queued_items = await redis_mock.redis.lrange(QueueName.CHECKOUT, 0, -1)
     assert len(queued_items) == 1
+
+
+@pytest.mark.asyncio
+async def test_product_price_history_endpoint_requires_service_token(client, make_product, db_session):
+    product = await make_product(db_session, canonical_url="https://example.com/history-unauth")
+    await db_session.commit()
+
+    res = await client.get(f"/api/v1/products/{product.uuid}/price-history")
+    assert res.status_code == 403
+
+
+@pytest.mark.asyncio
+async def test_product_price_history_endpoint_returns_rows(client, make_product, db_session, service_header):
+    product = await make_product(db_session, canonical_url="https://example.com/history-auth")
+    await db_session.commit()
+
+    await db_session.execute(
+        text(
+            """
+            CREATE TABLE IF NOT EXISTS product_price_history (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                product_id INTEGER NOT NULL,
+                old_price NUMERIC NOT NULL,
+                new_price NUMERIC NOT NULL,
+                changed_at TEXT NOT NULL
+            )
+            """
+        )
+    )
+    await db_session.execute(
+        text(
+            """
+            INSERT INTO product_price_history (product_id, old_price, new_price, changed_at)
+            VALUES (:product_id, :old_price, :new_price, :changed_at)
+            """
+        ),
+        {
+            "product_id": product.id,
+            "old_price": "5000.00",
+            "new_price": "5500.00",
+            "changed_at": datetime.now(timezone.utc).isoformat(),
+        },
+    )
+    await db_session.commit()
+
+    res = await client.get(f"/api/v1/products/{product.uuid}/price-history", headers=service_header)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["product_id"] == str(product.uuid)
+    assert len(body["items"]) == 1
+    assert Decimal(body["items"][0]["old_price"]) == Decimal("5000.00")
+    assert Decimal(body["items"][0]["new_price"]) == Decimal("5500.00")
 
 
 @pytest.mark.asyncio

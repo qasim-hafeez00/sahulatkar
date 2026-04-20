@@ -67,3 +67,31 @@ async def test_extraction_circuit_breaker_blocks_calls(monkeypatch, redis_mock):
     assert status["tier2a_called"] is True
     assert result.status == "completed"
     assert result.method == "violet_api"
+
+
+@pytest.mark.asyncio
+async def test_extraction_circuit_breaker_recovery_after_unblock(monkeypatch, redis_mock):
+    service = ExtractionWaterfallService(redis_mock)
+
+    await redis_mock.set("sk:cb:blocked:tier1", "1", ttl=60)
+    await redis_mock.delete("sk:cb:blocked:tier1")
+
+    status = {"tier1_called": False}
+
+    async def fake_tier1(*args, **kwargs):
+        status["tier1_called"] = True
+        return ExtractionResult(
+            status="completed",
+            method="rye_api",
+            confidence=Decimal("0.950"),
+            title="Recovered Product",
+            price=Decimal("100.00"),
+            availability="in_stock",
+        )
+
+    monkeypatch.setattr(service, "_tier1_rye", fake_tier1)
+
+    result = await service.extract("https://example.com/recovery", "AMAZON")
+    assert status["tier1_called"] is True
+    assert result.status == "completed"
+    assert result.method == "rye_api"

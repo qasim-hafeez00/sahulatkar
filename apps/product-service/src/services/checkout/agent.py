@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import socket
 from datetime import datetime, timezone
+import time
 from typing import Any, Dict, Optional
 from uuid import UUID
 
@@ -10,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.middleware.metrics import CHECKOUT_STEP_DURATION
 from src.services.s3_service import S3Service
 from src.services.checkout.form_filler import CheckoutFormFiller
 from src.services.checkout.vcn_verifier import VcnVerifier
@@ -119,6 +121,18 @@ class CheckoutAgentService:
             return
 
         try:
+            step_clock = time.perf_counter()
+
+            async def emit_step(step: str) -> None:
+                nonlocal step_clock
+                now = time.perf_counter()
+                CHECKOUT_STEP_DURATION.labels(step=step).observe(max(now - step_clock, 0.0))
+                step_clock = now
+                execution.step_reached = step
+                await self.db.commit()
+
+            self.form_filler.set_step_callback(emit_step)
+
             # Decrypt credentials
             encryption_key = settings.FERNET_KEY.encode()
             pan = SecretService.decrypt_secret(vcn.encrypted_pan, encryption_key).decode() if vcn.encrypted_pan else ""
@@ -184,6 +198,8 @@ class CheckoutAgentService:
                 await self.redis.publish("sk:events:checkout.uncertain", json.dumps({"execution_id": str(execution.uuid), "order_id": execution.order_id}))
             else:
                 await self._mark_failed(execution, failure_type, error_msg)
+        finally:
+            self.form_filler.set_step_callback(None)
 
     async def cancel_job(self, job_uuid: UUID):
         """Cancel a queued or running job."""
@@ -259,3 +275,19 @@ class CheckoutAgentService:
             await self.db.commit()
         except Exception:
             pass
+    async def requeue_execution(self, execution: PurchaseExecution) -> None:
+        """Re-enqueue an existing failed or stalled execution."""
+        execution.status = "queued"
+        execution.step_reached = "queued"
+        execution.started_at = None
+        execution.completed_at = None
+        execution.failure_type = None
+        execution.error_detail = None
+        await self.db.commit()
+
+        payload = {
+            "execution_id": str(execution.uuid),
+            "order_id": execution.order_id,
+            "vcn_id": execution.vcn_id,
+        }
+        await self.redis.lpush(QueueName.CHECKOUT, json.dumps(payload))

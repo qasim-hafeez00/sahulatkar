@@ -7,6 +7,7 @@ import socket
 from datetime import datetime, timedelta, timezone
 from uuid import UUID
 
+from opentelemetry import trace
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -17,9 +18,14 @@ from sk_shared.models.product import Merchant, Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
+from src.repositories.merchant_repository import MerchantRepository
+from src.repositories.product_repository import ProductRepository
 from src.services.event_publisher import publish_event
 from src.services.extraction_waterfall import ExtractionWaterfallService
 from src.services.product_cache_service import ProductCacheService
+
+
+tracer = trace.get_tracer("product-service.worker.scraping")
 
 
 class ScrapingWorker:
@@ -29,7 +35,7 @@ class ScrapingWorker:
         self._sem = asyncio.Semaphore(max_concurrency)
 
     async def run(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
@@ -53,12 +59,19 @@ class ScrapingWorker:
 
     async def _process_with_sem(self, payload: dict) -> None:
         async with self._sem:
-            try:
-                # Fresh session for each worker task
-                async with SessionLocal() as db:
-                    await self._process(payload, db)
-            except Exception as e:
-                await self._send_to_dlq(payload, str(e))
+            with tracer.start_as_current_span(
+                "scraping_worker.process",
+                attributes={
+                    "job_id": str(payload.get("job_id", "")),
+                    "correlation_id": str(payload.get("correlation_id", "")),
+                },
+            ):
+                try:
+                    # Fresh session for each worker task
+                    async with SessionLocal() as db:
+                        await self._process(payload, db)
+                except Exception as e:
+                    await self._send_to_dlq(payload, str(e))
 
     async def _send_to_dlq(self, payload: dict, error: str) -> None:
         dlq_entry = {
@@ -72,6 +85,9 @@ class ScrapingWorker:
         await self.redis.lpush("sk:queue:dlq:scraping", json.dumps(dlq_entry))
 
     async def _process(self, payload: dict, db: AsyncSession) -> None:
+        merchant_repo = MerchantRepository(db)
+        product_repo = ProductRepository(db)
+
         job_id = payload.get("job_id")
         if not job_id:
             raise ValueError("No job_id in payload")
@@ -142,29 +158,24 @@ class ScrapingWorker:
 
         canonical_url = payload["canonical_url"]
         domain = canonical_url.split("//", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
-        merchant = await db.scalar(select(Merchant).where(Merchant.domain == domain))
-        if merchant is None:
-            merchant = Merchant(name=domain, normalized_name=domain, domain=domain, platform_type=payload.get("platform", "CUSTOM"))
-            db.add(merchant)
-            await db.flush()
+        merchant, _ = await merchant_repo.get_or_create(domain, payload.get("platform", "CUSTOM"))
 
-        product = Product(
-            merchant_id=merchant.id,
-            name=result.title,
-            url=payload["input_url"],
-            canonical_url=payload["canonical_url"],
-            platform=payload.get("platform", "CUSTOM"),
-            currency="PKR",
-            cost_price=result.price,
-            sale_price=result.price,
-            stock_status="in_stock",
-            in_stock=True,
-            primary_image_s3=result.image_url,
-            extraction_method=result.method,
-            extraction_confidence=result.confidence,
-        )
-        db.add(product)
-        await db.flush()
+        product_payload = {
+            "merchant_id": merchant.id,
+            "name": result.title,
+            "url": payload["input_url"],
+            "canonical_url": payload["canonical_url"],
+            "platform": payload.get("platform", "CUSTOM"),
+            "currency": "PKR",
+            "cost_price": result.price,
+            "sale_price": result.price,
+            "stock_status": "in_stock",
+            "in_stock": True,
+            "primary_image_s3": result.image_url,
+            "extraction_method": result.method,
+            "extraction_confidence": result.confidence,
+        }
+        product, _ = await product_repo.upsert_by_canonical_url(payload["canonical_url"], product_payload)
 
         # GAP-B FIX: Check dialect via settings flag; avoids deprecated session.bind
         # attribute that is removed in some SQLAlchemy 2.x async configurations.

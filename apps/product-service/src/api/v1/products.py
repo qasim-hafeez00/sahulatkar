@@ -1,265 +1,134 @@
 from __future__ import annotations
 
-import asyncio
-import hashlib
+import base64
 import json
-from datetime import datetime, timezone
 from decimal import Decimal
 from uuid import UUID
 
-import sqlalchemy as sa
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from fastapi.responses import StreamingResponse
-from sqlalchemy import desc, func, or_, select, text
+from fastapi import APIRouter, Depends, Query, Request, HTTPException, status
+from sqlalchemy import select, func, desc, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import QueueName, RedisNS, RedisTTL
-from sk_shared.models.checkout import PurchaseExecution
-from sk_shared.models.product import Merchant, Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
+from sk_shared.models.product import Product, ScrapingJob
 
-from src.services.event_publisher import publish_event
-from src.core.dependencies import get_current_user_id, get_db, get_redis, require_service_token
+from src.core.dependencies import get_client_ip, get_current_user_id, get_db, get_redis, require_service_token
+from src.repositories.product_repository import ProductRepository
 from src.schemas.products import (
-    AgentQueueRequest,
-    AgentQueueResponse,
     ExtractRequest,
     ExtractResponse,
     JobStatusResponse,
     MultipleOffersResponse,
-    SingleOfferResponse,
     OfferResponse,
+    PriceHistoryResponse,
+    ProductRefreshRequest,
+    PriceHistoryItem,
     SearchItem,
     SearchResponse,
+    SingleOfferResponse,
     UpoResponse,
-    ShippingInfo,
-    ExtractionMeta,
-    ExtractionPricing,
-    ProductRefreshRequest,
 )
-from src.services.checkout import CheckoutAgentService
-from src.services.extraction_waterfall import ExtractionWaterfallService
-from src.services.product_cache_service import ProductCacheService
+from src.services.product_extraction_service import ProductExtractionService, build_upo
 from src.services.pricing_service import PricingService
-from src.services.prohibited_checker import ProhibitedCheckerService
-from src.services.url_normalizer import UrlNormalizerService
-from src.core.rate_limit import enforce_extract_rate_limit
-from src.config import settings
 
 
 router = APIRouter(prefix="/products", tags=["products"])
 
 
-def _url_cache_key(canonical_url: str) -> str:
-    digest = hashlib.sha256(canonical_url.encode("utf-8")).hexdigest()
-    return f"{RedisNS.PRODUCT_URL}:{digest}"
+def _encode_cursor(row_id: int | str) -> str:
+    payload = str(row_id)
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8")
 
 
-def _build_upo(product: Product) -> UpoResponse:
-    return UpoResponse(
-        product_id=product.uuid,
-        source_url=product.canonical_url or product.url,
-        platform=product.platform or "CUSTOM",
-        extraction_method=product.extraction_method or "unknown",
-        extraction_confidence=Decimal(str(product.extraction_confidence or "0.000")),
-        availability=product.stock_status if product.stock_status in {"in_stock", "out_of_stock", "limited", "unknown"} else "unknown",
-        is_purchasable=bool(product.in_stock and not product.is_prohibited),
-        meta=ExtractionMeta(
-            title=product.name,
-            brand=None,
-            description=None,
-            images=[product.primary_image_s3] if product.primary_image_s3 else [],
-        ),
-        pricing=ExtractionPricing(
-            amount=Decimal(str(product.cost_price)),
-            currency=product.currency,
-        ),
-        variants=[],
-        shipping=ShippingInfo(
-            ships_to_pakistan=True  # Default to true, or update if schema allows
-        ),
-    )
+def _decode_cursor(cursor: str | None) -> int | None:
+    if not cursor:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8")
+        return int(decoded)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_CURSOR")
 
 
 @router.post("/extract", response_model=ExtractResponse)
 async def extract_product(
-    request: Request,                                         # GAP-C: needed for client IP
+    request: Request,
     request_payload: ExtractRequest,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     current_user_id: int | None = Depends(get_current_user_id),
 ):
-    # GAP-C FIX: Enforce per-user / per-IP rate limit before any processing.
-    client_ip = request.client.host if request.client else "unknown"
-    await enforce_extract_rate_limit(
-        redis=redis,
-        user_id=current_user_id,
-        ip=client_ip,
-        limit=settings.EXTRACT_RATE_LIMIT_PER_MINUTE,
-        window_seconds=60,
-    )
-    normalizer = UrlNormalizerService()
-    waterfall = ExtractionWaterfallService(redis)
-    prohibited_checker = ProhibitedCheckerService()
-    cache_service = ProductCacheService()
-
-    try:
-        normalized = await normalizer.normalize(request_payload.raw_url)
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-
-    url_key = _url_cache_key(normalized.canonical_url)
-    cached_product = await cache_service.get_by_url(redis, db, normalized.canonical_url)
-    if cached_product is not None:
-        return ExtractResponse(status="completed", upo=_build_upo(cached_product), meta={"cache_hit": True})
-
-    existing_product = await db.scalar(
-        select(Product)
-        .where(Product.canonical_url == normalized.canonical_url, Product.deleted_at.is_(None))
-        .order_by(desc(Product.created_at))
-    )
-    if existing_product is not None:
-        await redis.set(url_key, str(existing_product.uuid), ttl=RedisTTL.PRODUCT_URL_MAP)
-        return ExtractResponse(status="completed", upo=_build_upo(existing_product), meta={"cache_hit": False})
-
-    merchant = await db.scalar(select(Merchant).where(Merchant.domain == normalized.domain))
-    if merchant is None:
-        merchant = Merchant(name=normalized.domain, normalized_name=normalized.domain, domain=normalized.domain, platform_type=normalized.platform)
-        db.add(merchant)
-        await db.flush()
-
-    extraction_result = await waterfall.extract(normalized.canonical_url, normalized.platform)
-    if extraction_result.status == "extracting":
-        existing_job = await db.scalar(
-            select(ScrapingJob)
-            .where(
-                ScrapingJob.canonical_url == normalized.canonical_url,
-                ScrapingJob.status.in_(["queued", "running", "retrying"]),
-            )
-            .order_by(desc(ScrapingJob.created_at))
-        )
-        if existing_job is not None:
-            return ExtractResponse(status="extracting", job_id=existing_job.uuid)
-
-        job = ScrapingJob(
-            order_id=None,
-            user_id=current_user_id,
-            input_url=request_payload.raw_url,
-            canonical_url=normalized.canonical_url,
-            platform_detected=normalized.platform,
-            status="queued",
-            queued_at=datetime.now(timezone.utc),
-        )
-        db.add(job)
-        await db.flush()
-
-        await redis.lpush(
-            QueueName.SCRAPING,
-            json.dumps(
-                {
-                    "job_id": str(job.uuid),
-                    "input_url": request_payload.raw_url,
-                    "canonical_url": normalized.canonical_url,
-                    "platform": normalized.platform,
-                    "user_id": current_user_id,
-                }
-            ),
-        )
-        await db.commit()
-        return ExtractResponse(status="extracting", job_id=job.uuid)
-
-    if extraction_result.status == "hitl_required":
-        return ExtractResponse(status="extracting", meta={"hitl_required": True})
-
-    # GAP-16: Validation for stock and shipping
-    if extraction_result.availability == "out_of_stock":
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OUT_OF_STOCK")
-    if getattr(extraction_result, "ships_to_pakistan", True) is False:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="DOES_NOT_SHIP_TO_PAKISTAN")
-
-    prohibited = await prohibited_checker.check_text(
-        db=db,
-        text=extraction_result.title,
+    client_ip = get_client_ip(request)
+    service = ProductExtractionService(db, redis)
+    return await service.extract_or_enqueue(
         raw_url=request_payload.raw_url,
-        canonical_url=normalized.canonical_url,
-        redis=redis,
         user_id=current_user_id,
+        client_ip=client_ip,
+        order_id=request_payload.order_id,
+        correlation_id=request_payload.correlation_id,
     )
-    if prohibited.is_prohibited:
-        await db.commit()
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="PROHIBITED_CATEGORY")
-
-    product = Product(
-        merchant_id=merchant.id,
-        name=extraction_result.title,
-        url=request_payload.raw_url,
-        canonical_url=normalized.canonical_url,
-        platform=normalized.platform,
-        currency="PKR",
-        cost_price=extraction_result.price,
-        sale_price=extraction_result.price,
-        stock_status="in_stock",
-        in_stock=True,
-        primary_image_s3=extraction_result.image_url,
-        extraction_method=extraction_result.method,
-        extraction_confidence=extraction_result.confidence,
-    )
-    db.add(product)
-    await db.commit()
-    await db.refresh(product)
-
-    # GAP-B FIX: Use settings.DATABASE_DIALECT instead of the deprecated
-    # session.bind attribute which may be None in SQLAlchemy 2.x async configs.
-    if settings.DATABASE_DIALECT == "postgresql":
-        await db.execute(
-            text("""
-                UPDATE products
-                SET search_vector = to_tsvector('english', coalesce(name, '') || ' ' || coalesce(canonical_url, ''))
-                WHERE id = :id
-            """),
-            {"id": product.id}
-        )
-        await db.commit()
-
-    upo = _build_upo(product)
-
-    # GAP-04: Publish product.extracted event
-    await publish_event(
-        redis=redis,
-        event="product.extracted",
-        payload={
-            "order_id": getattr(request_payload, "order_id", None),
-            "product_id": str(product.uuid),
-            "upo": upo.model_dump(mode="json"),
-        }
-    )
-
-    cache_key = f"{RedisNS.PRODUCT_UPO}:{product.uuid}"
-    await cache_service.set_upo(redis, str(product.uuid), upo.model_dump(mode="json"))
-    await cache_service.set_by_url(redis, normalized.canonical_url, str(product.uuid))
-
-    return ExtractResponse(status="completed", upo=upo, meta={"cache_hit": False})
 
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
-async def get_job_status(job_id: UUID, db: AsyncSession = Depends(get_db)):
-    job = await db.scalar(select(ScrapingJob).where(ScrapingJob.uuid == job_id))
-    if job is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
+async def get_job_status(
+    job_id: UUID, 
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis)
+):
+    service = ProductExtractionService(db, redis)
+    return await service.get_job_status(job_id)
 
-    upo = None
-    if job.product_id:
-        product = await db.scalar(select(Product).where(Product.id == job.product_id))
-        if product is not None:
-            upo = _build_upo(product)
 
-    return JobStatusResponse(
-        job_id=job.uuid,
-        status=job.status,
-        upo=upo,
-        error_code=job.error_code,
-        error_message=job.error_message,
+@router.get("", response_model=SearchResponse)
+async def list_user_products(
+    limit: int = Query(default=20, le=100),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    current_user_id: int | None = Depends(get_current_user_id),
+):
+    if current_user_id is None:
+        return SearchResponse(items=[], total=0)
+
+    decoded_cursor = _decode_cursor(cursor)
+    
+    # Total count for this user
+    total = await db.scalar(
+        select(func.count(Product.id))
+        .join(ScrapingJob, Product.id == ScrapingJob.product_id)
+        .where(ScrapingJob.user_id == current_user_id)
     )
+
+    stmt = (
+        select(Product)
+        .join(ScrapingJob, Product.id == ScrapingJob.product_id)
+        .where(ScrapingJob.user_id == current_user_id)
+        .order_by(desc(Product.id))
+    )
+    
+    if decoded_cursor:
+        stmt = stmt.where(Product.id < decoded_cursor)
+    else:
+        stmt = stmt.offset(offset)
+        
+    rows = list(await db.scalars(stmt.limit(limit + 1)))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
+    
+    items = [
+        SearchItem(
+            product_id=product.uuid,
+            name=product.name,
+            canonical_url=product.canonical_url,
+            currency=product.currency,
+            cost_price=Decimal(str(product.cost_price)),
+            sale_price=Decimal(str(product.sale_price)) if product.sale_price is not None else None,
+        )
+        for product in page_rows
+    ]
+    return SearchResponse(items=items, total=total or 0, next_cursor=next_cursor)
+
 
 @router.get("/search", response_model=SearchResponse)
 async def search_products(
@@ -267,31 +136,9 @@ async def search_products(
     limit: int = Query(default=20, le=100),
     db: AsyncSession = Depends(get_db),
 ):
-    try:
-        search_query = func.plainto_tsquery("english", q)
-        where_clause = sa.and_(
-            Product.search_vector.op("@@")(search_query),
-            Product.deleted_at.is_(None),
-        )
-        total = await db.scalar(select(func.count(Product.id)).where(where_clause))
-        rows = await db.scalars(
-            select(Product)
-            .where(where_clause)
-            .order_by(func.ts_rank(Product.search_vector, search_query).desc())
-            .limit(limit)
-        )
-    except Exception:
-        # SQLite/non-Postgres fallback used in tests.
-        where_clause = sa.and_(
-            Product.deleted_at.is_(None),
-            or_(
-                Product.name.ilike(f"%{q}%"),
-                Product.canonical_url.ilike(f"%{q}%"),
-            ),
-        )
-        total = await db.scalar(select(func.count(Product.id)).where(where_clause))
-        rows = await db.scalars(select(Product).where(where_clause).order_by(desc(Product.created_at)).limit(limit))
-
+    repo = ProductRepository(db)
+    rows = await repo.search(query=q, limit=limit)
+    
     items = [
         SearchItem(
             product_id=product.uuid,
@@ -303,8 +150,7 @@ async def search_products(
         )
         for product in rows
     ]
-
-    return SearchResponse(items=items, total=total or 0)
+    return SearchResponse(items=items, total=len(items))
 
 
 @router.get("/{upo_id}", response_model=UpoResponse)
@@ -313,18 +159,11 @@ async def get_product_detail(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    cache_service = ProductCacheService()
-    cached_upo = await cache_service.get_upo(redis, str(upo_id))
-    if cached_upo:
-        return UpoResponse(**cached_upo)
-
-    product = await db.scalar(select(Product).where(Product.uuid == upo_id, Product.deleted_at.is_(None)))
+    service = ProductExtractionService(db, redis)
+    product = await service.product_repo.find_by_uuid(upo_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-
-    upo = _build_upo(product)
-    await cache_service.set_upo(redis, str(product.uuid), upo.model_dump(mode="json"))
-    return upo
+    return build_upo(product)
 
 
 @router.post("/{upo_id}/refresh")
@@ -335,52 +174,8 @@ async def refresh_product(
     redis: RedisClient = Depends(get_redis),
     _: None = Depends(require_service_token),
 ):
-    product = await db.scalar(select(Product).where(Product.uuid == upo_id, Product.deleted_at.is_(None)))
-    if product is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-
-    existing_job = await db.scalar(
-        select(ScrapingJob)
-        .where(
-            ScrapingJob.product_id == product.id,
-            ScrapingJob.status.in_(["queued", "running", "retrying"]),
-        )
-        .order_by(desc(ScrapingJob.created_at))
-    )
-    if existing_job is not None:
-        return {"status": "queued", "job_id": str(existing_job.uuid), "reason": payload.reason}
-
-    cache_service = ProductCacheService()
-    await cache_service.invalidate(redis, str(product.uuid), product.canonical_url or product.url)
-
-    job = ScrapingJob(
-        order_id=None,
-        user_id=None,
-        product_id=product.id,
-        input_url=product.url,
-        canonical_url=product.canonical_url,
-        platform_detected=product.platform,
-        status="queued",
-        queued_at=datetime.now(timezone.utc),
-    )
-    db.add(job)
-    product.extraction_method = None
-    product.extraction_confidence = None
-    await db.commit()
-    await db.refresh(job)
-
-    await redis.lpush(
-        QueueName.SCRAPING,
-        json.dumps(
-            {
-                "job_id": str(job.uuid),
-                "input_url": product.url,
-                "canonical_url": product.canonical_url or product.url,
-                "platform": product.platform or "CUSTOM",
-            }
-        ),
-    )
-    return {"status": "queued", "job_id": str(job.uuid), "reason": payload.reason}
+    service = ProductExtractionService(db, redis)
+    return await service.requeue_job(upo_id, payload.reason)
 
 
 @router.get("/{upo_id}/offer")
@@ -390,107 +185,57 @@ async def get_offer(
     down_payment_pct: Decimal = Query(default=Decimal("30.0")),
     db: AsyncSession = Depends(get_db),
 ):
-    """Return Murabaha financing offer(s) for a product.
-
-    - ``plan_months`` not specified → returns all three plans (``MultipleOffersResponse``).
-    - ``plan_months`` specified (3, 6, or 12) → returns the chosen plan (``SingleOfferResponse``).
-    """
-    product = await db.scalar(select(Product).where(Product.uuid == upo_id, Product.deleted_at.is_(None)))
+    repo = ProductRepository(db)
+    product = await repo.find_by_uuid(upo_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-    if product.is_prohibited:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="PROHIBITED_CATEGORY")
-    if not product.in_stock:
+        
+    if not product.in_stock or product.stock_status == "out_of_stock":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OUT_OF_STOCK")
 
     pricing_service = PricingService()
-    try:
-        if plan_months is None:
-            # DESIGN-06 FIX: Return MultipleOffersResponse — NO financing_offer field
-            # to avoid ambiguity about which plan is "selected".
-            offers = pricing_service.calculate_multiple_offers(
-                cost_price=Decimal(str(product.cost_price)),
-                down_payment_pct=down_payment_pct,
-            )
-            return MultipleOffersResponse(
-                product_id=product.uuid,
-                upo=_build_upo(product),
-                financing_offers=offers,
-            )
-        else:
-            # Single plan — returns SingleOfferResponse for unambiguous selected plan.
-            offer = pricing_service.calculate_offer(
-                cost_price=Decimal(str(product.cost_price)),
-                plan_months=plan_months,
-                down_payment_pct=down_payment_pct,
-            )
-            return SingleOfferResponse(
-                product_id=product.uuid,
-                upo=_build_upo(product),
-                plan_months=plan_months,
-                financing_offer=offer,
-            )
-    except ValueError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if plan_months is None:
+        offers = pricing_service.calculate_multiple_offers(
+            cost_price=Decimal(str(product.cost_price)),
+            down_payment_pct=down_payment_pct,
+        )
+        return MultipleOffersResponse(
+            product_id=product.uuid,
+            upo=build_upo(product),
+            financing_offers=offers,
+        )
+    else:
+        offer = pricing_service.calculate_offer(
+            cost_price=Decimal(str(product.cost_price)),
+            plan_months=plan_months,
+            down_payment_pct=down_payment_pct,
+        )
+        return SingleOfferResponse(
+            product_id=product.uuid,
+            upo=build_upo(product),
+            plan_months=plan_months,
+            financing_offer=offer,
+        )
 
 
-@router.post("/agent/queue-job", response_model=AgentQueueResponse)
-async def queue_checkout_job(
-    request_payload: AgentQueueRequest,
+@router.get("/{upo_id}/price-history", response_model=PriceHistoryResponse)
+async def get_price_history(
+    upo_id: UUID,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
 ):
-    service = CheckoutAgentService(db, redis)
-    execution = await service.queue_job(
-        order_id=request_payload.order_id,
-        vcn_id=request_payload.vcn_id,
-        correlation_id=request_payload.correlation_id,
-        force_failure=request_payload.force_failure,
-    )
-    return AgentQueueResponse(status="queued", job_id=execution.uuid, estimated_completion_seconds=45)
+    repo = ProductRepository(db)
+    product = await repo.find_by_uuid(upo_id)
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
 
-
-@router.get("/agent/job/{job_id}/stream")
-async def stream_job_status(
-    job_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
-) -> StreamingResponse:
-    async def event_generator():
-        last_step = None
-        # Max 120 iterations x 0.5s = 60s timeout
-        for _ in range(120):
-            execution = await db.scalar(
-                select(PurchaseExecution).where(PurchaseExecution.uuid == job_id)
-            )
-            if not execution:
-                yield f"data: {json.dumps({'error': 'JOB_NOT_FOUND'})}\n\n"
-                break
-
-            if execution.step_reached != last_step:
-                last_step = execution.step_reached
-                yield f"data: {json.dumps({'step': execution.step_reached, 'status': execution.status, 'timestamp': datetime.now(timezone.utc).isoformat()})}\n\n"
-
-            if execution.status in {"succeeded", "failed", "hitl_escalated", "cancelled"}:
-                yield f"data: {json.dumps({'done': True})}\n\n"
-                break
-
-            await asyncio.sleep(0.5)
-
-    return StreamingResponse(event_generator(), media_type="text/event-stream")
-
-
-@router.post("/agent/job/{job_id}/cancel")
-async def cancel_checkout_job(
-    job_id: UUID,
-    db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis),
-    _: None = Depends(require_service_token),  # admin/internal only
-) -> dict:
-    row = await db.scalar(select(PurchaseExecution).where(PurchaseExecution.uuid == job_id))
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
-
-    service = CheckoutAgentService(db, redis)
-    await service.cancel_job(job_id)
-    return {"status": "cancelled", "job_id": job_id}
+    history_rows = await repo.get_price_history(product.id)
+    items = [
+        PriceHistoryItem(
+            old_price=Decimal(str(row["old_price"])),
+            new_price=Decimal(str(row["new_price"])),
+            changed_at=str(row["changed_at"]),
+        )
+        for row in history_rows
+    ]
+    return PriceHistoryResponse(product_id=product.uuid, items=items)

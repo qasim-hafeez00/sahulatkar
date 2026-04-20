@@ -6,7 +6,7 @@ import random
 import re
 from datetime import datetime
 from decimal import Decimal
-from typing import Any, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from playwright.async_api import async_playwright, Page, FrameLocator
 from playwright_stealth import stealth
@@ -24,6 +24,14 @@ class CheckoutFormFiller:
         self.self_healing = SelfHealingService()
         self.variant_selector = VariantSelector()
         self._page: Optional[Page] = None
+        self._step_callback: Callable[[str], Awaitable[None]] | None = None
+
+    def set_step_callback(self, callback: Callable[[str], Awaitable[None]] | None) -> None:
+        self._step_callback = callback
+
+    async def _emit_step(self, step: str) -> None:
+        if self._step_callback is not None:
+            await self._step_callback(step)
 
     async def run_checkout(
         self,
@@ -65,10 +73,12 @@ class CheckoutFormFiller:
                 for reentry in range(2):
                     try:
                         # Step 1: Navigate
+                        await self._emit_step("navigating")
                         await page.goto(product.url, wait_until="networkidle", timeout=settings.CHECKOUT_TIMEOUT_SECONDS * 1000)
                         await self._dismiss_blocking_modal(page)
 
                         # Step 1b: Variant Selection
+                        await self._emit_step("variant_selection")
                         variant_data = self._extract_selected_variants(order)
                         await self.variant_selector.select_variant(page, variant_data)
 
@@ -80,6 +90,7 @@ class CheckoutFormFiller:
                                 raise RuntimeError("CAPTCHA_REQUIRES_HITL")
 
                         # Step 2: Add to Cart
+                        await self._emit_step("add_to_cart")
                         await self._click_with_retry(
                             page,
                             "button:has-text('Add to Cart'), button:has-text('Buy Now')",
@@ -91,6 +102,7 @@ class CheckoutFormFiller:
                             raise RuntimeError("CART_EXPIRED")
 
                         # Step 2b: Price Drift Detection
+                        await self._emit_step("price_drift_check")
                         actual_total = await self._extract_cart_total(page)
                         if actual_total is not None:
                             expected = Decimal(str(product.cost_price or 0))
@@ -100,6 +112,7 @@ class CheckoutFormFiller:
                                 raise RuntimeError(f"PRICE_MISMATCH: expected={expected} actual={actual_total} drift={drift_pct.quantize(Decimal('0.01'))}%")
 
                         # Step 3: Guest Checkout
+                        await self._emit_step("guest_checkout")
                         await page.wait_for_load_state("networkidle")
                         await self._dismiss_blocking_modal(page)
                         try:
@@ -115,6 +128,7 @@ class CheckoutFormFiller:
                             await self._register_throwaway_account(page, execution_uuid)
 
                         # Step 4: Form Filling
+                        await self._emit_step("form_fill")
                         await self._human_type(page, "input[name*='email'], input[type='email']", "customer@sahulatkar.com")
                         await self._human_type(page, "input[name*='firstname']", "Sahulat")
                         await self._human_type(page, "input[name*='lastname']", "Customer")
@@ -122,7 +136,15 @@ class CheckoutFormFiller:
                         await self._human_type(page, "input[name*='city']", "Karachi")
                         await self._human_type(page, "input[name*='phone'], input[type='tel']", "03001234567")
 
+                        # Step 4b: Shipping Selection
+                        await self._emit_step("shipping_selection")
+                        try:
+                            await self._click_with_retry(page, "input[type='radio'][name*='shipping'], .shipping-method", "Shipping selection", retries=0)
+                        except Exception:
+                            pass # Optional step depending on merchant
+
                         # Step 5: Payment Injection
+                        await self._emit_step("payment_injection")
                         if await self.self_healing.handle_out_of_stock_at_checkout(page):
                             raise RuntimeError("OUT_OF_STOCK")
 
@@ -134,7 +156,16 @@ class CheckoutFormFiller:
                             await self._human_type(page, "input[name*='cardnumber'], input[id*='card']", pan)
                             await self._human_type(page, "input[name*='cvv'], input[id*='cvv']", cvv)
 
+                        # Step 5b: Review Order Page
+                        await self._emit_step("review_order_page")
+                        try:
+                            # Many sites have an intermediate "Review" or "Continue" before finally placing order
+                            await self._click_with_retry(page, "button:has-text('Review'), button:has-text('Continue')", "Review order", retries=0)
+                        except Exception:
+                            pass
+
                         # Step 6: Submit Order
+                        await self._emit_step("order_submitted")
                         await self._click_with_retry(
                             page,
                             "button:has-text('Place Order'), button:has-text('Complete Purchase')",
@@ -142,10 +173,12 @@ class CheckoutFormFiller:
                             execution_uuid=execution_uuid,
                         )
 
+
                         # Step 7: Confirmation
                         await page.wait_for_load_state("networkidle")
                         if not await self._is_confirmed(page):
                             raise RuntimeError("UNCERTAIN_CHECKOUT_OUTCOME")
+                        await self._emit_step("order_confirmed")
                         break
                     except Exception as e:
                         if "CART_EXPIRED" in str(e) and reentry == 0:
@@ -161,6 +194,7 @@ class CheckoutFormFiller:
                 try:
                     await asyncio.sleep(1)
                     receipt_screenshot = await page.screenshot(type="jpeg", quality=70, full_page=True)
+                    await self._emit_step("receipt_captured")
                 except Exception:
                     pass
 
@@ -170,6 +204,7 @@ class CheckoutFormFiller:
                     "receipt_screenshot": receipt_screenshot,
                 }
             finally:
+                self.set_step_callback(None)
                 await browser.close()
 
     async def _click_with_retry(self, page: Page, selector: str, error_msg: str, retries: int = 1, execution_uuid: str | None = None):

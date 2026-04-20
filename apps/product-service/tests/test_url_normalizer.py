@@ -37,6 +37,39 @@ async def test_normalize_rejects_unsafe_localhost_url():
 
 
 @pytest.mark.asyncio
+async def test_normalize_rejects_link_local_metadata_ip():
+    service = UrlNormalizerService()
+
+    with pytest.raises(ValueError) as exc:
+        await service.normalize("http://169.254.169.254/latest/meta-data/")
+
+    assert str(exc.value) == "UNSAFE_URL"
+
+
+@pytest.mark.asyncio
+async def test_normalize_rejects_dns_private_resolution(monkeypatch):
+    service = UrlNormalizerService()
+
+    def fake_getaddrinfo(*_args, **_kwargs):
+        return [
+            (
+                0,
+                0,
+                0,
+                "",
+                ("10.0.0.1", 0),
+            )
+        ]
+
+    monkeypatch.setattr("src.services.url_normalizer.socket.getaddrinfo", fake_getaddrinfo)
+
+    with pytest.raises(ValueError) as exc:
+        await service.normalize("https://merchant.example/product/123")
+
+    assert str(exc.value) == "UNSAFE_URL"
+
+
+@pytest.mark.asyncio
 async def test_normalize_rejects_empty_path_url():
     service = UrlNormalizerService()
 

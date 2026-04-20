@@ -150,3 +150,43 @@ async def test_bug03_screenshot_captured_before_browser_close_and_uploaded(db_se
 
     await db_session.refresh(execution)
     assert execution.receipt_screenshot_s3 is not None
+
+
+@pytest.mark.asyncio
+async def test_s3_upload_failure_does_not_fail_checkout(db_session, redis_mock):
+    from src.services.checkout import CheckoutAgentService
+    from src.services.s3_service import S3Service
+    from sk_shared.models.checkout import PurchaseExecution
+
+    order, vcn = await _seed_order_vcn(db_session)
+    execution = PurchaseExecution(
+        order_id=order.id,
+        vcn_id=vcn.id,
+        status="queued",
+        step_reached="queued",
+        queued_at=datetime.now(timezone.utc),
+        attempt_number=0,
+    )
+    db_session.add(execution)
+    await db_session.commit()
+    await db_session.refresh(execution)
+
+    async def fake_run_checkout(product, order, pan, cvv, attempt_number, execution_uuid):
+        return {
+            "merchant_order_id": "SK-TEST-003",
+            "merchant_order_url": "https://example.com/confirm",
+            "receipt_screenshot": b"bytes",
+        }
+
+    async def fake_s3_upload_fail(self, data: bytes, key: str, content_type: str = "image/jpeg"):
+        raise RuntimeError("S3_DOWN")
+
+    service = CheckoutAgentService(db_session, redis_mock)
+
+    with patch("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", side_effect=fake_run_checkout):
+        with patch("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", AsyncMock(return_value=True)):
+            with patch.object(S3Service, "upload_bytes", fake_s3_upload_fail):
+                await service.process_job({"execution_id": str(execution.uuid)})
+
+    await db_session.refresh(execution)
+    assert execution.status in {"pending_verification", "succeeded"}

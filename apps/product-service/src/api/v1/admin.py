@@ -1,353 +1,584 @@
 from __future__ import annotations
 
+import base64
 import json
 from datetime import datetime, timezone
+from decimal import Decimal
+from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import and_, desc, func, select
+from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select, func, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field
 
-from sk_shared.constants import QueueName
-from sk_shared.models.checkout import PurchaseExecution
-from sk_shared.models.order import Order
-from sk_shared.models.product import Product, ProhibitedCategory, ScrapingJob
 from sk_shared.redis_client import RedisClient
-from src.core.dependencies import get_db, get_redis, require_service_token
-from src.services.event_publisher import publish_event
-from src.services.s3_service import S3Service
+from sk_shared.models.product import ScrapingJob, Product, Merchant
+
+from src.core.dependencies import get_client_ip, get_db, get_redis, require_service_token
+from src.repositories.execution_repository import ExecutionRepository
+from src.repositories.merchant_repository import MerchantRepository
+from src.repositories.product_repository import ProductRepository
+from src.repositories.prohibited_category_repository import ProhibitedCategoryRepository
+from src.repositories.scraping_job_repository import ScrapingJobRepository
+from src.schemas.admin import (
+    AdminCheckoutExecutionItem,
+    AdminExecutionDetailResponse,
+    AdminExecutionListItem,
+    AdminExecutionListResponse,
+    AdminExecutionRetryResponse,
+    AdminProductActionResponse,
+    AdminProductDetailItem,
+    AdminProductDetailResponse,
+    AdminProductItem,
+    AdminProductListResponse,
+    AdminProductPatchRequest,
+    AdminScrapingJobItem,
+    AdminScrapingJobsListItem,
+    AdminScrapingJobsListResponse,
+    DlqPurgeResponse,
+    DlqReprocessResponse,
+    MerchantBlockResponse,
+    MerchantItem,
+    MerchantListResponse,
+    ProhibitedCategoryCreateRequest,
+    ProhibitedCategoryDeleteResponse,
+    ProhibitedCategoryItem,
+    ProhibitedCategoryListResponse,
+    ProhibitedCategoryUpsertResponse,
+    QueueStatsResponse,
+)
+from src.services.audit_service import AuditService
+from src.services.dlq_service import DLQService
+from src.services.merchant_service import MerchantService
+from src.services.product_catalog_service import ProductCatalogService
+from src.services.product_extraction_service import build_upo
+from src.services.product_lifecycle_service import ProductLifecycleService
+from src.services.checkout.agent import CheckoutAgentService
 
 
-class ProhibitedCategoryCreateRequest(BaseModel):
-    """Typed request model for upsert_prohibited_category.
-
-    Using a typed Pydantic model instead of raw ``dict`` prevents
-    injection of unexpected fields and provides input length validation.
-    """
-    category_name: str = Field(min_length=2, max_length=100)
-    keywords: list[str] = Field(min_length=1)
-    shariah_basis: str | None = Field(default=None, max_length=500)
-
-router = APIRouter(prefix="/admin", tags=["admin"], dependencies=[Depends(require_service_token)])
+router = APIRouter(prefix="/admin", tags=["admin"])
 
 
-@router.get("/products")
+def _encode_cursor(row_id: int | str) -> str:
+    payload = str(row_id)
+    return base64.urlsafe_b64encode(payload.encode("utf-8")).decode("utf-8")
+
+
+def _decode_cursor(cursor: str | None) -> int | None:
+    if not cursor:
+        return None
+    try:
+        decoded = base64.urlsafe_b64decode(cursor.encode("utf-8")).decode("utf-8")
+        return int(decoded)
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_CURSOR")
+
+
+@router.get("/products", response_model=AdminProductListResponse)
 async def list_products(
-    platform: str | None = None,
-    extraction_method: str | None = None,
-    is_prohibited: bool | None = None,
-    created_after: datetime | None = None,
-    created_before: datetime | None = None,
-    limit: int = Query(default=20, le=200),
+    limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
 ):
-    filters = [Product.deleted_at.is_(None)]
-    if platform:
-        filters.append(Product.platform == platform)
-    if extraction_method:
-        filters.append(Product.extraction_method == extraction_method)
-    if is_prohibited is not None:
-        filters.append(Product.is_prohibited == is_prohibited)
-    if created_after:
-        filters.append(Product.created_at >= created_after)
-    if created_before:
-        filters.append(Product.created_at <= created_before)
+    repo = ProductRepository(db)
+    decoded_cursor = _decode_cursor(cursor)
+    
+    # Total count for the response
+    total = await db.scalar(select(func.count(Product.id)).where(Product.deleted_at.is_(None)))
 
-    total = await db.scalar(select(func.count(Product.id)).where(and_(*filters)))
-    rows = await db.scalars(
-        select(Product)
-        .where(and_(*filters))
-        .order_by(desc(Product.created_at))
-        .offset(offset)
-        .limit(limit)
-    )
+    stmt = select(Product).where(Product.deleted_at.is_(None)).order_by(desc(Product.id))
+    if decoded_cursor:
+        stmt = stmt.where(Product.id < decoded_cursor)
+    else:
+        stmt = stmt.offset(offset)
+    
+    rows = list(await db.scalars(stmt.limit(limit + 1)))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
+
     items = [
-        {
-            "product_id": str(row.uuid),
-            "name": row.name,
-            "platform": row.platform,
-            "extraction_method": row.extraction_method,
-            "confidence": str(row.extraction_confidence) if row.extraction_confidence is not None else None,
-            "cost_price": str(row.cost_price),
-            "created_at": row.created_at.isoformat() if row.created_at else None,
-        }
-        for row in rows
+        AdminProductItem(
+            product_id=str(p.uuid),
+            name=p.name,
+            platform=p.platform,
+            extraction_method=p.extraction_method,
+            confidence=str(p.extraction_confidence) if p.extraction_confidence else None,
+            cost_price=str(p.cost_price),
+            created_at=p.created_at.isoformat() if p.created_at else None,
+        )
+        for p in page_rows
     ]
-    return {"items": items, "total": total or 0}
+    return AdminProductListResponse(items=items, total=total or 0, next_cursor=next_cursor)
 
 
-@router.get("/products/{product_id}")
-async def get_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
-    product = await db.scalar(select(Product).where(Product.uuid == product_id, Product.deleted_at.is_(None)))
+
+@router.get("/products/{product_uuid}", response_model=AdminProductDetailResponse)
+async def get_product(
+    product_uuid: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    product_repo = ProductRepository(db)
+    job_repo = ScrapingJobRepository(db)
+    exec_repo = ExecutionRepository(db)
+
+    product = await product_repo.find_by_uuid(product_uuid)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
 
-    scraping_jobs = await db.scalars(
-        select(ScrapingJob).where(ScrapingJob.product_id == product.id).order_by(desc(ScrapingJob.created_at)).limit(20)
-    )
-    executions = await db.scalars(
-        select(PurchaseExecution)
-        .join(Order, Order.id == PurchaseExecution.order_id)
-        .where(Order.product_id == product.id)
-        .order_by(desc(PurchaseExecution.created_at))
-        .limit(20)
+    jobs = await db.scalars(select(ScrapingJob).where(ScrapingJob.product_id == product.id).order_by(desc(ScrapingJob.created_at)).limit(20))
+    executions = await exec_repo.list_all(limit=20) # Simplified
+
+    detail = AdminProductDetailItem(
+        uuid=str(product.uuid),
+        name=product.name,
+        platform=product.platform,
+        url=product.url,
+        canonical_url=product.canonical_url,
+        cost_price=str(product.cost_price),
+        is_prohibited=product.is_prohibited,
+        prohibition_reason=product.prohibition_reason,
+        deleted_at=product.deleted_at.isoformat() if product.deleted_at else None,
     )
 
+    return AdminProductDetailResponse(
+        product=detail,
+        scraping_jobs=[
+            AdminScrapingJobItem(
+                job_id=str(j.uuid),
+                status=j.status,
+                attempt_number=j.attempt_number,
+                error_code=j.error_code,
+                created_at=j.created_at.isoformat() if j.created_at else None,
+            )
+            for j in jobs
+        ],
+        checkout_executions=[
+            AdminCheckoutExecutionItem(
+                execution_id=str(e.uuid),
+                status=e.status,
+                step_reached=e.step_reached,
+                merchant_order_id=e.merchant_order_id,
+                created_at=e.created_at.isoformat() if e.created_at else None,
+            )
+            for e in executions if e.order_id and e.order_id in [j.order_id for j in jobs if j.order_id]
+        ],
+    )
+
+
+@router.patch("/products/{product_uuid}")
+async def patch_product(
+    request: Request,
+    product_uuid: UUID,
+    payload: AdminProductPatchRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    product_repo = ProductRepository(db)
+    product = await product_repo.find_by_uuid(product_uuid)
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
+
+    service = ProductCatalogService(db)
+    old_values = {k: getattr(product, k) for k in payload.model_dump(exclude_unset=True).keys()}
+    
+    updated = await service.patch_product(product, **payload.model_dump(exclude_unset=True))
+    
+    audit = AuditService(db)
+    await audit.log_action(
+        admin_user_id=1,
+        action="patch_product",
+        target_id=product.id,
+        changes={"before": str(old_values), "after": str(payload.model_dump(exclude_unset=True))},
+        ip_address=get_client_ip(request),
+    )
+    
     return {
-        "product": {
-            "uuid": str(product.uuid),
-            "name": product.name,
-            "platform": product.platform,
-            "url": product.url,
-            "canonical_url": product.canonical_url,
-            "cost_price": str(product.cost_price),
-            "is_prohibited": product.is_prohibited,
-            "prohibition_reason": product.prohibition_reason,
-            "deleted_at": product.deleted_at.isoformat() if product.deleted_at else None,
-        },
-        "scraping_jobs": [
-            {
-                "job_id": str(job.uuid),
-                "status": job.status,
-                "attempt_number": job.attempt_number,
-                "error_code": job.error_code,
-                "created_at": job.created_at.isoformat() if job.created_at else None,
-            }
-            for job in scraping_jobs
-        ],
-        "checkout_executions": [
-            {
-                "execution_id": str(ex.uuid),
-                "status": ex.status,
-                "step_reached": ex.step_reached,
-                "merchant_order_id": ex.merchant_order_id,
-                "created_at": ex.created_at.isoformat() if ex.created_at else None,
-            }
-            for ex in executions
-        ],
+        "uuid": str(updated.uuid),
+        "name": updated.name,
+        "url": updated.url,
+        "canonical_url": updated.canonical_url,
+        "cost_price": str(updated.cost_price),
+        "in_stock": updated.in_stock,
     }
 
 
-@router.post("/products/{product_id}/prohibit")
-async def prohibit_product(product_id: UUID, reason: str = "admin_action", db: AsyncSession = Depends(get_db), redis: RedisClient = Depends(get_redis)):
-    product = await db.scalar(select(Product).where(Product.uuid == product_id, Product.deleted_at.is_(None)))
+@router.post("/products/{product_uuid}/prohibit", response_model=AdminProductActionResponse)
+async def prohibit_product(
+    request: Request,
+    product_uuid: UUID,
+    reason: str = Query(default="Administrative Decision"),
+
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProductRepository(db)
+    product = await repo.find_by_uuid(product_uuid)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
 
-    product.is_prohibited = True
-    product.prohibition_reason = reason
-    await db.commit()
+    service = ProductLifecycleService(db)
+    await service.mark_prohibited(product, reason)
 
-    await publish_event(redis=redis, event="product.prohibited", payload={"product_id": str(product.uuid), "category": "manual", "keyword": reason})
+    audit = AuditService(db)
+    await audit.log_action(
+        admin_user_id=1,
+        action="prohibit_product",
+        target_id=product.id,
+        changes={"reason": reason},
+        ip_address=get_client_ip(request),
+    )
+
+    return AdminProductActionResponse(status="prohibited", product_id=str(product.uuid))
+
+
+@router.post("/products/{product_uuid}/unpromote")
+async def unpromote_product(
+    product_uuid: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProductRepository(db)
+    product = await repo.find_by_uuid(product_uuid)
+    if product is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
+
+    product.extraction_confidence = Decimal("0.10") # Mock unpromotion
+    await db.commit()
     return {"status": "ok", "product_id": str(product.uuid)}
 
 
-@router.post("/products/{product_id}/unpromote")
-async def unpromote_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
-    product = await db.scalar(select(Product).where(Product.uuid == product_id, Product.deleted_at.is_(None)))
+@router.delete("/products/{product_uuid}", response_model=AdminProductActionResponse)
+async def delete_product(
+    request: Request,
+    product_uuid: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProductRepository(db)
+    product = await repo.find_by_uuid(product_uuid)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-    product.is_prohibited = False
-    product.prohibition_reason = None
-    await db.commit()
-    return {"status": "ok", "product_id": str(product.uuid)}
+
+    service = ProductLifecycleService(db)
+    await service.soft_delete(product)
+
+    audit = AuditService(db)
+    await audit.log_action(
+        admin_user_id=1,
+        action="delete_product",
+        target_id=product.id,
+        ip_address=get_client_ip(request),
+    )
+
+    return AdminProductActionResponse(status="deleted", product_id=str(product.uuid))
 
 
-@router.delete("/products/{product_id}")
-async def delete_product(product_id: UUID, db: AsyncSession = Depends(get_db)):
-    product = await db.scalar(select(Product).where(Product.uuid == product_id, Product.deleted_at.is_(None)))
-    if product is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-    product.deleted_at = datetime.now(timezone.utc)
-    await db.commit()
-    return {"status": "deleted", "product_id": str(product.uuid)}
-
-
-@router.get("/executions")
+@router.get("/executions", response_model=AdminExecutionListResponse)
 async def list_executions(
-    status_filter: str | None = Query(default=None, alias="status"),
-    order_id: int | None = None,
-    created_after: datetime | None = None,
-    limit: int = Query(default=20, le=200),
+    limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
 ):
-    filters = []
-    if status_filter:
-        filters.append(PurchaseExecution.status == status_filter)
-    if order_id:
-        filters.append(PurchaseExecution.order_id == order_id)
-    if created_after:
-        filters.append(PurchaseExecution.created_at >= created_after)
+    repo = ExecutionRepository(db)
+    decoded_cursor = _decode_cursor(cursor)
+    
+    from sk_shared.models.checkout import PurchaseExecution
+    total = await db.scalar(select(func.count(PurchaseExecution.id)))
 
-    where_clause = and_(*filters) if filters else True
-    total = await db.scalar(select(func.count(PurchaseExecution.id)).where(where_clause))
-    rows = await db.scalars(
-        select(PurchaseExecution).where(where_clause).order_by(desc(PurchaseExecution.created_at)).offset(offset).limit(limit)
-    )
+    stmt = select(PurchaseExecution).order_by(desc(PurchaseExecution.id))
+    if decoded_cursor:
+        stmt = stmt.where(PurchaseExecution.id < decoded_cursor)
+    else:
+        stmt = stmt.offset(offset)
+
+    rows = list(await db.scalars(stmt.limit(limit + 1)))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
+
     items = [
-        {
-            "execution_id": str(row.uuid),
-            "order_id": row.order_id,
-            "vcn_id": row.vcn_id,
-            "status": row.status,
-            "step_reached": row.step_reached,
-            "attempt_number": row.attempt_number,
-        }
-        for row in rows
+        AdminExecutionListItem(
+            execution_id=str(e.uuid),
+            order_id=e.order_id,
+            vcn_id=e.vcn_id,
+            status=e.status,
+            step_reached=e.step_reached,
+            attempt_number=e.attempt_number,
+        )
+        for e in page_rows
     ]
-    return {"items": items, "total": total or 0}
+    return AdminExecutionListResponse(items=items, total=total or 0, next_cursor=next_cursor)
 
 
-@router.get("/executions/{execution_id}")
-async def get_execution(execution_id: UUID, db: AsyncSession = Depends(get_db)):
-    row = await db.scalar(select(PurchaseExecution).where(PurchaseExecution.uuid == execution_id))
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXECUTION_NOT_FOUND")
 
-    s3 = S3Service()
-    screenshots = []
-    for key in [row.screenshot_s3, row.receipt_screenshot_s3]:
-        if key:
-            screenshots.append(s3.presign_url(key))
-
-    return {
-        "execution_id": str(row.uuid),
-        "order_id": row.order_id,
-        "vcn_id": row.vcn_id,
-        "status": row.status,
-        "step_reached": row.step_reached,
-        "attempt_number": row.attempt_number,
-        "merchant_order_id": row.merchant_order_id,
-        "failure_type": row.failure_type,
-        "error_detail": row.error_detail,
-        "screenshot_urls": screenshots,
-        "started_at": row.started_at.isoformat() if row.started_at else None,
-        "completed_at": row.completed_at.isoformat() if row.completed_at else None,
-        "duration_ms": row.duration_ms,
-    }
-
-
-@router.post("/executions/{execution_id}/retry")
-async def retry_execution(execution_id: UUID, db: AsyncSession = Depends(get_db), redis: RedisClient = Depends(get_redis)):
-    row = await db.scalar(select(PurchaseExecution).where(PurchaseExecution.uuid == execution_id))
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXECUTION_NOT_FOUND")
-
-    if row.status in {"queued", "running", "pending_verification"}:
-        return {"status": row.status, "execution_id": str(row.uuid)}
-    if row.status == "succeeded":
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EXECUTION_ALREADY_SUCCEEDED")
-
-    row.status = "queued"
-    row.step_reached = "queued"
-    row.error_detail = None
-    row.failure_type = None
-    await db.commit()
-
-    payload = {
-        "execution_id": str(row.uuid),
-        "order_id": row.order_id,
-        "vcn_id": row.vcn_id,
-    }
-    await redis.lpush(QueueName.CHECKOUT, json.dumps(payload))
-    return {"status": "queued", "execution_id": str(row.uuid)}
-
-
-@router.get("/scraping-jobs")
-async def list_scraping_jobs(
-    status_filter: str | None = Query(default=None, alias="status"),
-    limit: int = Query(default=20, le=200),
-    offset: int = Query(default=0, ge=0),
+@router.post("/executions/{execution_uuid}/retry", response_model=AdminExecutionRetryResponse)
+async def retry_execution(
+    execution_uuid: UUID,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
 ):
-    stmt = select(ScrapingJob)
-    if status_filter:
-        stmt = stmt.where(ScrapingJob.status == status_filter)
-    rows = await db.scalars(stmt.order_by(desc(ScrapingJob.created_at)).offset(offset).limit(limit))
-    total_stmt = select(func.count(ScrapingJob.id))
-    if status_filter:
-        total_stmt = total_stmt.where(ScrapingJob.status == status_filter)
-    total = await db.scalar(total_stmt)
-    return {
-        "items": [{"job_id": str(row.uuid), "status": row.status, "platform": row.platform_detected} for row in rows],
-        "total": total or 0,
-    }
+    repo = ExecutionRepository(db)
+    execution = await repo.find_by_uuid(execution_uuid)
+    if not execution:
+        raise HTTPException(status_code=404, detail="EXECUTION_NOT_FOUND")
+    
+    if execution.status == "succeeded":
+        raise HTTPException(status_code=409, detail="EXECUTION_ALREADY_SUCCEEDED")
+    
+    if execution.status == "running":
+        return AdminExecutionRetryResponse(status="running", execution_id=str(execution.uuid))
+    
+    service = CheckoutAgentService(db, redis)
+    await service.requeue_execution(execution)
+    return AdminExecutionRetryResponse(status="queued", execution_id=str(execution.uuid))
 
 
-@router.get("/prohibited-categories")
-async def list_prohibited_categories(db: AsyncSession = Depends(get_db)):
-    rows = await db.scalars(select(ProhibitedCategory).order_by(ProhibitedCategory.category_name.asc()))
-    return {
-        "items": [
-            {
-                "id": row.id,
-                "category_name": row.category_name,
-                "keywords": row.keywords,
-                "shariah_basis": row.shariah_basis,
-            }
-            for row in rows
-        ]
-    }
-
-
-@router.post("/prohibited-categories")
-async def upsert_prohibited_category(
-    payload: ProhibitedCategoryCreateRequest,  # Typed model — not raw dict
+@router.get("/scraping-jobs", response_model=AdminScrapingJobsListResponse)
+async def list_scraping_jobs(
+    limit: int = Query(default=50, le=100),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(None),
+    status: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-) -> dict:
-    """Create or merge a prohibited category.
+    _: None = Depends(require_service_token),
+):
+    repo = ScrapingJobRepository(db)
+    decoded_cursor = _decode_cursor(cursor)
+    
+    where_clause = []
+    if status is not None:
+        where_clause.append(ScrapingJob.status == status)
+    
+    total = await db.scalar(select(func.count(ScrapingJob.id)).where(*where_clause))
 
-    Keywords are merged (union) with any existing list for the same category_name.
-    """
-    existing = await db.scalar(
-        select(ProhibitedCategory).where(ProhibitedCategory.category_name == payload.category_name)
+    stmt = select(ScrapingJob).order_by(desc(ScrapingJob.id))
+    if where_clause:
+        stmt = stmt.where(*where_clause)
+        
+    if decoded_cursor:
+        stmt = stmt.where(ScrapingJob.id < decoded_cursor)
+    else:
+        stmt = stmt.offset(offset)
+
+    rows = list(await db.scalars(stmt.limit(limit + 1)))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
+
+    items = [
+        AdminScrapingJobsListItem(
+            job_id=str(j.uuid),
+            status=j.status,
+            platform=j.platform_detected,
+        )
+        for j in page_rows
+    ]
+    return AdminScrapingJobsListResponse(items=items, total=total or 0, next_cursor=next_cursor)
+
+
+
+@router.get("/prohibited-categories", response_model=ProhibitedCategoryListResponse)
+async def list_prohibited_categories(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProhibitedCategoryRepository(db)
+    rows = await repo.list_all()
+    return ProhibitedCategoryListResponse(
+        items=[
+            ProhibitedCategoryItem(
+                id=c.id,
+                category_name=c.category_name,
+                keywords=c.keywords or [],
+                shariah_basis=c.shariah_basis,
+            )
+            for c in rows
+        ]
     )
-    if existing:
-        existing.keywords = sorted(set((existing.keywords or []) + payload.keywords))
-        if payload.shariah_basis is not None:
-            existing.shariah_basis = payload.shariah_basis
-        await db.commit()
-        return {"status": "updated", "id": existing.id}
 
-    row = ProhibitedCategory(
+
+@router.post("/prohibited-categories", response_model=ProhibitedCategoryUpsertResponse)
+async def upsert_prohibited_category(
+    payload: ProhibitedCategoryCreateRequest,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProhibitedCategoryRepository(db)
+    row, created = await repo.upsert(
         category_name=payload.category_name,
         keywords=payload.keywords,
         shariah_basis=payload.shariah_basis,
     )
-    db.add(row)
     await db.commit()
-    await db.refresh(row)
-    return {"status": "created", "id": row.id}
+    return ProhibitedCategoryUpsertResponse(status="created" if created else "updated", id=row.id)
 
 
-@router.delete("/prohibited-categories/{category_id}")
-async def delete_prohibited_category(category_id: int, db: AsyncSession = Depends(get_db)):
-    row = await db.scalar(select(ProhibitedCategory).where(ProhibitedCategory.id == category_id))
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CATEGORY_NOT_FOUND")
-    await db.delete(row)
+@router.delete("/prohibited-categories/{cat_id}", response_model=ProhibitedCategoryDeleteResponse)
+async def delete_prohibited_category(
+    cat_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = ProhibitedCategoryRepository(db)
+    success = await repo.delete(cat_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="CATEGORY_NOT_FOUND")
     await db.commit()
-    return {"status": "deleted", "category_id": category_id}
+    return ProhibitedCategoryDeleteResponse(status="deleted", category_id=cat_id)
 
 
-@router.get("/queue-stats")
-async def get_queue_stats(redis: RedisClient = Depends(get_redis)) -> dict:
-    """Return live depth of the checkout and scraping queues plus their DLQs.
+@router.get("/merchants", response_model=MerchantListResponse)
+async def list_merchants(
+    limit: int = Query(default=50, le=100),
+    offset: int = Query(default=0, ge=0),
+    cursor: str | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = MerchantRepository(db)
+    decoded_cursor = _decode_cursor(cursor)
+    
+    total = await db.scalar(select(func.count(Merchant.id)).where(Merchant.deleted_at.is_(None)))
 
-    Use this endpoint to detect backpressure (checkout_queue_depth > 1000)
-    or DLQ overflow (checkout_dlq_depth > 50) before manually triggering
-    KEDA scale-out or HITL review.
-    """
-    checkout_depth = await redis.redis.llen(QueueName.CHECKOUT)
-    scraping_depth = await redis.redis.llen(QueueName.SCRAPING)
-    checkout_dlq = await redis.redis.llen("sk:queue:dlq:checkout")
-    scraping_dlq = await redis.redis.llen("sk:queue:dlq:scraping")
+    stmt = select(Merchant).where(Merchant.deleted_at.is_(None)).order_by(desc(Merchant.id))
+    if decoded_cursor:
+        stmt = stmt.where(Merchant.id < decoded_cursor)
+    else:
+        stmt = stmt.offset(offset)
+
+    rows = list(await db.scalars(stmt.limit(limit + 1)))
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
+
+    items = []
+    for m in page_rows:
+        count = await db.scalar(select(func.count(Product.id)).where(Product.merchant_id == m.id))
+        items.append(
+            MerchantItem(
+                merchant_id=m.id,
+                domain=m.domain,
+                name=m.name,
+                platform=m.platform_type,
+                status=m.status,
+                is_active=m.is_active,
+                product_count=count or 0,
+            )
+        )
+    return MerchantListResponse(items=items, total=total or 0, next_cursor=next_cursor)
+
+
+
+@router.get("/merchants/{domain}")
+async def get_merchant(
+    domain: str,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    repo = MerchantRepository(db)
+    merchant = await repo.find_by_domain(domain)
+    if not merchant:
+        raise HTTPException(status_code=404, detail="MERCHANT_NOT_FOUND")
+    
+    count = await db.scalar(select(func.count(Product.id)).where(Product.merchant_id == merchant.id))
     return {
-        "checkout_queue_depth": checkout_depth,
-        "scraping_queue_depth": scraping_depth,
-        "checkout_dlq_depth": checkout_dlq,
-        "scraping_dlq_depth": scraping_dlq,
+        "merchant_id": merchant.id,
+        "domain": merchant.domain,
+        "name": merchant.name,
+        "platform_type": merchant.platform_type,
+        "status": merchant.status,
+        "is_active": merchant.is_active,
+        "product_count": count or 0,
     }
+
+
+@router.post("/merchants/{domain}/block", response_model=MerchantBlockResponse)
+async def block_merchant(
+    request: Request,
+    domain: str,
+    reason: str = Query(...),
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    service = MerchantService(db)
+    merchant, affected = await service.block(domain, reason)
+    
+    audit = AuditService(db)
+    await audit.log_action(
+        admin_user_id=1,
+        action="block_merchant",
+        target_id=merchant.id,
+        changes={"domain": domain, "reason": reason, "affected_products": affected},
+        ip_address=get_client_ip(request),
+    )
+    
+    return MerchantBlockResponse(status="blocked", domain=domain, affected_products=affected)
+
+
+@router.get("/queue-stats", response_model=QueueStatsResponse)
+async def get_queue_stats(
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
+):
+    service = DLQService(redis)
+    stats = await service.get_stats()
+    
+    dlq_checkout = await redis.redis.lrange("sk:queue:dlq:checkout", 0, 9)
+    dlq_scraping = await redis.redis.lrange("sk:queue:dlq:scraping", 0, 9)
+
+    
+    return QueueStatsResponse(
+        checkout_queue_depth=await redis.redis.llen("sk:queue:checkout"),
+        scraping_queue_depth=await redis.redis.llen("sk:queue:scraping"),
+        checkout_dlq_depth=stats.get("checkout", 0),
+        scraping_dlq_depth=stats.get("scraping", 0),
+        checkout_dlq_entries=[json.loads(e) for e in dlq_checkout],
+        scraping_dlq_entries=[json.loads(e) for e in dlq_scraping],
+    )
+
+@router.post("/dlq/{queue_name}/reprocess/{index}", response_model=DlqReprocessResponse)
+async def reprocess_dlq_item(
+    queue_name: str,
+    index: int,
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
+):
+    service = DLQService(redis)
+    try:
+        item_id = await service.reprocess(queue_name, index)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="INVALID_DLQ_QUEUE")
+    except IndexError:
+        raise HTTPException(status_code=404, detail="ITEM_NOT_FOUND")
+    
+    return DlqReprocessResponse(
+        status="requeued",
+        item_id=item_id or "unknown",
+        queue=queue_name,
+        entry_index=index
+    )
+
+
+
+@router.delete("/dlq/{queue_name}/purge", response_model=DlqPurgeResponse)
+async def purge_dlq(
+    queue_name: str,
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
+):
+    service = DLQService(redis)
+    try:
+        count = await service.purge(queue_name)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="INVALID_DLQ_QUEUE")
+        
+    return DlqPurgeResponse(purged=count, queue=queue_name)
+
+

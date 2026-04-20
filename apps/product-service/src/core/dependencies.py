@@ -40,3 +40,26 @@ def get_current_user_id(
 
 def get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
+
+
+def get_client_ip(request: Request) -> str:
+    """Resolve the best-effort client IP for rate limiting.
+
+    Priority:
+    1) x-real-ip (trusted ingress/header rewrite)
+    2) first entry in x-forwarded-for
+    3) request.client.host fallback
+    """
+    real_ip = (request.headers.get("x-real-ip") or "").strip()
+    if real_ip:
+        return real_ip
+
+    forwarded_for = (request.headers.get("x-forwarded-for") or "").strip()
+    if forwarded_for:
+        first_hop = forwarded_for.split(",", 1)[0].strip()
+        if first_hop:
+            return first_hop
+
+    if request.client and request.client.host:
+        return request.client.host
+    return "unknown"

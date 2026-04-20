@@ -1,5 +1,6 @@
 import time
 from prometheus_client import Counter, Histogram
+from prometheus_client import Gauge
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -26,6 +27,12 @@ CHECKOUT_JOB_DURATION = Histogram(
     "Checkout job duration by status",
     ["status"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
+)
+CHECKOUT_STEP_DURATION = Histogram(
+    "checkout_step_duration_seconds",
+    "Checkout duration by step",
+    ["step"],
+    buckets=[0.5, 1.0, 2.0, 5.0, 10.0, 30.0],
 )
 CHECKOUT_JOBS_TOTAL = Counter(
     "checkout_jobs_total",
@@ -70,6 +77,11 @@ VCN_VERIFICATION_TIMEOUT = Counter(
 CHECKOUT_QUEUE_DIRECTION_VIOLATION = Counter(
     "checkout_queue_direction_violation_total",
     "Total checkout queue direction violations",
+)
+DLQ_DEPTH = Gauge(
+    "dlq_depth",
+    "Current DLQ depth by queue",
+    ["queue"],
 )
 
 class MetricsMiddleware(BaseHTTPMiddleware):

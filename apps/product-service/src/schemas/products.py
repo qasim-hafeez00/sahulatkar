@@ -11,6 +11,8 @@ ExtractionConfidence = Annotated[float, Field(ge=0.0, le=1.0)]
 
 class ExtractRequest(BaseModel):
     raw_url: str = Field(min_length=8, max_length=2048)
+    order_id: int | None = Field(default=None, gt=0)
+    correlation_id: str | None = Field(default=None, max_length=128)
 
 
 class ExtractionMeta(BaseModel):
@@ -137,6 +139,18 @@ class SearchItem(BaseModel):
 class SearchResponse(BaseModel):
     items: list[SearchItem]
     total: int
+    next_cursor: str | None = None
+
+
+class PriceHistoryItem(BaseModel):
+    old_price: Decimal
+    new_price: Decimal
+    changed_at: str
+
+
+class PriceHistoryResponse(BaseModel):
+    product_id: UUID
+    items: list[PriceHistoryItem]
 
 
 class AgentQueueRequest(BaseModel):

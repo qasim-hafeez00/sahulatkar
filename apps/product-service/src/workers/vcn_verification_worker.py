@@ -6,6 +6,7 @@ import socket
 from datetime import datetime, timezone
 from uuid import UUID
 
+from opentelemetry import trace
 from sqlalchemy import select
 
 from sk_shared.constants import QueueName
@@ -23,6 +24,7 @@ from src.services.checkout.vcn_verifier import VcnVerifier
 from src.middleware.metrics import VCN_VERIFICATION_TIMEOUT
 
 logger = logging.getLogger(__name__)
+tracer = trace.get_tracer("product-service.worker.vcn-verification")
 
 class VcnVerificationWorker:
     def __init__(self, redis: RedisClient) -> None:
@@ -31,7 +33,7 @@ class VcnVerificationWorker:
         self.verifier = VcnVerifier(redis)
 
     async def run(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             for sig in (signal.SIGTERM, signal.SIGINT):
                 loop.add_signal_handler(sig, lambda: setattr(self, "running", False))
@@ -52,74 +54,81 @@ class VcnVerificationWorker:
                 logger.error("Error processing VCN verification job: %s", e)
 
     async def _process_job(self, payload: dict) -> None:
-        execution_id = payload.get("execution_id")
-        vcn_id = payload.get("vcn_id")
-        order_id = payload.get("order_id")
-        correlation_id = payload.get("correlation_id")
+        with tracer.start_as_current_span(
+            "vcn_verification_worker.process",
+            attributes={
+                "execution_id": str(payload.get("execution_id", "")),
+                "correlation_id": str(payload.get("correlation_id", "")),
+            },
+        ):
+            execution_id = payload.get("execution_id")
+            vcn_id = payload.get("vcn_id")
+            order_id = payload.get("order_id")
+            correlation_id = payload.get("correlation_id")
 
-        if not execution_id or not vcn_id:
-            logger.error("Invalid payload for VCN verification: %s", payload)
-            return
-
-        async with SessionLocal() as db:
-            execution = await db.scalar(
-                select(PurchaseExecution).where(PurchaseExecution.uuid == UUID(execution_id))
-            )
-            if not execution:
-                logger.error("PurchaseExecution %s not found", execution_id)
+            if not execution_id or not vcn_id:
+                logger.error("Invalid payload for VCN verification: %s", payload)
                 return
 
-            if execution.status != "pending_verification":
-                logger.warning("Execution %s is in state %s, skipping verification", execution_id, execution.status)
-                return
-
-            logger.info("Verifying charge for execution %s, vcn %s", execution_id, vcn_id)
-            
-            # Use the verifier to poll for charge confirmation
-            verified = await self.verifier.verify_charge(vcn_id)
-            
-            if verified:
-                logger.info("Charge verified for execution %s", execution_id)
-                execution.status = "succeeded"
-                execution.step_reached = "order_confirmed"
-                execution.completed_at = datetime.now(timezone.utc)
-                await db.commit()
-
-                # Publish Success Event
-                envelope = build_event_envelope(
-                    event=EVENT_ORDER_PURCHASE_CONFIRMED,
-                    source_service="product-service",
-                    correlation_id=correlation_id,
-                    payload={
-                        "order_id": execution.order_id,
-                        "vcn_id": execution.vcn_id,
-                        "merchant_order_id": execution.merchant_order_id,
-                    },
+            async with SessionLocal() as db:
+                execution = await db.scalar(
+                    select(PurchaseExecution).where(PurchaseExecution.uuid == UUID(execution_id))
                 )
-                await self.redis.publish(event_channel(EVENT_ORDER_PURCHASE_CONFIRMED), envelope.to_json())
-            else:
-                logger.warning("Verification timed out for vcn %s", vcn_id)
-                VCN_VERIFICATION_TIMEOUT.labels(vcn_id=str(vcn_id)).inc()
-                
-                # Escalation to HITL if it takes too long
-                if settings.FEATURE_HITL_ESCALATION:
-                    hitl = HitlQueue(
-                        order_id=execution.order_id,
-                        execution_id=execution.id,
-                        status="pending",
-                        failure_reason=f"VCN verification timed out for VCN {vcn_id}",
-                    )
-                    db.add(hitl)
-                    execution.status = "hitl_escalated"
-                    await db.commit()
-                else:
-                    # Move back to queue or mark as failed?
-                    # For now, we'll mark as failed to avoid infinite loops if HITL is off.
-                    execution.status = "failed"
-                    execution.failure_type = "verification_timeout"
-                    execution.error_detail = f"VCN verification timed out for VCN {vcn_id}"
+                if not execution:
+                    logger.error("PurchaseExecution %s not found", execution_id)
+                    return
+
+                if execution.status != "pending_verification":
+                    logger.warning("Execution %s is in state %s, skipping verification", execution_id, execution.status)
+                    return
+
+                logger.info("Verifying charge for execution %s, vcn %s", execution_id, vcn_id)
+
+                # Use the verifier to poll for charge confirmation
+                verified = await self.verifier.verify_charge(vcn_id)
+
+                if verified:
+                    logger.info("Charge verified for execution %s", execution_id)
+                    execution.status = "succeeded"
+                    execution.step_reached = "order_confirmed"
                     execution.completed_at = datetime.now(timezone.utc)
                     await db.commit()
+
+                    # Publish Success Event
+                    envelope = build_event_envelope(
+                        event=EVENT_ORDER_PURCHASE_CONFIRMED,
+                        source_service="product-service",
+                        correlation_id=correlation_id,
+                        payload={
+                            "order_id": execution.order_id,
+                            "vcn_id": execution.vcn_id,
+                            "merchant_order_id": execution.merchant_order_id,
+                        },
+                    )
+                    await self.redis.publish(event_channel(EVENT_ORDER_PURCHASE_CONFIRMED), envelope.to_json())
+                else:
+                    logger.warning("Verification timed out for vcn %s", vcn_id)
+                    VCN_VERIFICATION_TIMEOUT.labels(vcn_id=str(vcn_id)).inc()
+
+                    # Escalation to HITL if it takes too long
+                    if settings.FEATURE_HITL_ESCALATION:
+                        hitl = HitlQueue(
+                            order_id=execution.order_id,
+                            execution_id=execution.id,
+                            status="pending",
+                            failure_reason=f"VCN verification timed out for VCN {vcn_id}",
+                        )
+                        db.add(hitl)
+                        execution.status = "hitl_escalated"
+                        await db.commit()
+                    else:
+                        # Move back to queue or mark as failed?
+                        # For now, we'll mark as failed to avoid infinite loops if HITL is off.
+                        execution.status = "failed"
+                        execution.failure_type = "verification_timeout"
+                        execution.error_detail = f"VCN verification timed out for VCN {vcn_id}"
+                        execution.completed_at = datetime.now(timezone.utc)
+                        await db.commit()
 
 async def _amain() -> None:
     logging.basicConfig(

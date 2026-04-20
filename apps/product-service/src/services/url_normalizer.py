@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass
 import ipaddress
 import re
+import socket
 from urllib.parse import parse_qsl, urlencode, urlparse, urlunparse
+from urllib.parse import urljoin
 
 import httpx
 from src.config import settings
@@ -35,16 +38,18 @@ class NormalizedUrl:
 
 class UrlNormalizerService:
     async def normalize(self, raw_url: str) -> NormalizedUrl:
-        expanded_url = await self.expand_url(raw_url.strip())
+        raw_input = raw_url.strip()
+        await self._ensure_target_is_safe(raw_input)
+
+        expanded_url = await self.expand_url(raw_input)
         parsed = urlparse(expanded_url)
         if parsed.scheme not in {"http", "https"}:
             raise ValueError("NOT_A_PRODUCT_URL")
 
-        domain = parsed.netloc.lower().replace("www.", "")
+        domain = (parsed.hostname or "").lower().replace("www.", "")
         if not domain:
             raise ValueError("NOT_A_PRODUCT_URL")
-        if self._is_private_or_local_host(domain):
-            raise ValueError("UNSAFE_URL")
+        await self._ensure_target_is_safe(expanded_url)
         if not parsed.path:
             raise ValueError("NOT_A_PRODUCT_URL")
 
@@ -69,15 +74,38 @@ class UrlNormalizerService:
         )
 
     async def expand_url(self, url: str) -> str:
-        """Follow all redirects to get final canonical URL."""
+        """Follow redirects one hop at a time so each target can be validated."""
+        current_url = url
+        for _ in range(5):
+            await self._ensure_target_is_safe(current_url)
+            try:
+                async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as client:
+                    resp = await client.head(current_url)
+            except ValueError:
+                raise
+            except Exception:
+                return current_url
+
+            if resp.status_code in {301, 302, 303, 307, 308}:
+                location = resp.headers.get("location")
+                if not location:
+                    return current_url
+                current_url = urljoin(current_url, location)
+                continue
+
+            return current_url
+
         try:
-            async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as client:
-                resp = await client.head(url)
+            async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as client:
+                resp = await client.head(current_url)
                 return str(resp.url)
+        except ValueError:
+            raise
         except Exception:
-            return url
+            return current_url
 
     async def verify_url(self, canonical_url: str) -> None:
+        await self._ensure_target_is_safe(canonical_url)
         try:
             async with httpx.AsyncClient(follow_redirects=False, timeout=10.0) as client:
                 resp = await client.head(canonical_url)
@@ -170,3 +198,33 @@ class UrlNormalizerService:
             return ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved
         except ValueError:
             return False
+
+    async def _ensure_target_is_safe(self, url: str) -> None:
+        parsed = urlparse(url)
+        host = (parsed.hostname or "").strip().lower()
+        if not host:
+            raise ValueError("NOT_A_PRODUCT_URL")
+        if self._is_private_or_local_host(host):
+            raise ValueError("UNSAFE_URL")
+        if await self._resolves_to_private(host):
+            raise ValueError("UNSAFE_URL")
+
+    async def _resolves_to_private(self, domain: str) -> bool:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return False
+
+        try:
+            infos = await loop.run_in_executor(None, lambda: socket.getaddrinfo(domain, None, socket.AF_UNSPEC, socket.SOCK_STREAM))
+        except Exception:
+            return False
+
+        for _, _, _, _, sockaddr in infos:
+            try:
+                ip = ipaddress.ip_address(sockaddr[0])
+            except ValueError:
+                continue
+            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+                return True
+        return False
