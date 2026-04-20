@@ -1,6 +1,7 @@
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import AsyncGenerator
+from decimal import Decimal
 
 import fakeredis.aioredis
 import pytest
@@ -14,6 +15,8 @@ from sqlalchemy.pool import StaticPool
 
 from sk_shared.models import auth, contracts, credit, kyc, order, payment, product  # noqa: F401
 from sk_shared.models.base import Base
+from sk_shared.models.checkout import PurchaseExecution
+from sk_shared.models.product import Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
 from src.core.dependencies import get_db as service_get_db
@@ -100,6 +103,74 @@ def user_header() -> dict[str, str]:
     }
 
 
+@pytest.fixture
+def service_header() -> dict[str, str]:
+    return {"X-Internal-Service-Token": "dev-secret-token"}
+
+
+@pytest.fixture
+def make_product():
+    async def _make(db_session: AsyncSession, **overrides) -> Product:
+        payload = {
+            "name": "Fixture Product",
+            "url": "https://example.com/p/fixture",
+            "canonical_url": "https://example.com/p/fixture",
+            "platform": "CUSTOM",
+            "currency": "PKR",
+            "cost_price": Decimal("5000.00"),
+            "sale_price": Decimal("5000.00"),
+            "stock_status": "in_stock",
+            "in_stock": True,
+            "extraction_method": "json_ld",
+            "extraction_confidence": Decimal("0.850"),
+        }
+        payload.update(overrides)
+        row = Product(**payload)
+        db_session.add(row)
+        await db_session.flush()
+        return row
+
+    return _make
+
+
+@pytest.fixture
+def make_execution():
+    async def _make(db_session: AsyncSession, **overrides) -> PurchaseExecution:
+        payload = {
+            "order_id": 1,
+            "vcn_id": 1,
+            "status": "queued",
+            "step_reached": "queued",
+            "queued_at": datetime.now(timezone.utc),
+        }
+        payload.update(overrides)
+        row = PurchaseExecution(**payload)
+        db_session.add(row)
+        await db_session.flush()
+        return row
+
+    return _make
+
+
+@pytest.fixture
+def make_scraping_job():
+    async def _make(db_session: AsyncSession, **overrides) -> ScrapingJob:
+        payload = {
+            "input_url": "https://example.com/p/fixture",
+            "canonical_url": "https://example.com/p/fixture",
+            "platform_detected": "CUSTOM",
+            "status": "queued",
+            "queued_at": datetime.now(timezone.utc),
+        }
+        payload.update(overrides)
+        row = ScrapingJob(**payload)
+        db_session.add(row)
+        await db_session.flush()
+        return row
+
+    return _make
+
+
 def make_job_payload(job_id: uuid.UUID, canonical_url: str, platform: str = "CUSTOM") -> dict:
     return {
         "job_id": str(job_id),
@@ -107,5 +178,5 @@ def make_job_payload(job_id: uuid.UUID, canonical_url: str, platform: str = "CUS
         "canonical_url": canonical_url,
         "platform": platform,
         "user_id": 101,
-        "queued_at": datetime.utcnow().isoformat(),
+        "queued_at": datetime.now(timezone.utc).isoformat(),
     }

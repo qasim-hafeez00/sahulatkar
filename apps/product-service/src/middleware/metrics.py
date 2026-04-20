@@ -27,6 +27,36 @@ CHECKOUT_JOB_DURATION = Histogram(
     ["status"],
     buckets=[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0],
 )
+CHECKOUT_JOBS_TOTAL = Counter(
+    "checkout_jobs_total",
+    "Total checkout jobs by status",
+    ["status"],
+)
+SCRAPING_JOBS_TOTAL = Counter(
+    "scraping_jobs_total",
+    "Total scraping jobs by platform and status",
+    ["platform", "status"],
+)
+RYE_API_CALLS_TOTAL = Counter(
+    "rye_api_calls_total",
+    "Rye API call outcomes",
+    ["status"],
+)
+VLM_CALLS_TOTAL = Counter(
+    "vlm_calls_total",
+    "VLM self-healing calls",
+    ["reason"],
+)
+CAPTCHA_SOLVE_TOTAL = Counter(
+    "captcha_solve_total",
+    "CAPTCHA solving outcomes",
+    ["provider", "result"],
+)
+PROHIBITED_ITEMS_DETECTED_TOTAL = Counter(
+    "prohibited_items_detected_total",
+    "Prohibited item detections",
+    ["category"],
+)
 
 class MetricsMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:

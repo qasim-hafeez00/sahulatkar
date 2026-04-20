@@ -3,6 +3,7 @@ import logging
 import time
 import uuid
 
+from src.core.http_client import set_request_id
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import Response
@@ -15,6 +16,7 @@ class RequestLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next) -> Response:
         request_id = request.headers.get("x-request-id") or str(uuid.uuid4())
         request.state.request_id = request_id
+        set_request_id(request_id)
 
         start = time.perf_counter()
         response = await call_next(request)

@@ -1,4 +1,5 @@
 from typing import AsyncGenerator
+import hmac
 
 from fastapi import Request, HTTPException, status, Header
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -17,7 +18,7 @@ def get_redis(request: Request) -> RedisClient:
 def require_service_token(
     internal_token: str = Header(None, alias="x-internal-service-token"),
 ) -> None:
-    if internal_token != settings.INTERNAL_SERVICE_TOKEN:
+    if not internal_token or not hmac.compare_digest(internal_token, settings.INTERNAL_SERVICE_TOKEN):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="INVALID_SERVICE_TOKEN")
 
 
@@ -25,7 +26,7 @@ def get_current_user_id(
     request: Request,
     internal_token: str = Header(None, alias="x-internal-service-token"),
 ) -> int | None:
-    if internal_token != settings.INTERNAL_SERVICE_TOKEN:
+    if not internal_token or not hmac.compare_digest(internal_token, settings.INTERNAL_SERVICE_TOKEN):
         # Gateway-driven Zero-Trust: If service token is absent or invalid, we refuse trust.
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="INVALID_SERVICE_TOKEN_OR_DIRECT_ACCESS")
     header_value = request.headers.get("x-user-id")
@@ -35,3 +36,7 @@ def get_current_user_id(
         return int(header_value)
     except ValueError:
         return None
+
+
+def get_request_id(request: Request) -> str:
+    return getattr(request.state, "request_id", "")

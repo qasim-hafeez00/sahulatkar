@@ -24,3 +24,23 @@ async def test_normalize_rejects_non_http_scheme():
         assert False, "Expected ValueError"
     except ValueError as exc:
         assert str(exc) == "NOT_A_PRODUCT_URL"
+
+
+@pytest.mark.asyncio
+async def test_normalize_rejects_unsafe_localhost_url():
+    service = UrlNormalizerService()
+
+    with pytest.raises(ValueError) as exc:
+        await service.normalize("https://localhost/products/demo")
+
+    assert str(exc.value) == "UNSAFE_URL"
+
+
+@pytest.mark.asyncio
+async def test_normalize_rejects_empty_path_url():
+    service = UrlNormalizerService()
+
+    with pytest.raises(ValueError) as exc:
+        await service.normalize("https://example.com")
+
+    assert str(exc.value) == "NOT_A_PRODUCT_URL"

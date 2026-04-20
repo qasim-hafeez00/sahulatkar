@@ -5,6 +5,7 @@ import re
 from typing import TYPE_CHECKING, List, Optional
 
 from openai import AsyncOpenAI
+from sk_shared.redis_client import RedisClient
 from src.config import settings
 
 if TYPE_CHECKING:
@@ -20,6 +21,8 @@ class SelfHealingService:
         *,
         page: Optional[Page] = None,
         error_context: str,
+        execution_id: str | None = None,
+        redis: RedisClient | None = None,
         fallback_selectors: List[str] | None = None,
     ) -> str | None:
         """
@@ -36,6 +39,13 @@ class SelfHealingService:
         # 2. If no heuristic, use VLM if enabled
         if not settings.FEATURE_OPENAI_FALLBACK or not settings.OPENAI_API_KEY or not page:
             return fallback_selectors[0] if fallback_selectors else None
+
+        if execution_id and redis:
+            calls = await redis.incr(f"sk:vlm:calls:{execution_id}")
+            if calls == 1:
+                await redis.expire(f"sk:vlm:calls:{execution_id}", 3600)
+            if calls > 5:
+                return fallback_selectors[0] if fallback_selectors else None
 
         try:
             screenshot = await page.screenshot(type="jpeg", quality=70)
@@ -75,3 +85,51 @@ class SelfHealingService:
                 return fallback_selectors[0]
             match = re.search(r"#[a-zA-Z0-9_-]+", error_context)
             return match.group(0) if match else None
+
+    async def detect_modal_or_popup(self, page: Page) -> str | None:
+        candidates = [
+            "button:has-text('Accept')",
+            "button:has-text('I Agree')",
+            "button:has-text('Close')",
+            "button[aria-label='Close']",
+            "[id*='cookie'] button",
+            "[class*='modal'] button[aria-label='Close']",
+        ]
+        for selector in candidates:
+            if await page.query_selector(selector):
+                return selector
+        return None
+
+    async def handle_out_of_stock_at_checkout(self, page: Page) -> bool:
+        text = (await page.content()).lower()
+        signals = ["out of stock", "sold out", "unavailable", "no longer available"]
+        return any(signal in text for signal in signals)
+
+    async def suggest_form_field_selector(self, page: Page, field_purpose: str) -> str | None:
+        if not settings.FEATURE_OPENAI_FALLBACK or not settings.OPENAI_API_KEY:
+            return None
+        try:
+            screenshot = await page.screenshot(type="jpeg", quality=70)
+            base64_image = base64.b64encode(screenshot).decode("utf-8")
+            response = await self.client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "text",
+                                "text": f"Identify the CSS selector for the {field_purpose}. Return only the selector.",
+                            },
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": f"data:image/jpeg;base64,{base64_image}"},
+                            },
+                        ],
+                    }
+                ],
+                max_tokens=60,
+            )
+            return (response.choices[0].message.content or "").strip().strip("`")
+        except Exception:
+            return None

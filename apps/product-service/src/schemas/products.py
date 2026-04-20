@@ -1,8 +1,12 @@
 from decimal import Decimal
+from typing import Annotated
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel, Field
+
+
+ExtractionConfidence = Annotated[float, Field(ge=0.0, le=1.0)]
 
 
 class ExtractRequest(BaseModel):
@@ -64,6 +68,7 @@ class ExtractResponse(BaseModel):
     status: Literal["completed", "extracting"]
     job_id: UUID | None = None
     upo: UpoResponse | None = None
+    meta: dict | None = None
 
 
 class JobStatusResponse(BaseModel):
@@ -78,6 +83,32 @@ class OfferResponse(BaseModel):
     product_id: UUID
     upo: UpoResponse
     financing_offer: FinancingOffer
+
+
+class MultipleOffersResponse(BaseModel):
+    product_id: UUID
+    upo: UpoResponse
+    financing_offers: list[FinancingOffer]
+    financing_offer: FinancingOffer | None = None
+
+
+class ProductRefreshRequest(BaseModel):
+    reason: str | None = None
+
+
+class ScrapingJobSummary(BaseModel):
+    job_id: UUID
+    status: str
+
+
+class ExecutionSummary(BaseModel):
+    execution_id: UUID
+    status: str
+
+
+class ProductDetailResponse(UpoResponse):
+    scraping_jobs: list[ScrapingJobSummary] = Field(default_factory=list)
+    checkout_executions: list[ExecutionSummary] = Field(default_factory=list)
 
 
 class SearchItem(BaseModel):

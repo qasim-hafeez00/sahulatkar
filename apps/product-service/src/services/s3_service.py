@@ -4,8 +4,8 @@ S3 operations for product-service:
   - Upload from URL (product image caching)
   - Generate presigned GET URLs
 """
+import asyncio
 import hashlib
-import io
 import logging
 
 import boto3
@@ -25,15 +25,17 @@ class S3Service:
     async def upload_bytes(self, data: bytes, key: str, content_type: str = "image/jpeg") -> str:
         """Upload raw bytes. Returns S3 key."""
         try:
-            # Using run_in_executor for boto3 sync calls if needed, 
-            # but for simplicity we'll just call it here unless we see perf issues.
-            self._client.put_object(
-                Bucket=self.bucket_screenshots,
-                Key=key,
-                Body=data,
-                ContentType=content_type,
-                ServerSideEncryption="AES256",
-            )
+            kwargs = {
+                "Bucket": self.bucket_screenshots,
+                "Key": key,
+                "Body": data,
+                "ContentType": content_type,
+                "ServerSideEncryption": "aws:kms",
+            }
+            if settings.AWS_KMS_KEY_ARN:
+                kwargs["SSEKMSKeyId"] = settings.AWS_KMS_KEY_ARN
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, lambda: self._client.put_object(**kwargs))
             return key
         except Exception as exc:
             logger.error("S3 upload failed for key %s: %s", key, exc)
@@ -75,3 +77,19 @@ class S3Service:
         except ClientError as exc:
             logger.error("Presigned URL generation failed: %s", exc)
             return ""
+
+    async def delete_object(self, key: str, bucket: str | None = None) -> None:
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(
+            None,
+            lambda: self._client.delete_object(Bucket=bucket or self.bucket_screenshots, Key=key),
+        )
+
+    async def list_objects(self, prefix: str, bucket: str | None = None) -> list[str]:
+        loop = asyncio.get_event_loop()
+        response = await loop.run_in_executor(
+            None,
+            lambda: self._client.list_objects_v2(Bucket=bucket or self.bucket_screenshots, Prefix=prefix),
+        )
+        contents = response.get("Contents") or []
+        return [obj.get("Key") for obj in contents if obj.get("Key")]

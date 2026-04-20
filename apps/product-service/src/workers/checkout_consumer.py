@@ -6,12 +6,14 @@ import logging
 import signal
 import socket
 from datetime import datetime, timezone
+import time
 
 from sk_shared.constants import QueueName
 from sk_shared.database import SessionLocal
 from sk_shared.redis_client import get_redis_client
 
 from src.config import settings
+from src.middleware.metrics import CHECKOUT_JOB_DURATION
 from src.services.checkout_agent import CheckoutAgentService
 
 logger = logging.getLogger(__name__)
@@ -21,9 +23,10 @@ class CheckoutConsumer:
     def __init__(self, max_concurrency: int = 5) -> None:
         self.running = True
         self._sem = asyncio.Semaphore(max_concurrency)
+        self.max_concurrency = max_concurrency
 
     async def run(self) -> None:
-        logger.info("Starting CheckoutConsumer...")
+        logger.info("Starting CheckoutConsumer hostname=%s max_concurrency=%s", socket.gethostname(), self.max_concurrency)
         redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
         
         loop = asyncio.get_event_loop()
@@ -58,13 +61,36 @@ class CheckoutConsumer:
 
     async def _process_with_sem(self, payload: dict, redis) -> None:
         async with self._sem:
+            start = time.perf_counter()
+            status_label = "failed"
             try:
+                execution_id = payload.get("execution_id")
+                if not execution_id:
+                    status_label = "invalid_payload"
+                    await self._send_to_dlq(payload, "Missing execution_id", redis)
+                    return
+
+                if not await self._check_idempotency(redis, execution_id):
+                    logger.info("Skipping duplicate checkout execution_id=%s", execution_id)
+                    status_label = "duplicate"
+                    return
                 async with SessionLocal() as db:
                     service = CheckoutAgentService(db, redis)
                     await service.process_job(payload)
+                    status_label = "processed"
             except Exception as e:
                 logger.exception("Checkout worker task failed")
                 await self._send_to_dlq(payload, str(e), redis)
+            finally:
+                execution_id = payload.get("execution_id")
+                if execution_id:
+                    await redis.delete(f"sk:checkout:processing:{execution_id}")
+                CHECKOUT_JOB_DURATION.labels(status=status_label).observe(time.perf_counter() - start)
+
+    async def _check_idempotency(self, redis, execution_uuid: str) -> bool:
+        key = f"sk:checkout:processing:{execution_uuid}"
+        locked = await redis.redis.set(key, "1", ex=600, nx=True)
+        return bool(locked)
 
     async def _send_to_dlq(self, payload: dict, error: str, redis) -> None:
         dlq_entry = {

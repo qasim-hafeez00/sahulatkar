@@ -13,12 +13,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.constants import QueueName, RedisNS, RedisTTL
 from sk_shared.database import SessionLocal
 from sk_shared.models.hitl import HitlQueue
-from sk_shared.models.product import Product, ScrapingJob
+from sk_shared.models.product import Merchant, Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
 from src.services.event_publisher import publish_event
 from src.services.extraction_waterfall import ExtractionWaterfallService
+from src.services.product_cache_service import ProductCacheService
 
 
 class ScrapingWorker:
@@ -72,7 +73,12 @@ class ScrapingWorker:
         job_id = payload.get("job_id")
         if not job_id:
             raise ValueError("No job_id in payload")
-        scraping_job = await db.scalar(select(ScrapingJob).where(ScrapingJob.id == job_id))
+        try:
+            job_uuid = UUID(str(job_id))
+        except Exception as exc:
+            raise ValueError(f"Invalid job_id UUID: {job_id}") from exc
+
+        scraping_job = await db.scalar(select(ScrapingJob).where(ScrapingJob.uuid == job_uuid))
         if scraping_job is None:
             return
         if scraping_job.status in {"completed", "failed"}:
@@ -89,13 +95,16 @@ class ScrapingWorker:
             scraping_job.error_message = result.error_message
             scraping_job.completed_at = datetime.now(timezone.utc)
 
-            if scraping_job.attempt_number < scraping_job.max_attempts:
+            max_attempts = scraping_job.max_attempts or settings.EXTRACTION_MAX_RETRIES
+            if scraping_job.attempt_number < max_attempts:
                 scraping_job.attempt_number += 1
                 scraping_job.status = "retrying"
                 await db.commit()
                 # GAP-01: Re-queue at the front (FIFO) or back? 
                 # FIFO means lpush to left. Correct.
-                await self.redis.lpush(QueueName.SCRAPING, json.dumps(payload))
+                retry_payload = dict(payload)
+                retry_payload["job_id"] = str(job_uuid)
+                await self.redis.lpush(QueueName.SCRAPING, json.dumps(retry_payload))
                 return
 
             scraping_job.status = "failed"
@@ -114,9 +123,28 @@ class ScrapingWorker:
                 db.add(hitl)
 
             await db.commit()
+
+            await publish_event(
+                redis=self.redis,
+                event="product.extraction_failed",
+                payload={
+                    "order_id": scraping_job.order_id,
+                    "error_code": result.error_code,
+                    "error_message": result.error_message,
+                },
+            )
             return
 
+        canonical_url = payload["canonical_url"]
+        domain = canonical_url.split("//", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
+        merchant = await db.scalar(select(Merchant).where(Merchant.domain == domain))
+        if merchant is None:
+            merchant = Merchant(name=domain, normalized_name=domain, domain=domain, platform_type=payload.get("platform", "CUSTOM"))
+            db.add(merchant)
+            await db.flush()
+
         product = Product(
+            merchant_id=merchant.id,
             name=result.title,
             url=payload["input_url"],
             canonical_url=payload["canonical_url"],
@@ -133,7 +161,8 @@ class ScrapingWorker:
         db.add(product)
         await db.flush()
 
-        if hasattr(settings, "DATABASE_URL") and "postgresql" in str(settings.DATABASE_URL).lower():
+        bind = db.get_bind()
+        if bind is not None and bind.dialect.name == "postgresql":
             await db.execute(
                 text("""
                     UPDATE products
@@ -167,9 +196,10 @@ class ScrapingWorker:
                 "is_async": True,
             }
         )
-
-        await self.redis.set_json(
-            f"{RedisNS.PRODUCT_UPO}:{product.uuid}",
+        cache_service = ProductCacheService()
+        await cache_service.set_upo(
+            self.redis,
+            str(product.uuid),
             {
                 "product_id": str(product.uuid),
                 "source_url": product.canonical_url or product.url,
@@ -189,5 +219,5 @@ class ScrapingWorker:
                     "currency": product.currency,
                 },
             },
-            ttl=RedisTTL.PRODUCT_CACHE,
         )
+        await cache_service.set_by_url(self.redis, product.canonical_url or product.url, str(product.uuid))

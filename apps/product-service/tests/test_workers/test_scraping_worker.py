@@ -36,7 +36,7 @@ async def test_scraping_worker_processes_job(monkeypatch, db_session, redis_mock
     worker = ScrapingWorker(redis_mock)
     await worker._process(
         {
-            "job_id": job.id,
+            "job_id": job.uuid,
             "input_url": "https://example.com/item",
             "canonical_url": "https://example.com/item",
             "platform": "CUSTOM",
@@ -79,7 +79,7 @@ async def test_scraping_worker_retries_then_fails(monkeypatch, db_session, redis
 
     worker = ScrapingWorker(redis_mock)
     payload = {
-        "job_id": job.id,
+        "job_id": job.uuid,
         "input_url": "https://example.com/fail",
         "canonical_url": "https://example.com/fail",
         "platform": "CUSTOM",
