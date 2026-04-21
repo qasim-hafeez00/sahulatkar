@@ -8,6 +8,7 @@ from decimal import Decimal
 import re
 
 from src.config import settings
+from src.middleware.metrics import EXTRACTION_PROXY_USED
 from playwright_stealth import stealth
 
 logger = logging.getLogger(__name__)
@@ -28,7 +29,11 @@ class PlaywrightExtractionAgent:
         from playwright.async_api import async_playwright
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
+            launch_kwargs: dict[str, object] = {"headless": True}
+            if settings.BRIGHTDATA_PROXY_URL:
+                launch_kwargs["proxy"] = {"server": settings.BRIGHTDATA_PROXY_URL}
+                EXTRACTION_PROXY_USED.labels(tier="tier3").inc()
+            browser = await p.chromium.launch(**launch_kwargs)
             context = await browser.new_context(
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
                 viewport={"width": 1366, "height": 768}
@@ -66,6 +71,9 @@ class PlaywrightExtractionAgent:
                 screenshot = await page.screenshot(type="jpeg", quality=50, full_page=True)
                 parsed["debug_screenshot_b64"] = base64.b64encode(screenshot).decode("utf-8")
                 parsed.setdefault("confidence", 0.85)
+                parsed.setdefault("ships_to_pakistan", True)
+                parsed.setdefault("images", [])
+                parsed.setdefault("variants", [])
                 return parsed
                 
             except Exception as e:
@@ -87,6 +95,10 @@ class PlaywrightExtractionAgent:
         - availability (string: "in_stock", "out_of_stock", "preorder", or "unknown")
         - image_url (string, main product image)
         - description (string, max 200 chars)
+        - brand (string, optional)
+        - ships_to_pakistan (boolean, default true)
+        - images (array of strings, optional)
+        - variants (array of objects, optional)
 
         Text:
         {text}
@@ -142,13 +154,15 @@ class PlaywrightExtractionAgent:
     async def _platform_wait(self, page, platform: str) -> None:
         if platform == "DARAZ":
             try:
-                await page.wait_for_selector(".pdp-product-title", timeout=4000)
+                if await page.locator(".pdp-product-title").count():
+                    return
                 return
             except Exception:
                 pass
         elif platform == "AMAZON":
             try:
-                await page.wait_for_selector("#productTitle", timeout=4000)
+                if await page.locator("#productTitle").count():
+                    return
                 return
             except Exception:
                 pass
@@ -157,9 +171,9 @@ class PlaywrightExtractionAgent:
     async def _distill_product_text(self, page) -> str:
         selectors = ["main", "article", "[class*='product']", "[class*='item']", "[class*='pdp']", "[class*='detail']"]
         for selector in selectors:
-            node = await page.query_selector(selector)
-            if node is not None:
-                text = (await node.inner_text() or "").strip()
+            locator = page.locator(selector)
+            if await locator.count():
+                text = (await locator.first.inner_text() or "").strip()
                 if len(text) > 200:
                     return text[:10000]
         body = await page.inner_text("body")

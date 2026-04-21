@@ -26,16 +26,35 @@ def get_current_user_id(
     request: Request,
     internal_token: str = Header(None, alias="x-internal-service-token"),
 ) -> int | None:
+    """Zero-Trust Identity Resolution.
+    
+    Only trusts the x-user-id header if it is accompanied by a valid
+    internal service token (HMAC-verified from the Gateway).
+    """
     if not internal_token or not hmac.compare_digest(internal_token, settings.INTERNAL_SERVICE_TOKEN):
-        # Gateway-driven Zero-Trust: If service token is absent or invalid, we refuse trust.
-        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="INVALID_SERVICE_TOKEN_OR_DIRECT_ACCESS")
+        # Prevent direct public access bypassing the Gateway.
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, 
+            detail="INVALID_SERVICE_TOKEN_OR_DIRECT_ACCESS"
+        )
+    
     header_value = request.headers.get("x-user-id")
-    if header_value is None:
+    if not header_value:
         return None
+        
     try:
         return int(header_value)
     except ValueError:
-        return None
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_USER_ID_FORMAT")
+
+
+def require_user_id(
+    user_id: int | None = Depends(get_current_user_id),
+) -> int:
+    """Enforce that a user ID must be present for this endpoint."""
+    if user_id is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="USER_ID_REQUIRED")
+    return user_id
 
 
 def get_request_id(request: Request) -> str:

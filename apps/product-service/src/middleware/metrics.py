@@ -19,7 +19,7 @@ REQUEST_LATENCY = Histogram(
 EXTRACTION_LATENCY = Histogram(
     "extraction_duration_seconds",
     "Product extraction duration by tier",
-    ["tier", "status"],
+    ["tier", "domain", "status"],
     buckets=[0.1, 0.5, 1.0, 5.0, 15.0, 30.0, 60.0],
 )
 CHECKOUT_JOB_DURATION = Histogram(
@@ -64,10 +64,27 @@ PROHIBITED_ITEMS_DETECTED_TOTAL = Counter(
     "Prohibited item detections",
     ["category"],
 )
+PRODUCT_VARIANTS_COVERAGE = Gauge(
+    "product_variants_coverage_ratio",
+    "Fraction of active products with variant data",
+)
+STALE_PRODUCTS_DETECTED = Counter(
+    "stale_products_detected_total",
+    "Total products re-queued by staleness worker",
+)
+IMAGE_CACHE_HIT = Counter(
+    "product_image_cache_hits_total",
+    "Product images found in S3 cache vs external CDN",
+)
+EXTRACTION_PROXY_USED = Counter(
+    "extraction_proxy_used_total",
+    "Extraction requests using BrightData proxy",
+    ["tier"],
+)
 EXTRACT_RATE_LIMIT_HITS = Counter(
     "extract_rate_limit_hits_total",
     "Total extraction rate limit hits",
-    ["tier"],
+    ["tier", "domain"],
 )
 VCN_VERIFICATION_TIMEOUT = Counter(
     "vcn_verification_timeout_total",

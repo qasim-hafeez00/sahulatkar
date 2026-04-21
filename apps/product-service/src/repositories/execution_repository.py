@@ -4,6 +4,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.checkout import PurchaseExecution
+from sk_shared.models.product import ScrapingJob
 
 
 class ExecutionRepository:
@@ -29,8 +30,19 @@ class ExecutionRepository:
         )
         return list(rows)
 
-    async def list_all(self, limit: int = 50, offset: int = 0) -> list[PurchaseExecution]:
-        rows = await self.db.scalars(
-            select(PurchaseExecution).order_by(desc(PurchaseExecution.created_at)).limit(limit).offset(offset)
+    async def list_all(self, limit: int = 50, offset: int = 0, product_id: int | None = None) -> list[PurchaseExecution]:
+        stmt = select(PurchaseExecution).order_by(desc(PurchaseExecution.created_at))
+        if product_id is not None:
+            stmt = stmt.join(ScrapingJob, ScrapingJob.order_id == PurchaseExecution.order_id).where(ScrapingJob.product_id == product_id)
+        rows = await self.db.scalars(stmt.limit(limit).offset(offset))
+        return list(rows)
+
+    async def list_by_product(self, product_id: int, limit: int = 50, offset: int = 0) -> list[PurchaseExecution]:
+        stmt = (
+            select(PurchaseExecution)
+            .join(ScrapingJob, ScrapingJob.order_id == PurchaseExecution.order_id)
+            .where(ScrapingJob.product_id == product_id)
+            .order_by(desc(PurchaseExecution.created_at))
         )
+        rows = await self.db.scalars(stmt.limit(limit).offset(offset))
         return list(rows)

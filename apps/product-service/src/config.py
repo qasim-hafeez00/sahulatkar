@@ -49,8 +49,29 @@ class Settings(BaseSettings):
     MIN_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("1"), ge=Decimal("0"))
     MAX_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("200000"), ge=Decimal("1"))
     PRODUCT_CACHE_TTL_SECONDS: int = Field(default=3600, ge=60, le=604800)
+    PRODUCT_STALE_AFTER_SECONDS: int = Field(default=86400, ge=3600, le=604800)
+    PRODUCT_STALENESS_BATCH_SIZE: int = Field(default=50, ge=1, le=500)
+    PRODUCT_STALENESS_CHECK_INTERVAL_SECONDS: int = Field(default=3600, ge=300, le=86400)
+    VCN_VERIFICATION_TIMEOUT_SECONDS: int = Field(default=120, ge=10, le=600)
+    IMAGE_CACHE_ENABLED: bool = True
     # GAP-C: /extract endpoint rate limit (requests per minute per user/IP).
     EXTRACT_RATE_LIMIT_PER_MINUTE: int = Field(default=10, ge=1, le=1000)
+
+    # Shariah Compliance Hardening
+    SHARIAH_DOMAIN_DENYLIST: List[str] = [
+        "alcohol.pk", "bet365.com", "1xbet.com", "pornhub.com", 
+        "casino.org", "pokerstars.com", "wine.com"
+    ]
+    SHARIAH_CATEGORY_MAPPING: dict = {
+        "Electronics": ["phone", "laptop", "camera", "tv", "earbud", "mobile", "tech"],
+        "Fashion": ["shirt", "dress", "shoes", "wear", "cloth", "fashion", "bag"],
+        "Home & Living": ["furniture", "decor", "kitchen", "bed", "home", "living"],
+        "Health & Beauty": ["makeup", "skincare", "perfume", "beauty", "health", "care"],
+        "Baby & Toys": ["toy", "baby", "kid", "child", "game"],
+        "Sports & Outdoor": ["sport", "gym", "outdoor", "fitness", "cycle"],
+        "Automotive": ["car", "bike", "auto", "vehicle", "tool"],
+        "Books & Stationery": ["book", "stationery", "pen", "office", "read"],
+    }
 
     AWS_REGION: str = "ap-south-1"
     S3_BUCKET_SCREENSHOTS: str = "sk-screenshots-dev"

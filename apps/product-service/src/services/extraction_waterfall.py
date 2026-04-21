@@ -1,6 +1,6 @@
 import dataclasses
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
 
@@ -22,6 +22,10 @@ class ExtractionResult:
     availability: Literal["in_stock", "out_of_stock", "limited", "unknown"] = "unknown"
     ships_to_pakistan: bool = True
     image_url: str | None = None
+    description: str | None = None
+    brand: str | None = None
+    images: list[str] = field(default_factory=list)
+    variants: list[dict] = field(default_factory=list)
     extraction_confidence: Decimal | None = None
     debug_screenshot_b64: str | None = None
     error_code: str | None = None
@@ -35,35 +39,47 @@ class ExtractionWaterfallService:
         self._rye_client = RyeClient(api_key=settings.RYE_API_KEY, base_url=settings.RYE_API_URL)
         self._violet_client = VioletClient(api_key=settings.VIOLET_API_KEY, base_url=settings.VIOLET_API_URL)
 
-    async def _check_circuit_breaker(self, tier_name: str) -> bool:
-        """Check if a tier is currently blocked by a circuit breaker.
-        
-        Returns True if blocked, False otherwise.
+    async def _check_circuit_breaker(self, tier_name: str, domain: str | None = None) -> bool:
+        """Check if a tier or domain is currently blocked.
         """
         if not self.redis:
             return False
         
-        is_blocked = await self.redis.get(f"sk:cb:blocked:{tier_name}")
-        if is_blocked:
-            EXTRACT_RATE_LIMIT_HITS.labels(tier=tier_name).inc()
+        # Check global tier block
+        if await self.redis.get(f"sk:cb:blocked:{tier_name}"):
+            EXTRACT_RATE_LIMIT_HITS.labels(tier=tier_name, domain="all").inc()
             return True
+            
+        # Check domain-specific block within this tier
+        if domain and await self.redis.get(f"sk:cb:blocked:{tier_name}:{domain}"):
+            EXTRACT_RATE_LIMIT_HITS.labels(tier=tier_name, domain=domain).inc()
+            return True
+            
         return False
 
-    async def _trip_circuit_breaker(self, tier_name: str):
-        """Increment failure count and trip the breaker if limit reached."""
+    async def _trip_circuit_breaker(self, tier_name: str, domain: str | None = None):
+        """Trip circuit breaker for a specific tier/domain."""
         if not self.redis:
             return
             
-        key = f"sk:cb:failures:{tier_name}"
-        # Increment failure count. Redis .incr() usually handles key creation.
+        suffix = f":{domain}" if domain else ""
+        key = f"sk:cb:failures:{tier_name}{suffix}"
+        
         val = await self.redis.redis.incr(key)
         if val == 1:
-            await self.redis.redis.expire(key, 60) # Failures must happen within 60s
+            await self.redis.redis.expire(key, 60)
             
-        if val >= 5: # Threshold
-            # Block for 2 minutes
-            await self.redis.set(f"sk:cb:blocked:{tier_name}", "1", ttl=120)
+        if val >= 5:
+            # Block for 5 minutes (domain block) or 2 minutes (tier block)
+            ttl = 300 if domain else 120
+            await self.redis.set(f"sk:cb:blocked:{tier_name}{suffix}", "1", ttl=ttl)
             await self.redis.delete(key)
+
+    async def _reset_circuit_breaker(self, tier_name: str, domain: str | None = None) -> None:
+        if not self.redis:
+            return
+        suffix = f":{domain}" if domain else ""
+        await self.redis.delete(f"sk:cb:failures:{tier_name}{suffix}")
 
     def _validate_extraction(self, result: ExtractionResult) -> ExtractionResult:
         if result.status != "completed":
@@ -102,14 +118,14 @@ class ExtractionWaterfallService:
         normalized_platform = (platform or "CUSTOM").upper()
         failures: list[str] = []
 
-        async def _run_tier(name: str, fn):
+        async def _run_tier(name: str, domain: str, fn):
             t0 = time.perf_counter()
             result = await fn()
             status = "failed" if result is None else result.status
-            EXTRACTION_LATENCY.labels(tier=name, status=status).observe(time.perf_counter() - t0)
+            EXTRACTION_LATENCY.labels(tier=name, domain=domain, status=status).observe(time.perf_counter() - t0)
             return result
 
-        async def _accept_or_none(tier_name: str, result: ExtractionResult | None) -> ExtractionResult | None:
+        async def _accept_or_none(tier_name: str, domain: str, result: ExtractionResult | None) -> ExtractionResult | None:
             if result is None:
                 failures.append(f"{tier_name}:no_result")
                 return None
@@ -124,6 +140,7 @@ class ExtractionWaterfallService:
             if validated.confidence < threshold:
                 failures.append(f"{tier_name}:low_confidence:{validated.confidence}")
                 return None
+            await self._reset_circuit_breaker(tier_name, domain)
             return validated
 
         # DARAZ exclusion: We skip Tier1 (Rye) and Tier2A (Violet) for DARAZ 
@@ -137,25 +154,28 @@ class ExtractionWaterfallService:
         else:
             order = ["tier1", "tier2a", "tier2b", "tier3"]
 
+        from urllib.parse import urlparse
+        domain = urlparse(canonical_url).netloc.lower().replace("www.", "")
+
         for tier in order:
             if tier == "tier1":
-                if await self._check_circuit_breaker("tier1"):
+                if await self._check_circuit_breaker("tier1", domain):
                     continue
-                candidate = await _run_tier("tier1", lambda: self._tier1_rye(canonical_url, platform))
+                candidate = await _run_tier("tier1", domain, lambda: self._tier1_rye(canonical_url, platform))
                 if candidate is None:
-                    await self._trip_circuit_breaker("tier1")
+                    await self._trip_circuit_breaker("tier1", domain)
             elif tier == "tier2a":
-                if await self._check_circuit_breaker("tier2a"):
+                if await self._check_circuit_breaker("tier2a", domain):
                     continue
-                candidate = await _run_tier("tier2a", lambda: self._tier2a_violet(canonical_url))
+                candidate = await _run_tier("tier2a", domain, lambda: self._tier2a_violet(canonical_url))
                 if candidate is None:
-                    await self._trip_circuit_breaker("tier2a")
+                    await self._trip_circuit_breaker("tier2a", domain)
             elif tier == "tier2b":
-                candidate = await _run_tier("tier2b", lambda: self._tier2b_html(canonical_url))
+                candidate = await _run_tier("tier2b", domain, lambda: self._tier2b_html(canonical_url))
             else:
-                candidate = await _run_tier("tier3", lambda: self.run_tier3(canonical_url, platform))
+                candidate = await _run_tier("tier3", domain, lambda: self.run_tier3(canonical_url, platform))
 
-            accepted = await _accept_or_none(tier, candidate)
+            accepted = await _accept_or_none(tier, domain, candidate)
             if accepted is not None:
                 return accepted
 
@@ -210,6 +230,10 @@ class ExtractionWaterfallService:
                 availability=data.get("availability", "in_stock"),
                 ships_to_pakistan=data.get("ships_to_pakistan", True),
                 image_url=data.get("image_url"),
+                description=data.get("description"),
+                brand=data.get("brand"),
+                images=list(data.get("images") or ([data.get("image_url")] if data.get("image_url") else [])),
+                variants=list(data.get("variants") or []),
                 debug_screenshot_b64=data.get("debug_screenshot_b64"),
             )
             res = self._validate_extraction(res)
@@ -244,6 +268,10 @@ class ExtractionWaterfallService:
                 price=data.price,
                 availability=data.availability,
                 image_url=(data.images[0] if data.images else None),
+                description=getattr(data, "description", None),
+                brand=getattr(data, "brand", None),
+                images=list(getattr(data, "images", None) or []),
+                variants=list(getattr(data, "variants", None) or []),
             )
         except Exception:
             return None
@@ -262,6 +290,10 @@ class ExtractionWaterfallService:
             price=data.price,
             availability=data.availability,
             image_url=(data.images[0] if data.images else None),
+            description=getattr(data, "description", None),
+            brand=getattr(data, "brand", None),
+            images=list(getattr(data, "images", None) or []),
+            variants=list(getattr(data, "variants", None) or []),
         )
 
     async def _tier2b_html(self, canonical_url: str) -> ExtractionResult | None:
@@ -276,6 +308,10 @@ class ExtractionWaterfallService:
             price=data.price,
             availability=data.availability,
             image_url=(data.images[0] if data.images else None),
+            description=getattr(data, "description", None),
+            brand=getattr(data, "brand", None),
+            images=list(getattr(data, "images", None) or []),
+            variants=list(getattr(data, "variants", None) or []),
         )
 
     async def _tier2_jsonld(self, canonical_url: str) -> ExtractionResult | None:

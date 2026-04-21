@@ -89,6 +89,8 @@ class EventListenerWorker:
             await service.queue_job(
                 order_id=payload["order_id"],
                 vcn_id=payload["vcn_id"],
+                pan=payload.get("pan"),
+                cvv=payload.get("cvv"),
                 correlation_id=payload.get("correlation_id"),
             )
             logger.info("Queued checkout job for order_id=%s vcn_id=%s",

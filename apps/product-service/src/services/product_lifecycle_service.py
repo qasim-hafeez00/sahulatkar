@@ -38,9 +38,7 @@ class ProductLifecycleService:
         return product
 
     async def mark_stale(self, product: Product) -> Product:
-        # Proxy stale state by clearing extraction metadata until shared status enum exists.
-        product.extraction_method = None
-        product.extraction_confidence = None
+        product.status = "stale"
         await self.db.commit()
         await self.db.refresh(product)
         return product

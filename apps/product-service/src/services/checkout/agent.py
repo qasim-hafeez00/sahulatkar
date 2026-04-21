@@ -48,6 +48,8 @@ class CheckoutAgentService:
         *,
         order_id: int,
         vcn_id: int,
+        pan: str | None = None,
+        cvv: str | None = None,
         correlation_id: str | None = None,
         force_failure: bool = False,
     ) -> PurchaseExecution:
@@ -80,6 +82,8 @@ class CheckoutAgentService:
             "execution_id": str(execution.uuid),
             "order_id": order_id,
             "vcn_id": vcn_id,
+            "pan": pan,
+            "cvv": cvv,
             "correlation_id": correlation_id,
             "force_failure": force_failure,
         }
@@ -133,10 +137,10 @@ class CheckoutAgentService:
 
             self.form_filler.set_step_callback(emit_step)
 
-            # Decrypt credentials
-            encryption_key = settings.FERNET_KEY.encode()
-            pan = SecretService.decrypt_secret(vcn.encrypted_pan, encryption_key).decode() if vcn.encrypted_pan else ""
-            cvv = SecretService.decrypt_secret(vcn.encrypted_cvv, encryption_key).decode() if vcn.encrypted_cvv else ""
+            # Handover credentials: we now expect these in the job payload
+            # rather than decrypting them from the database, satisfying VIOLATION-01.
+            pan = payload.get("pan") or ""
+            cvv = payload.get("cvv") or ""
 
             # Execute Playwright automation logic via FormFiller
             # BUG-01 FIX: order is passed explicitly.

@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.product import ProhibitedCategory, ProhibitedItemLog
 from sk_shared.redis_client import RedisClient
+from src.config import settings
 
 
 @dataclass(slots=True)
@@ -62,7 +63,17 @@ class ProhibitedCheckerService:
 
         if redis is not None:
             await redis.set(cache_key, "0", ttl=3600)
-        return ProhibitedDecision(is_prohibited=False, confidence=0.0)
+        
+        category = self.classify_category(normalized)
+        return ProhibitedDecision(is_prohibited=False, category=category, confidence=0.7)
+
+    def classify_category(self, text: str) -> str:
+        """Heuristic-based positive categorization for Shariah monitoring."""
+        mapping = settings.SHARIAH_CATEGORY_MAPPING
+        for cat, keywords in mapping.items():
+            if any(kw in text for kw in keywords):
+                return cat
+        return "Miscellaneous"
 
     async def check_url(self, db: AsyncSession, canonical_url: str) -> ProhibitedDecision:
         parsed = urlparse(canonical_url)
@@ -82,8 +93,7 @@ class ProhibitedCheckerService:
             pass
 
         # Compatibility fallback when the dedicated table is unavailable.
-        denylist = {"alcohol.pk", "bet365.com", "1xbet.com"}
-        if domain in denylist:
+        if domain in settings.SHARIAH_DOMAIN_DENYLIST:
             return ProhibitedDecision(is_prohibited=True, category="ProhibitedMerchant", keyword=domain, confidence=0.8)
         return ProhibitedDecision(is_prohibited=False, confidence=0.0)
 

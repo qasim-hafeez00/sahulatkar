@@ -210,8 +210,9 @@ class CheckoutFormFiller:
     async def _click_with_retry(self, page: Page, selector: str, error_msg: str, retries: int = 1, execution_uuid: str | None = None):
         for _ in range(retries + 1):
             try:
-                await page.wait_for_selector(selector, timeout=5000)
-                await page.click(selector)
+                locator = page.locator(selector).first
+                await locator.wait_for(state="visible", timeout=5000)
+                await locator.click()
                 return
             except Exception:
                 healed_selector = await self.self_healing.suggest_selector(
@@ -222,7 +223,8 @@ class CheckoutFormFiller:
                 )
                 if healed_selector:
                     try:
-                        await page.click(healed_selector)
+                        healed_locator = page.locator(healed_selector).first
+                        await healed_locator.click()
                         return
                     except Exception:
                         continue
@@ -243,28 +245,30 @@ class CheckoutFormFiller:
 
         use_selector = selector
         try:
-            await target.wait_for_selector(selector, timeout=10000)
+            locator = target.locator(selector).first
+            await locator.wait_for(state="visible", timeout=10000)
         except Exception:
             if target is self._page:
                 field_hint = selector.replace("input", "").replace("[", " ").replace("]", " ").strip() or "form field"
                 healed = await self.self_healing.suggest_form_field_selector(target, field_hint)
                 if healed:
                     use_selector = healed
-                    await target.wait_for_selector(use_selector, timeout=5000)
+                    locator = target.locator(use_selector).first
+                    await locator.wait_for(state="visible", timeout=5000)
                 else:
                     raise
             else:
                 raise
 
         for char in text:
-            await target.type(use_selector, char)
+            await locator.type(char)
             await asyncio.sleep(max(0.02, random.gauss(0.1, 0.04)))
 
     async def _get_payment_frame(self, page: Page) -> Optional[FrameLocator]:
         frame_patterns = ["iframe[name*='card']", "iframe[src*='stripe']", "iframe[src*='pay']", "iframe[id*='card']"]
         for pattern in frame_patterns:
             try:
-                if await page.query_selector(pattern):
+                if await page.locator(pattern).count():
                     return page.frame_locator(pattern)
             except Exception:
                 continue
@@ -273,7 +277,7 @@ class CheckoutFormFiller:
     async def _detect_captcha(self, page: Page) -> bool:
         selectors = ["iframe[src*='recaptcha']", "iframe[src*='hcaptcha']", "iframe[src*='turnstile']"]
         for selector in selectors:
-            if await page.query_selector(selector):
+            if await page.locator(selector).count():
                 return True
         return False
 
@@ -327,8 +331,9 @@ class CheckoutFormFiller:
         selectors = ["[data-total]", "[class*='total']", "[id*='total']", ".price-final"]
         for selector in selectors:
             try:
-                nodes = await page.query_selector_all(selector)
-                for node in nodes:
+                locator = page.locator(selector)
+                for index in range(await locator.count()):
+                    node = locator.nth(index)
                     value = await node.get_attribute("data-total")
                     if value:
                         parsed = self._parse_price_to_decimal(value)
@@ -378,7 +383,7 @@ class CheckoutFormFiller:
         selector = await self.self_healing.detect_modal_or_popup(page)
         if selector:
             try:
-                await page.click(selector, timeout=1500)
+                await page.locator(selector).first.click(timeout=1500)
             except Exception:
                 return
 
@@ -416,9 +421,10 @@ class CheckoutFormFiller:
     async def _extract_captcha_sitekey(self, page: Page) -> Optional[str]:
         selectors = ["iframe[src*='recaptcha']", "iframe[src*='hcaptcha']", "iframe[src*='turnstile']"]
         for selector in selectors:
-            el = await page.query_selector(selector)
-            if not el:
+            locator = page.locator(selector)
+            if not await locator.count():
                 continue
+            el = locator.first
             src = await el.get_attribute("src") or ""
             match = re.search(r"[?&]k=([^&]+)", src) or re.search(r"[?&]sitekey=([^&]+)", src)
             if match:

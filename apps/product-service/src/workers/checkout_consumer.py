@@ -14,6 +14,7 @@ from sk_shared.database import SessionLocal
 from sk_shared.redis_client import get_redis_client
 
 from src.config import settings
+from src.core.distributed_lock import DistributedLock
 from src.middleware.metrics import CHECKOUT_JOB_DURATION
 from src.services.checkout import CheckoutAgentService
 
@@ -84,8 +85,9 @@ class CheckoutConsumer:
                         status_label = "duplicate"
                         return
                     async with SessionLocal() as db:
-                        service = CheckoutAgentService(db, redis)
-                        await service.process_job(payload)
+                        async with DistributedLock(redis, f"checkout:{execution_id}", timeout=300):
+                            service = CheckoutAgentService(db, redis)
+                            await service.process_job(payload)
                         status_label = "processed"
                 except Exception as e:
                     logger.exception("Checkout worker task failed")
@@ -113,11 +115,15 @@ class CheckoutConsumer:
         await redis.lpush("sk:queue:dlq:checkout", json.dumps(dlq_entry))
 
 
-async def main() -> None:
+async def _amain() -> None:
     logging.basicConfig(level=settings.LOG_LEVEL)
     consumer = CheckoutConsumer()
     await consumer.run()
 
 
+def main() -> None:
+    asyncio.run(_amain())
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    main()

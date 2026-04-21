@@ -126,6 +126,43 @@ class ProductRepository:
             )
         rows = await self.db.scalars(stmt)
         return list(rows)
+
+    async def search_paginated(self, query: str, limit: int = 50, cursor_id: int | None = None) -> tuple[list[Product], int]:
+        from src.config import settings
+
+        if settings.DATABASE_DIALECT == "postgresql":
+            base_stmt = (
+                select(Product)
+                .where(
+                    Product.deleted_at.is_(None),
+                    Product.search_vector.op("@@")(func.plainto_tsquery("english", query)),
+                )
+                .order_by(desc(Product.id))
+            )
+        else:
+            base_stmt = (
+                select(Product)
+                .where(
+                    Product.deleted_at.is_(None),
+                    (Product.name.ilike(f"%{query}%") | Product.canonical_url.ilike(f"%{query}%")),
+                )
+                .order_by(desc(Product.id))
+            )
+
+        if cursor_id is not None:
+            base_stmt = base_stmt.where(Product.id < cursor_id)
+
+        total_stmt = select(func.count(Product.id)).where(Product.deleted_at.is_(None))
+        if settings.DATABASE_DIALECT == "postgresql":
+            total_stmt = total_stmt.where(Product.search_vector.op("@@")(func.plainto_tsquery("english", query)))
+        else:
+            total_stmt = total_stmt.where(
+                Product.name.ilike(f"%{query}%") | Product.canonical_url.ilike(f"%{query}%")
+            )
+
+        rows = list(await self.db.scalars(base_stmt.limit(limit)))
+        total = int((await self.db.scalar(total_stmt)) or 0)
+        return rows, total
     async def get_price_history(self, product_id: int) -> list[dict]:
         from sqlalchemy import text
         try:

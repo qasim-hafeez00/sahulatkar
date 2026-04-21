@@ -14,9 +14,12 @@ from sk_shared.models.product import Product, ScrapingJob
 
 from src.core.dependencies import get_client_ip, get_current_user_id, get_db, get_redis, require_service_token
 from src.repositories.product_repository import ProductRepository
+from src.repositories.scraping_job_repository import ScrapingJobRepository
+from src.repositories.execution_repository import ExecutionRepository
 from src.schemas.products import (
     ExtractRequest,
     ExtractResponse,
+    ExecutionSummary,
     JobStatusResponse,
     MultipleOffersResponse,
     OfferResponse,
@@ -26,6 +29,8 @@ from src.schemas.products import (
     SearchItem,
     SearchResponse,
     SingleOfferResponse,
+    ProductDetailResponse,
+    ScrapingJobSummary,
     UpoResponse,
 )
 from src.services.product_extraction_service import ProductExtractionService, build_upo
@@ -85,7 +90,7 @@ async def list_user_products(
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
-    current_user_id: int | None = Depends(get_current_user_id),
+    current_user_id: int = Depends(require_user_id),
 ):
     if current_user_id is None:
         return SearchResponse(items=[], total=0)
@@ -134,10 +139,15 @@ async def list_user_products(
 async def search_products(
     q: str = Query(..., min_length=2),
     limit: int = Query(default=20, le=100),
+    cursor: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
 ):
     repo = ProductRepository(db)
-    rows = await repo.search(query=q, limit=limit)
+    decoded_cursor = _decode_cursor(cursor)
+    rows, total = await repo.search_paginated(query=q, limit=limit + 1, cursor_id=decoded_cursor)
+    has_more = len(rows) > limit
+    page_rows = rows[:limit]
+    next_cursor = _encode_cursor(page_rows[-1].id) if has_more and page_rows else None
     
     items = [
         SearchItem(
@@ -148,22 +158,33 @@ async def search_products(
             cost_price=Decimal(str(product.cost_price)),
             sale_price=Decimal(str(product.sale_price)) if product.sale_price is not None else None,
         )
-        for product in rows
+        for product in page_rows
     ]
-    return SearchResponse(items=items, total=len(items))
+    return SearchResponse(items=items, total=total, next_cursor=next_cursor)
 
 
-@router.get("/{upo_id}", response_model=UpoResponse)
+@router.get("/{upo_id}", response_model=ProductDetailResponse)
 async def get_product_detail(
     upo_id: UUID,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
     service = ProductExtractionService(db, redis)
+    scraping_job_repo = ScrapingJobRepository(db)
+    execution_repo = ExecutionRepository(db)
     product = await service.product_repo.find_by_uuid(upo_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-    return build_upo(product)
+
+    jobs = await scraping_job_repo.list_by_product(product.id, limit=5)
+    executions = await execution_repo.list_by_product(product.id, limit=5)
+
+    detail = build_upo(product)
+    return ProductDetailResponse(
+        **detail.model_dump(),
+        scraping_jobs=[ScrapingJobSummary(job_id=j.uuid, status=j.status) for j in jobs],
+        checkout_executions=[ExecutionSummary(execution_id=e.uuid, status=e.status) for e in executions],
+    )
 
 
 @router.post("/{upo_id}/refresh")

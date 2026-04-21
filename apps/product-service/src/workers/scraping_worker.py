@@ -18,11 +18,23 @@ from sk_shared.models.product import Merchant, Product, ScrapingJob
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
+from src.core.distributed_lock import DistributedLock
 from src.repositories.merchant_repository import MerchantRepository
 from src.repositories.product_repository import ProductRepository
 from src.services.event_publisher import publish_event
 from src.services.extraction_waterfall import ExtractionWaterfallService
 from src.services.product_cache_service import ProductCacheService
+from src.services.product_extraction_service import build_upo
+from src.services.s3_service import S3Service
+
+
+def _extract_image_fields(result: object) -> tuple[str | None, list[str]]:
+    images = list(getattr(result, "images", None) or [])
+    primary_image = getattr(result, "image_url", None) or (images[0] if images else None)
+    if primary_image and (not images or images[0] != primary_image):
+        images = [primary_image, *images]
+    secondary_images = images[1:] if len(images) > 1 else []
+    return primary_image, secondary_images
 
 
 tracer = trace.get_tracer("product-service.worker.scraping")
@@ -102,9 +114,10 @@ class ScrapingWorker:
         if scraping_job.status in {"completed", "failed"}:
             return
 
-        scraping_job.status = "running"
-        scraping_job.started_at = datetime.now(timezone.utc)
-        await db.flush()
+        async with DistributedLock(self.redis, f"scraping:{normalized_url}", timeout=120):
+            scraping_job.status = "running"
+            scraping_job.started_at = datetime.now(timezone.utc)
+            await db.flush()
 
         service = ExtractionWaterfallService(self.redis)
         # DESIGN-03 FIX: Call extract() (full waterfall: Tier1→Tier2A→Tier2B→Tier3)
@@ -156,10 +169,28 @@ class ScrapingWorker:
             )
             return
 
+        if getattr(result, "ships_to_pakistan", True) is False:
+            scraping_job.status = "failed"
+            scraping_job.error_code = "DOES_NOT_SHIP_TO_PAKISTAN"
+            scraping_job.error_message = "Extracted product does not ship to Pakistan"
+            scraping_job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            await publish_event(
+                redis=self.redis,
+                event="product.extraction_failed",
+                payload={
+                    "order_id": scraping_job.order_id,
+                    "error_code": scraping_job.error_code,
+                    "error_message": scraping_job.error_message,
+                },
+            )
+            return
+
         canonical_url = payload["canonical_url"]
         domain = canonical_url.split("//", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
         merchant, _ = await merchant_repo.get_or_create(domain, payload.get("platform", "CUSTOM"))
 
+        primary_image_s3, secondary_images = _extract_image_fields(result)
         product_payload = {
             "merchant_id": merchant.id,
             "name": result.title,
@@ -171,7 +202,14 @@ class ScrapingWorker:
             "sale_price": result.price,
             "stock_status": "in_stock",
             "in_stock": True,
-            "primary_image_s3": result.image_url,
+            "primary_image_s3": primary_image_s3,
+            "secondary_images": secondary_images,
+            "shariah_category": prohibited_check.category if not prohibited_check.is_prohibited else None,
+            "brand": getattr(result, "brand", None),
+            "description": getattr(result, "description", None),
+            "ships_to_pakistan": bool(getattr(result, "ships_to_pakistan", True)),
+            "variants": list(getattr(result, "variants", None) or []),
+            "status": "active",
             "extraction_method": result.method,
             "extraction_confidence": result.confidence,
         }
@@ -188,6 +226,16 @@ class ScrapingWorker:
                 """),
                 {"id": product.id}
             )
+
+        if product.primary_image_s3 and product.primary_image_s3.startswith("http") and settings.IMAGE_CACHE_ENABLED:
+            try:
+                cached_key = await S3Service().cache_product_image(product.primary_image_s3, str(product.uuid))
+                if cached_key:
+                    product.primary_image_s3 = cached_key
+                    await db.commit()
+                    await db.refresh(product)
+            except Exception:
+                pass
 
         scraping_job.product_id = product.id
         scraping_job.status = "completed"
@@ -214,29 +262,8 @@ class ScrapingWorker:
             }
         )
         cache_service = ProductCacheService()
-        await cache_service.set_upo(
-            self.redis,
-            str(product.uuid),
-            {
-                "product_id": str(product.uuid),
-                "source_url": product.canonical_url or product.url,
-                "platform": product.platform,
-                "extraction_method": product.extraction_method,
-                "extraction_confidence": str(product.extraction_confidence),
-                "availability": product.stock_status,
-                "is_purchasable": bool(product.in_stock and not product.is_prohibited),
-                "meta": {
-                    "title": product.name,
-                    "brand": None,
-                    "description": None,
-                    "images": [product.primary_image_s3] if product.primary_image_s3 else [],
-                },
-                "pricing": {
-                    "amount": str(product.cost_price),
-                    "currency": product.currency,
-                },
-            },
-        )
+        upo = build_upo(product)
+        await cache_service.set_upo(self.redis, str(product.uuid), upo.model_dump(mode="json"))
         await cache_service.set_by_url(self.redis, product.canonical_url or product.url, str(product.uuid))
 
 

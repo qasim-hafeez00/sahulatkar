@@ -6,6 +6,7 @@ callable ``main()`` function so pyproject.toml entry-points work:
     scraping-worker = "src.workers.scraping_worker:main"
     event-listener  = "src.workers.event_listener:main"
 """
+import asyncio
 import importlib
 
 
@@ -37,6 +38,10 @@ def test_checkout_consumer_has_callable_main():
     fn = getattr(module, "main", None)
     assert callable(fn), (
         "checkout_consumer.py must define a callable main() function."
+    )
+    assert not asyncio.iscoroutinefunction(fn), (
+        "checkout_consumer.main() must be synchronous because it is used as a "
+        "console-script entry point in pyproject.toml."
     )
 
 

@@ -25,28 +25,38 @@ class AuditService:
         ip_address: Optional[str] = None,
     ) -> None:
         """Log an administrative or lifecycle action.
-        
-        Using raw SQL to insert into audit_trail if dedicated table doesn't exist in model yet,
-        or we can use the gateway_audit_events table as a proxy if we want to centralize.
-        The user asked for 'dedicated', so we use product_audit_events.
         """
         try:
-            # We use text() to avoid requiring the model to be registered in Base if it's new
-            # or if we are in a migration transition.
             await self.db.execute(
                 text(
                     """
-                    INSERT INTO product_audit_events (admin_user_id, module, action, target_id, changes, ip_address, created_at)
-                    VALUES (:admin_user_id, :module, :action, :target_id, :changes, :ip_address, :created_at)
+                    INSERT INTO audit_trail (
+                        module,
+                        action,
+                        target_id,
+                        admin_user_id,
+                        ip_address,
+                        changes,
+                        created_at
+                    )
+                    VALUES (
+                        :module,
+                        :action,
+                        :target_id,
+                        :admin_user_id,
+                        :ip_address,
+                        :changes,
+                        :created_at
+                    )
                     """
                 ),
                 {
-                    "admin_user_id": admin_user_id,
                     "module": module,
                     "action": action,
                     "target_id": target_id,
-                    "changes": changes if changes else {},
+                    "admin_user_id": admin_user_id,
                     "ip_address": ip_address,
+                    "changes": changes if changes else {},
                     "created_at": datetime.now(timezone.utc),
                 },
             )

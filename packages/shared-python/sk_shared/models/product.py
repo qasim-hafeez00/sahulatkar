@@ -45,10 +45,17 @@ class Product(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     stock_status: Mapped[str] = mapped_column(String(20), nullable=False, default="unknown")
     in_stock: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     primary_image_s3: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
+    secondary_images: Mapped[Optional[list[str]]] = mapped_column(JSON, nullable=True)
     is_prohibited: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     prohibition_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
     extraction_method: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     extraction_confidence: Mapped[Optional[Decimal]] = mapped_column(Numeric(4, 3), nullable=True)
+    brand: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    ships_to_pakistan: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    variants: Mapped[Optional[list[dict]]] = mapped_column(JSON, nullable=True)
+    shariah_category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # Use a generic JSON for search_vector fallback on SQLite, real TSVECTOR on Postgres
     search_vector: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 

@@ -7,9 +7,10 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
 from sqlalchemy import select, func, desc, or_
 from sqlalchemy.ext.asyncio import AsyncSession
+from pydantic import BaseModel
 
 from sk_shared.redis_client import RedisClient
 from sk_shared.models.product import ScrapingJob, Product, Merchant
@@ -57,6 +58,10 @@ from src.services.checkout.agent import CheckoutAgentService
 
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+
+
+class ProhibitProductRequest(BaseModel):
+    reason: str = "Administrative Decision"
 
 
 def _encode_cursor(row_id: int | str) -> str:
@@ -210,8 +215,7 @@ async def patch_product(
 async def prohibit_product(
     request: Request,
     product_uuid: UUID,
-    reason: str = Query(default="Administrative Decision"),
-
+    payload: ProhibitProductRequest = Body(default_factory=ProhibitProductRequest),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
@@ -221,14 +225,14 @@ async def prohibit_product(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
 
     service = ProductLifecycleService(db)
-    await service.mark_prohibited(product, reason)
+    await service.mark_prohibited(product, payload.reason)
 
     audit = AuditService(db)
     await audit.log_action(
         admin_user_id=1,
         action="prohibit_product",
         target_id=product.id,
-        changes={"reason": reason},
+        changes={"reason": payload.reason},
         ip_address=get_client_ip(request),
     )
 
@@ -282,16 +286,32 @@ async def list_executions(
     limit: int = Query(default=50, le=100),
     offset: int = Query(default=0, ge=0),
     cursor: str | None = Query(None),
+    product_id: UUID | None = Query(None),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
     repo = ExecutionRepository(db)
     decoded_cursor = _decode_cursor(cursor)
+    product_filter_id: int | None = None
+    if product_id is not None:
+        product = await ProductRepository(db).find_by_uuid(product_id)
+        if product is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
+        product_filter_id = product.id
     
     from sk_shared.models.checkout import PurchaseExecution
-    total = await db.scalar(select(func.count(PurchaseExecution.id)))
+    if product_filter_id is None:
+        total = await db.scalar(select(func.count(PurchaseExecution.id)))
+    else:
+        total = await db.scalar(
+            select(func.count(PurchaseExecution.id))
+            .join(ScrapingJob, ScrapingJob.order_id == PurchaseExecution.order_id)
+            .where(ScrapingJob.product_id == product_filter_id)
+        )
 
     stmt = select(PurchaseExecution).order_by(desc(PurchaseExecution.id))
+    if product_filter_id is not None:
+        stmt = stmt.join(ScrapingJob, ScrapingJob.order_id == PurchaseExecution.order_id).where(ScrapingJob.product_id == product_filter_id)
     if decoded_cursor:
         stmt = stmt.where(PurchaseExecution.id < decoded_cursor)
     else:

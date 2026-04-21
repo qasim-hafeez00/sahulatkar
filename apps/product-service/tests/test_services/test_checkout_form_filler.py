@@ -56,3 +56,24 @@ async def test_human_type_frame_locator_skips_missing_field():
 
     # Nothing typed if field not found
     mock_locator.type.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_human_type_uses_locator_api_for_page_target():
+    """_human_type must use page.locator().type() for regular page targets too."""
+    mock_locator = MagicMock()
+    mock_locator.wait_for = AsyncMock()
+    mock_locator.type = AsyncMock()
+    mock_locator.first = mock_locator
+
+    mock_page = MagicMock()
+    mock_page.locator = MagicMock(return_value=mock_locator)
+
+    redis_mock = MagicMock()
+    filler = CheckoutFormFiller(redis_mock)
+    filler._page = mock_page
+
+    await filler._human_type(mock_page, "input[name='email']", "ab")
+
+    mock_page.locator.assert_called_once_with("input[name='email']")
+    assert mock_locator.type.call_count == 2

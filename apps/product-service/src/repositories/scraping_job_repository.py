@@ -61,3 +61,13 @@ class ScrapingJobRepository:
             select(ScrapingJob).order_by(desc(ScrapingJob.created_at)).limit(limit).offset(offset)
         )
         return list(rows)
+
+    async def list_by_product(self, product_id: int, limit: int = 50, offset: int = 0) -> list[ScrapingJob]:
+        rows = await self.db.scalars(
+            select(ScrapingJob)
+            .where(ScrapingJob.product_id == product_id)
+            .order_by(desc(ScrapingJob.created_at))
+            .limit(limit)
+            .offset(offset)
+        )
+        return list(rows)

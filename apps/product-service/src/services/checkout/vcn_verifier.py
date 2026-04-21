@@ -3,28 +3,32 @@ from __future__ import annotations
 import asyncio
 from typing import Optional
 
+from src.config import settings
 from sk_shared.redis_client import RedisClient
 
 class VcnVerifier:
     def __init__(self, redis: RedisClient) -> None:
         self.redis = redis
 
-    async def verify_charge(self, vcn_id: int, timeout_seconds: int = 20) -> bool:
+    async def verify_charge(self, vcn_id: int, timeout_seconds: int | None = None) -> bool:
         """Poll Redis for Stripe charge confirmation from webhooks.
         
-        Addresses GAP-21 and the 'blocking threads' issue by having a dedicated 
-        verification loop that can be easily updated to a more reactive pattern 
-        later (e.g. Pub/Sub).
+        Updated to use exponential backoff with jitter to reduce Redis load
+        during peak surges while maintaining responsiveness.
         """
+        import random
+        import time
+        
         confirmed_key = f"sk:vcn:charge:confirmed:{vcn_id}"
         legacy_key = f"sk:vcn:pending_verification:{vcn_id}"
         
-        # We poll every 2 seconds for a total of timeout_seconds.
-        # This keeps a worker slot active but ensures we pick up the webhook 
-        # as soon as it arrives.
-        max_attempts = max(1, timeout_seconds // 2)
+        timeout = timeout_seconds or settings.VCN_VERIFICATION_TIMEOUT_SECONDS
+        start_time = time.perf_counter()
         
-        for _ in range(max_attempts):
+        # Initial wait of 0.5s, doubling up to 10s.
+        wait_time = 0.5
+        
+        while (time.perf_counter() - start_time) < timeout:
             # 1. Check for modern confirmation key
             if await self.redis.get(confirmed_key):
                 await self.redis.delete(confirmed_key)
@@ -35,6 +39,14 @@ class VcnVerifier:
                 await self.redis.delete(legacy_key)
                 return True
             
-            await asyncio.sleep(2)
+            # Calculate next wait with jitter
+            jitter = random.uniform(0.8, 1.2)
+            actual_wait = min(wait_time * jitter, timeout - (time.perf_counter() - start_time))
+            
+            if actual_wait <= 0:
+                break
+                
+            await asyncio.sleep(actual_wait)
+            wait_time = min(wait_time * 2, 10.0) # Cap at 10s
             
         return False

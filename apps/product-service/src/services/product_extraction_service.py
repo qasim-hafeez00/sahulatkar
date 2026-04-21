@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import socket
 from datetime import datetime, timezone
 from decimal import Decimal
+from typing import Any
+from uuid import UUID
 
 from fastapi import HTTPException, status
 from sqlalchemy import text
@@ -19,11 +22,12 @@ from src.core.rate_limit import enforce_extract_rate_limit
 from src.repositories.merchant_repository import MerchantRepository
 from src.repositories.product_repository import ProductRepository
 from src.repositories.scraping_job_repository import ScrapingJobRepository
-from src.schemas.products import ExtractResponse, ExtractionMeta, ExtractionPricing, ShippingInfo, UpoResponse
+from src.schemas.products import ExtractResponse, ExtractionMeta, ExtractionPricing, JobStatusResponse, ShippingInfo, UpoResponse, VariantGroup, VariantOption
 from src.services.event_publisher import publish_event
 from src.services.extraction_waterfall import ExtractionWaterfallService
 from src.services.product_cache_service import ProductCacheService
 from src.services.prohibited_checker import ProhibitedCheckerService
+from src.services.s3_service import S3Service
 from src.services.url_normalizer import UrlNormalizerService
 
 
@@ -37,6 +41,43 @@ def _url_lock_key(canonical_url: str) -> str:
     return f"{RedisNS.PRODUCT_URL}:lock:{digest}"
 
 
+def _extract_images_from_product(product: Product) -> list[str]:
+    images: list[str] = []
+    if product.primary_image_s3:
+        images.append(product.primary_image_s3)
+    secondary_images = getattr(product, "secondary_images", None) or []
+    for image in secondary_images:
+        if image and image not in images:
+            images.append(image)
+    return images
+
+
+def _build_variant_groups(raw_variants: list[dict] | None) -> list[VariantGroup]:
+    grouped: dict[str, list[VariantOption]] = {}
+    for variant in raw_variants or []:
+        if not isinstance(variant, dict):
+            continue
+        option_name = str(variant.get("option_name") or variant.get("name") or "Option")
+        value = str(variant.get("selected_value") or variant.get("value") or variant.get("label") or "")
+        grouped.setdefault(option_name, []).append(
+            VariantOption(
+                label=value,
+                value=value,
+                is_available=bool(variant.get("available", True)),
+            )
+        )
+    return [VariantGroup(option_name=option_name, options=options) for option_name, options in grouped.items()]
+
+
+def _extract_image_fields(result: Any) -> tuple[str | None, list[str]]:
+    images = list(getattr(result, "images", None) or [])
+    primary_image = getattr(result, "image_url", None) or (images[0] if images else None)
+    if primary_image and (not images or images[0] != primary_image):
+        images = [primary_image, *images]
+    secondary_images = images[1:] if len(images) > 1 else []
+    return primary_image, secondary_images
+
+
 def build_upo(product: Product) -> UpoResponse:
     return UpoResponse(
         product_id=product.uuid,
@@ -48,16 +89,16 @@ def build_upo(product: Product) -> UpoResponse:
         is_purchasable=bool(product.in_stock and not product.is_prohibited),
         meta=ExtractionMeta(
             title=product.name,
-            brand=None,
-            description=None,
-            images=[product.primary_image_s3] if product.primary_image_s3 else [],
+            brand=getattr(product, "brand", None),
+            description=getattr(product, "description", None),
+            images=_extract_images_from_product(product),
         ),
         pricing=ExtractionPricing(
             amount=Decimal(str(product.cost_price)),
             currency=product.currency,
         ),
-        variants=[],
-        shipping=ShippingInfo(ships_to_pakistan=True),
+        variants=_build_variant_groups(getattr(product, "variants", None)),
+        shipping=ShippingInfo(ships_to_pakistan=bool(getattr(product, "ships_to_pakistan", True))),
     )
 
 
@@ -69,6 +110,7 @@ class ProductExtractionService:
         self.waterfall = ExtractionWaterfallService(redis)
         self.prohibited_checker = ProhibitedCheckerService()
         self.cache_service = ProductCacheService()
+        self.s3_service = S3Service()
         self.product_repo = ProductRepository(db)
         self.merchant_repo = MerchantRepository(db)
         self.scraping_job_repo = ScrapingJobRepository(db)
@@ -95,7 +137,12 @@ class ProductExtractionService:
             raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
 
         lock_key = _url_lock_key(normalized.canonical_url)
-        lock_acquired = await self.redis.redis.set(lock_key, "1", ex=15, nx=True)
+        lock_acquired = await self.redis.redis.set(
+            lock_key,
+            socket.gethostname(),
+            ex=settings.EXTRACTION_TIMEOUT_SECONDS + 10,
+            nx=True,
+        )
         if not lock_acquired:
             # Another request is processing this URL; return existing product/job if present.
             existing_product = await self.product_repo.find_by_canonical_url(normalized.canonical_url)
@@ -181,6 +228,7 @@ class ProductExtractionService:
                 raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="PROHIBITED_CATEGORY")
 
 
+            primary_image_s3, secondary_images = _extract_image_fields(extraction_result)
             product_payload = {
                 "merchant_id": merchant.id,
                 "name": extraction_result.title,
@@ -192,13 +240,29 @@ class ProductExtractionService:
                 "sale_price": extraction_result.price,
                 "stock_status": "in_stock",
                 "in_stock": True,
-                "primary_image_s3": extraction_result.image_url,
+                "primary_image_s3": primary_image_s3,
+                "secondary_images": secondary_images,
+                "shariah_category": prohibited.category if not prohibited.is_prohibited else None,
+                "brand": getattr(extraction_result, "brand", None),
+                "description": getattr(extraction_result, "description", None),
+                "ships_to_pakistan": bool(getattr(extraction_result, "ships_to_pakistan", True)),
+                "variants": list(getattr(extraction_result, "variants", None) or []),
+                "status": "active",
                 "extraction_method": extraction_result.method,
                 "extraction_confidence": extraction_result.confidence,
             }
             product, _ = await self.product_repo.upsert_by_canonical_url(normalized.canonical_url, product_payload)
             await self.db.commit()
             await self.db.refresh(product)
+
+            if product.primary_image_s3 and product.primary_image_s3.startswith("http") and settings.IMAGE_CACHE_ENABLED:
+                try:
+                    cached_key = await self.s3_service.cache_product_image(product.primary_image_s3, str(product.uuid))
+                    if cached_key:
+                        product.primary_image_s3 = cached_key
+                        await self.db.commit()
+                except Exception:
+                    pass
 
             if settings.DATABASE_DIALECT == "postgresql":
                 await self.db.execute(
@@ -242,7 +306,6 @@ class ProductExtractionService:
             if product:
                 upo = build_upo(product)
 
-        from src.schemas.products import JobStatusResponse
         return JobStatusResponse(
             job_id=job.uuid,
             status=job.status,
@@ -287,4 +350,4 @@ class ProductExtractionService:
                 }
             ),
         )
-        return {"status": "queued", "job_id": str(job.uuid), "reason": reason}
+        return {"status": "queued", "job_id": str(job.uuid), "reason": reason}
