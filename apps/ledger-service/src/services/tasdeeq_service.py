@@ -64,6 +64,12 @@ class TasdeeqService:
             TASDEEQValidationError: If validation fails
         """
         raw_rows = await self._fetch_report_rows()
+
+        if not raw_rows:
+            output = io.StringIO()
+            writer = csv.writer(output)
+            writer.writerow(TASDEEQCSVValidator.get_csv_header())
+            return output.getvalue(), 0
         
         # Convert raw data rows to validated TASDEEQReportRow objects
         validated_rows: list[TASDEEQReportRow] = []

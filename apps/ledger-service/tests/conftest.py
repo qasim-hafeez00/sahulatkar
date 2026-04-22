@@ -1,12 +1,20 @@
-import os
 import asyncio
-import pytest
+import os
+import sys
+from pathlib import Path
+
 import fakeredis.aioredis
+import pytest
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from sk_shared.models.base import Base
 from sk_shared.redis_client import RedisClient

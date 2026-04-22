@@ -8,7 +8,7 @@ Reference: TASDEEQ Bureau CSV Submission Specification v2.0
 """
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 
@@ -133,13 +133,22 @@ class TASDEEQReportRow:
         try:
             date.fromisoformat(self.last_payment_date)
         except (ValueError, TypeError):
-            raise TASDEEQValidationError(
-                f"Invalid last_payment_date: '{self.last_payment_date}'. "
-                f"Must be ISO format (YYYY-MM-DD) or 'N/A'."
-            )
+            try:
+                datetime.fromisoformat(self.last_payment_date)
+            except (ValueError, TypeError):
+                raise TASDEEQValidationError(
+                    f"Invalid last_payment_date: '{self.last_payment_date}'. "
+                    f"Must be ISO format (YYYY-MM-DD) or 'N/A'."
+                )
 
     def to_csv_row(self) -> tuple:
         """Convert validated row to CSV tuple for output."""
+        last_payment_date = self.last_payment_date or "N/A"
+        if last_payment_date not in {"N/A", None}:
+            try:
+                last_payment_date = date.fromisoformat(last_payment_date).isoformat()
+            except (ValueError, TypeError):
+                last_payment_date = datetime.fromisoformat(last_payment_date).date().isoformat()
         return (
             self.report_date.isoformat(),
             self.loan_id,
@@ -150,7 +159,7 @@ class TASDEEQReportRow:
             self.status,
             self.installments_paid,
             self.total_installments,
-            self.last_payment_date or "N/A",
+            last_payment_date,
         )
 
 

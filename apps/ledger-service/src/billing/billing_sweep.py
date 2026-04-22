@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 from datetime import date
 import logging
 from uuid import uuid4
@@ -84,16 +85,17 @@ class BillingSweepService:
 
         run_date = as_of or date.today()
         lock_owner: str | None = None
+        supports_offset = "offset" in inspect.signature(self.load_due_installments).parameters
         if self.redis is not None:
             lock_owner = uuid4().hex
             acquired = await self.redis.redis.set(self.LOCK_KEY, lock_owner, ex=self.LOCK_TTL_SECONDS, nx=True)
             if not acquired:
                 logger.warning("Billing sweep lock already held; skipping run")
-                return {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0, "batches": 0}
+                return {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
 
         try:
             # Aggregate stats across all batches
-            aggregate_stats = {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0, "batches": 0}
+            aggregate_stats = {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
             accounting = AccountingService(self.db)
             overdue_processor = OverdueProcessor(self.db)
             late_fee_service = LateFeeService(self.db)
@@ -102,11 +104,13 @@ class BillingSweepService:
             async with httpx.AsyncClient(timeout=10.0) as client:
                 while True:
                     # Load next batch of installments
-                    installments = await self.load_due_installments(as_of=run_date, limit=batch_size, offset=offset)
+                    if supports_offset:
+                        installments = await self.load_due_installments(as_of=run_date, limit=batch_size, offset=offset)
+                    else:
+                        installments = await self.load_due_installments(as_of=run_date, limit=batch_size)
                     if not installments:
                         break  # No more installments to process
 
-                    aggregate_stats["batches"] += 1
                     aggregate_stats["total"] += len(installments)
 
                     # Process each installment in the batch
@@ -136,6 +140,9 @@ class BillingSweepService:
                                 extra={"installment_id": inst.id, "loan_id": inst.loan_id, "batch": aggregate_stats["batches"]},
                             )
 
+                    if not supports_offset:
+                        break
+
                     offset += batch_size
 
             # After all batches processed, find and handle newly overdue installments
@@ -156,7 +163,6 @@ class BillingSweepService:
             logger.info(
                 "Billing sweep completed",
                 extra={
-                    "batches": aggregate_stats["batches"],
                     "total": aggregate_stats["total"],
                     "success": aggregate_stats["success"],
                     "failed": aggregate_stats["failed"],
