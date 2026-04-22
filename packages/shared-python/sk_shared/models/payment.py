@@ -129,6 +129,53 @@ class PaymentTransaction(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
 
+class Reconciliation(Base, UUIDMixin, TimestampMixin):
+    __tablename__ = "reconciliations"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    gateway: Mapped[str] = mapped_column(String(30), nullable=False)
+    settlement_date: Mapped[date] = mapped_column(Date, nullable=False)
+    expected_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
+    actual_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
+    period_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    reconciled_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
+    reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    items: Mapped[list["ReconciliationItem"]] = relationship(
+        "ReconciliationItem",
+        back_populates="reconciliation",
+        cascade="all, delete-orphan",
+    )
+
+    __table_args__ = (
+        Index("ix_reconciliations_gateway_settlement_date", "gateway", "settlement_date"),
+        Index("ix_reconciliations_status", "status"),
+    )
+
+
+class ReconciliationItem(Base):
+    __tablename__ = "reconciliation_items"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    reconciliation_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("reconciliations.id", ondelete="CASCADE"), nullable=False)
+    payment_txn_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
+    gateway_ref: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    expected_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False)
+    actual_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
+    discrepancy_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+
+    reconciliation: Mapped["Reconciliation"] = relationship("Reconciliation", back_populates="items")
+
+    __table_args__ = (
+        Index("ix_reconciliation_items_reconciliation_id", "reconciliation_id"),
+        Index("ix_reconciliation_items_gateway_ref", "gateway_ref"),
+    )
+
+
 class VirtualCard(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "virtual_cards"
 

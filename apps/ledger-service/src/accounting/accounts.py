@@ -20,19 +20,3 @@ ACCOUNT_CODES = {
     "vcn_issuance": "5003",
     "loan_loss_provision": "5004",
 }
-
-
-@dataclass(slots=True)
-class PostingLine:
-    account_code: str
-    debit_amount: Decimal = Decimal("0.00")
-    credit_amount: Decimal = Decimal("0.00")
-    description: str | None = None
-
-    def __post_init__(self) -> None:
-        if self.debit_amount < 0 or self.credit_amount < 0:
-            raise ValueError("Posting line amounts must be non-negative")
-        if self.debit_amount > 0 and self.credit_amount > 0:
-            raise ValueError("A posting line cannot have both debit and credit amounts")
-        if self.debit_amount == 0 and self.credit_amount == 0:
-            raise ValueError("A posting line must have either debit or credit amount")

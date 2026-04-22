@@ -59,4 +59,4 @@ class OverdueProcessor:
             return Decimal("0.00")
         if installment.late_fee_amount and Decimal(str(installment.late_fee_amount)) > Decimal("0.00"):
             return Decimal("0.00")
-        return Decimal("100.00")
+        return Decimal("150.00")

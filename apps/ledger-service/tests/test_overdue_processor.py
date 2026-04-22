@@ -71,7 +71,7 @@ async def test_compute_late_fee_policy(db_session):
         late_fee_waived=False,
         late_fee_amount=0,
     )
-    assert processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("100.00")
+    assert processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("150.00")
 
     dummy.late_fee_waived = True
     assert processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("0.00")

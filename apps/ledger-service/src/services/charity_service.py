@@ -9,12 +9,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.ledger import CharityOrganization, LateFeeCharityAllocation
 from src.services.accounting_service import AccountingService
+from src.core.period_utils import get_period_bounds
+from src.core.readonly_guard import readonly_guard
 
 
 class CharityService:
     def __init__(self, db_session: AsyncSession) -> None:
         self.db = db_session
 
+    @readonly_guard
     async def get_pending_disbursements(self, min_age_days: int = 7) -> list[LateFeeCharityAllocation]:
         cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
         stmt = (
@@ -26,6 +29,7 @@ class CharityService:
         )
         return list((await self.db.execute(stmt)).scalars().all())
 
+    @readonly_guard
     async def record_disbursement(self, allocation_ids: list[int], payment_reference: str, receipt_s3: str) -> dict[str, object]:
         if not allocation_ids:
             return {"updated_count": 0, "total_amount": 0.0, "status": "no_allocations"}
@@ -57,8 +61,9 @@ class CharityService:
             "status": "disbursed",
         }
 
+    @readonly_guard
     async def get_charity_summary(self, period: str) -> dict[str, object]:
-        start_date, end_date = self._period_bounds(period)
+        start_date, end_date = get_period_bounds(period)
 
         allocated_stmt = (
             select(func.coalesce(func.sum(LateFeeCharityAllocation.late_fee_amount), 0))
@@ -116,8 +121,3 @@ class CharityService:
         digest = sha1(payment_reference.encode("utf-8"), usedforsecurity=False).hexdigest()[:15]
         return int(digest, 16)
 
-    def _period_bounds(self, period: str) -> tuple[date, date]:
-        from src.services.accounting_service import AccountingService
-
-        # Reuse existing period parser behavior from AccountingService.
-        return AccountingService(self.db)._period_bounds(period)

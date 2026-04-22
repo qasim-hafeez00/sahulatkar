@@ -1,1 +1,1 @@
-from .accounts import ACCOUNT_CODES, PostingLine
+from .accounts import ACCOUNT_CODES

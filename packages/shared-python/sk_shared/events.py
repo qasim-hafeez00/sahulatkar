@@ -8,6 +8,7 @@ from uuid import uuid4
 
 
 EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED = "payment.down_payment_confirmed"
+EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
 EVENT_LEDGER_DOWN_PAYMENT_POSTED = "ledger.down_payment_posted"
 EVENT_LEDGER_PURCHASE_POSTED = "ledger.purchase_posted"
 EVENT_LEDGER_INSTALLMENT_PAID = "ledger.installment_paid"

@@ -20,6 +20,7 @@ from sk_shared.models.kyc import CustomerProfile
 from sk_shared.models.payment import Loan
 from src.config import settings
 from src.services.tasdeeq_validation import TASDEEQReportRow, TASDEEQCSVValidator, TASDEEQValidationError
+from src.core.readonly_guard import readonly_guard
 
 
 logger = logging.getLogger(__name__)
@@ -219,6 +220,7 @@ class TasdeeqService:
             handle.write(json.dumps(record, separators=(",", ":"), default=str))
             handle.write("\n")
 
+    @readonly_guard
     async def _fetch_report_rows(self) -> list[dict[str, Any]]:
         stmt = select(Loan).options(selectinload(Loan.installments)).where(Loan.deleted_at.is_(None))
         loans = (await self.db.execute(stmt)).scalars().all()

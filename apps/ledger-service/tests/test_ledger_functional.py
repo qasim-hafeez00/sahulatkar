@@ -86,6 +86,7 @@ async def test_late_fee_allocation(db_session, seed_ledger_accounts):
 
 @pytest.mark.asyncio
 async def test_billing_sweep_execution(db_session, seed_ledger_accounts, monkeypatch):
+    """Test that billing sweep detects due installments (payment triggering is external)."""
     # Setup due installment
     loan = Loan(
         order_id=2, user_id=2, loan_number="L-002", 
@@ -104,28 +105,10 @@ async def test_billing_sweep_execution(db_session, seed_ledger_accounts, monkeyp
     db_session.add(inst)
     await db_session.commit()
     
-    # Mock httpx to simulate payment success
-    class MockResponse:
-        def __init__(self, json_data, status_code):
-            self.json_data = json_data
-            self.status_code = status_code
-        def json(self): return self.json_data
-        
-    async def mock_post(*args, **kwargs):
-        return MockResponse({"status": "success", "txn_id": 999}, 200)
-    
-    import httpx
-    monkeypatch.setattr(httpx.AsyncClient, "post", mock_post)
-    
     sweep_service = BillingSweepService(db_session)
     stats = await sweep_service.execute_sweep()
     
-    assert stats["success"] == 1
-    
-    # Verify ledger entry was created
-    stmt = (
-        select(JournalEntry)
-        .options(selectinload(JournalEntry.lines))
-        .where(JournalEntry.entry_type == "payment_received", JournalEntry.source_type == "installment.paid")
-    )
-    assert (await db_session.execute(stmt)).scalar_one() is not None
+    # Sweep detects the due installment
+    assert stats["total"] == 1
+    # Payment triggering is now external (owned by Payment Orchestrator)
+    # Ledger entries are created via payment.installment_paid event, not by sweep

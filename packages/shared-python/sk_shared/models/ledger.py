@@ -36,6 +36,7 @@ class JournalEntry(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     is_balanced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     total_debit: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     total_credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    period_key: Mapped[str] = mapped_column(String(10), nullable=False)
 
     lines: Mapped[list["JournalEntryLine"]] = relationship(
         "JournalEntryLine",
@@ -107,4 +108,38 @@ class LateFeeCharityAllocation(Base, TimestampMixin, SoftDeleteMixin):
         Index("ix_late_fee_charity_allocations_installment_id", "installment_id"),
         Index("ix_late_fee_charity_allocations_charity_org_id", "charity_org_id"),
         UniqueConstraint("installment_id", name="uq_late_fee_charity_allocations_installment_id"),
-    )
+    )
+
+
+class LedgerPeriod(Base, TimestampMixin):
+    __tablename__ = "ledger_periods"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    period_key: Mapped[str] = mapped_column(String(10), unique=True, nullable=False)
+    start_date: Mapped[date] = mapped_column(Date, nullable=False)
+    end_date: Mapped[date] = mapped_column(Date, nullable=False)
+    status: Mapped[str] = mapped_column(String(10), nullable=False, default="open")
+    closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    closed_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    __table_args__ = (
+        Index("ix_ledger_periods_period_key", "period_key"),
+        Index("ix_ledger_periods_status", "status"),
+    )
+
+class LedgerAccountBalance(Base, TimestampMixin):
+    __tablename__ = "ledger_account_balances"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    account_id: Mapped[int] = mapped_column(Integer, ForeignKey("ledger_accounts.id", ondelete="CASCADE"), nullable=False)
+    snapshot_date: Mapped[date] = mapped_column(Date, nullable=False)
+    debit_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    credit_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    net_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+
+    account: Mapped["LedgerAccount"] = relationship("LedgerAccount")
+
+    __table_args__ = (
+        Index("ix_ledger_account_balances_account_date", "account_id", "snapshot_date"),
+        UniqueConstraint("account_id", "snapshot_date", name="uq_ledger_account_balance_date"),
+    )

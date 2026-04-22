@@ -66,7 +66,11 @@ class BillingSweepService:
 
     async def execute_sweep(self, as_of: date | None = None, batch_size: int = 500) -> dict[str, int]:
         """
-        Execute billing sweep with cursor-based pagination for large datasets.
+        Execute billing sweep: detect overdue installments and apply late fees.
+        
+        This sweep is a DETECTION and LATE-FEE service, not a payment trigger.
+        Payment execution is owned by Payment Orchestrator and triggered separately.
+        Ledger service listens for payment.installment_paid events and records entries.
         
         Processes installments in batches of batch_size to avoid hitting memory
         limits or database query timeout when thousands of installments are due.
@@ -78,9 +82,6 @@ class BillingSweepService:
         Returns:
             Aggregated statistics across all batches
         """
-        import httpx
-        from src.config import settings
-        from src.services.accounting_service import AccountingService
         from src.services.late_fee_service import LateFeeService
 
         run_date = as_of or date.today()
@@ -96,54 +97,26 @@ class BillingSweepService:
         try:
             # Aggregate stats across all batches
             aggregate_stats = {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
-            accounting = AccountingService(self.db)
             overdue_processor = OverdueProcessor(self.db)
             late_fee_service = LateFeeService(self.db)
 
+            # Count due installments for reporting only; payment trigger is external
             offset = 0
-            async with httpx.AsyncClient(timeout=10.0) as client:
-                while True:
-                    # Load next batch of installments
-                    if supports_offset:
-                        installments = await self.load_due_installments(as_of=run_date, limit=batch_size, offset=offset)
-                    else:
-                        installments = await self.load_due_installments(as_of=run_date, limit=batch_size)
-                    if not installments:
-                        break  # No more installments to process
+            while True:
+                # Load next batch of installments
+                if supports_offset:
+                    installments = await self.load_due_installments(as_of=run_date, limit=batch_size, offset=offset)
+                else:
+                    installments = await self.load_due_installments(as_of=run_date, limit=batch_size)
+                if not installments:
+                    break  # No more installments to process
 
-                    aggregate_stats["total"] += len(installments)
+                aggregate_stats["total"] += len(installments)
 
-                    # Process each installment in the batch
-                    for inst in installments:
-                        try:
-                            resp = await client.post(
-                                f"{settings.payment_service_url}/api/v1/payments/internal/trigger-installment",
-                                json={"installment_id": inst.id, "method": "jazzcash"},
-                                headers={"X-Internal-Token": settings.internal_api_token},
-                            )
-                            if resp.status_code == 200:
-                                data = resp.json()
-                                if data["status"] == "success":
-                                    # Payment was successful, record it in ledger
-                                    await accounting.record_installment_paid(inst.id, inst.total_amount)
-                                    aggregate_stats["success"] += 1
-                                elif data["status"] == "already_paid":
-                                    aggregate_stats["already_paid"] += 1
-                                else:
-                                    aggregate_stats["failed"] += 1
-                            else:
-                                aggregate_stats["failed"] += 1
-                        except Exception:
-                            aggregate_stats["failed"] += 1
-                            logger.exception(
-                                "Billing sweep installment trigger failed",
-                                extra={"installment_id": inst.id, "loan_id": inst.loan_id, "batch": aggregate_stats["batches"]},
-                            )
+                if not supports_offset:
+                    break
 
-                    if not supports_offset:
-                        break
-
-                    offset += batch_size
+                offset += batch_size
 
             # After all batches processed, find and handle newly overdue installments
             overdue_candidates = await overdue_processor.find_newly_overdue(as_of=run_date)
@@ -163,9 +136,9 @@ class BillingSweepService:
             logger.info(
                 "Billing sweep completed",
                 extra={
-                    "total": aggregate_stats["total"],
-                    "success": aggregate_stats["success"],
-                    "failed": aggregate_stats["failed"],
+                    "total_due": aggregate_stats["total"],
+                    "newly_overdue": aggregate_stats["newly_overdue"],
+                    "late_fees_applied": aggregate_stats["late_fees_applied"],
                 },
             )
             return aggregate_stats

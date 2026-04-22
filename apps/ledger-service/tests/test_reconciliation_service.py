@@ -2,19 +2,16 @@ from __future__ import annotations
 
 from datetime import date
 from decimal import Decimal
-import json
 
 import pytest
+from sqlalchemy import select
 
-from sk_shared.models.payment import PaymentTransaction
-from src.config import settings
+from sk_shared.models.payment import PaymentTransaction, Reconciliation, ReconciliationItem
 from src.services.reconciliation_service import ReconciliationService
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_import_persists_snapshot_and_items(db_session, tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "reconciliation_audit_dir", str(tmp_path))
-
+async def test_reconciliation_import_persists_snapshot_and_items(db_session):
     txn = PaymentTransaction(
         user_id=101,
         gateway="safepay",
@@ -37,28 +34,32 @@ async def test_reconciliation_import_persists_snapshot_and_items(db_session, tmp
         notes="variance expected",
     )
 
-    assert result["status"] == "variance"
+    assert result["status"] == "discrepant"
     assert result["matched_transaction_count"] == 1
     assert result["discrepancy"] == pytest.approx(20.0)
 
-    snapshots_path = tmp_path / "reconciliation_snapshots.jsonl"
-    items_path = tmp_path / "reconciliation_items.jsonl"
-    assert snapshots_path.exists()
-    assert items_path.exists()
+    reconciliation = (
+        await db_session.execute(
+            select(Reconciliation).where(
+                Reconciliation.gateway == "safepay",
+                Reconciliation.settlement_date == date.fromisoformat(settlement_date),
+            )
+        )
+    ).scalar_one()
+    assert reconciliation.status == "discrepant"
 
-    snapshot_payload = json.loads(snapshots_path.read_text(encoding="utf-8").strip().splitlines()[-1])
-    assert snapshot_payload["gateway"] == "safepay"
-    assert snapshot_payload["status"] == "variance"
-
-    item_lines = [json.loads(line) for line in items_path.read_text(encoding="utf-8").strip().splitlines() if line.strip()]
-    statuses = {item["item_status"] for item in item_lines}
+    rows = (
+        await db_session.execute(
+            select(ReconciliationItem).where(ReconciliationItem.reconciliation_id == reconciliation.id)
+        )
+    ).scalars().all()
+    statuses = {row.status for row in rows}
     assert "matched" in statuses
-    assert "discrepancy" in statuses
+    assert "discrepant" in statuses
 
 
 @pytest.mark.asyncio
-async def test_reconciliation_query_reads_persisted_snapshots(db_session, tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "reconciliation_audit_dir", str(tmp_path))
+async def test_reconciliation_query_reads_persisted_snapshots(db_session):
     service = ReconciliationService(db_session)
 
     await service.import_snapshot(
