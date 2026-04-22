@@ -35,11 +35,17 @@ async def list_periods(
     ]
 
 
+from src.core.rate_limit import rate_limit_admin_writes
+from src.core.dependencies import get_redis
+from sk_shared.redis_client import RedisClient
+
 @router.post("/{period_key}/close")
 async def close_period(
     period_key: str,
     req: PeriodCloseRequest,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    __: bool = Depends(rate_limit_admin_writes),
 ):
     """Close an accounting period to prevent further postings."""
     service = PeriodService(db)
@@ -55,6 +61,8 @@ async def close_period(
 async def reopen_period(
     period_key: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    __: bool = Depends(rate_limit_admin_writes),
 ):
     """Reopen a closed accounting period (use with caution)."""
     service = PeriodService(db)

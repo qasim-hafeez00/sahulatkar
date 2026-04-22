@@ -1,6 +1,6 @@
 import pytest
 
-from src.core.event_listeners import EventProcessingFailed, _run_with_retry
+from src.events.listener import EventProcessingFailed, _run_with_retry
 
 
 @pytest.mark.asyncio

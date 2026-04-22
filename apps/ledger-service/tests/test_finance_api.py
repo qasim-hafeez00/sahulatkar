@@ -9,7 +9,7 @@ from sk_shared.models.payment import Installment, Loan, PaymentTransaction
 from src.services.accounting_service import AccountingService
 from src.accounting.accounts import ACCOUNT_CODES
 from src.config import settings
-from src.core.event_dlq import EventDeadLetterQueue
+from src.events.dlq import EventDeadLetterQueue
 
 
 @pytest.mark.asyncio
@@ -132,8 +132,9 @@ async def test_reconciliation_import_marks_matching_transactions_reconciled(clie
     payload = response.json()
     assert payload["matched_transaction_count"] >= 1
 
+    # BV-02: ledger-service now publishes EVENT_LEDGER_RECONCILIATION_MATCHED instead of writing directly
     await db_session.refresh(txn)
-    assert txn.reconciled_at is not None
+    assert txn.reconciled_at is None
 
 
 @pytest.mark.asyncio

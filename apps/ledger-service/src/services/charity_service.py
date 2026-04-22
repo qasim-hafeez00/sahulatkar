@@ -2,20 +2,25 @@ from __future__ import annotations
 
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
-from hashlib import sha1
+from hashlib import sha256
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.ledger import CharityOrganization, LateFeeCharityAllocation
 from src.services.accounting_service import AccountingService
+from src.accounting.accounts import ACCOUNT_CODES
 from src.core.period_utils import get_period_bounds
 from src.core.readonly_guard import readonly_guard
 
 
+from sk_shared.redis_client import RedisClient
+
+
 class CharityService:
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
+        self.redis = redis
 
     @readonly_guard
     async def get_pending_disbursements(self, min_age_days: int = 7) -> list[LateFeeCharityAllocation]:
@@ -45,8 +50,14 @@ class CharityService:
             return {"updated_count": 0, "total_amount": 0.0, "status": "already_disbursed"}
 
         total_amount = sum((Decimal(str(a.late_fee_amount)) for a in allocations), Decimal("0.00"))
+        
+        # ACC-05: Balance pre-check before disbursement
+        accounting = AccountingService(self.db, redis=self.redis)
+        charity_balance = await accounting.get_account_balance(ACCOUNT_CODES["charity_payable"])
+        if Decimal(str(charity_balance["balance"])) < total_amount:
+            raise ValueError(f"Insufficient funds in charity account: {charity_balance['balance']} < {total_amount}")
+
         source_id = self._stable_source_id(payment_reference)
-        accounting = AccountingService(self.db)
         await accounting.record_charity_disbursement(source_id=source_id, amount=total_amount, reference=payment_reference)
 
         now = datetime.now(timezone.utc)
@@ -110,14 +121,30 @@ class CharityService:
         }
 
     async def validate_charity_routing_ratio(self, period: str) -> dict[str, object]:
+        from src.core.metrics import SHARIAH_COMPLIANCE_RATIO
+        from src.events.publisher import EventPublisher
+        
         summary = await self.get_charity_summary(period)
         allocated = Decimal(str(summary["allocated"]))
         disbursed = Decimal(str(summary["disbursed"]))
         ratio = Decimal("100.0") if allocated == Decimal("0") else (disbursed / allocated) * Decimal("100")
-        summary["disbursed_to_allocated_ratio"] = float(ratio.quantize(Decimal("0.01")))
+        ratio_float = float(ratio.quantize(Decimal("0.01")))
+        
+        summary["disbursed_to_allocated_ratio"] = ratio_float
+        SHARIAH_COMPLIANCE_RATIO.set(ratio_float / 100.0)
+        
+        # P2-07: Shariah Alerting
+        if ratio < Decimal("100.0"):
+            if self.redis:
+                publisher = EventPublisher(self.redis)
+                await publisher.publish_shariah_violation(
+                    reason="Charity routing ratio fell below 100%",
+                    details={"period": period, "ratio": ratio_float, "allocated": float(allocated), "disbursed": float(disbursed)}
+                )
+                
         return summary
 
     def _stable_source_id(self, payment_reference: str) -> int:
-        digest = sha1(payment_reference.encode("utf-8"), usedforsecurity=False).hexdigest()[:15]
+        digest = sha256(payment_reference.encode("utf-8")).hexdigest()[:15]
         return int(digest, 16)
 

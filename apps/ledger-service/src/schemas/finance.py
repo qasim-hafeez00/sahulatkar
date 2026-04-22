@@ -71,7 +71,8 @@ class LedgerAccountSummaryResponse(BaseModel):
     account_name: str
     account_type: str
     normal_balance: str
-    is_active: bool
+    is_control: bool
+    currency: str
     debit_total: float
     credit_total: float
     balance: float
@@ -89,7 +90,8 @@ class AccountBalanceResponse(BaseModel):
     account_name: str
     account_type: str
     normal_balance: str
-    is_active: bool
+    is_control: bool
+    currency: str
     debit_total: float
     credit_total: float
     balance: float
@@ -255,3 +257,41 @@ class CharityDisbursementResponse(BaseModel):
     updated_count: int
     total_amount: float
     status: str
+
+
+class ReconciliationOverrideRequest(BaseModel):
+    reason: str = Field(..., min_length=10)
+
+
+class ReconciliationOverrideResponse(BaseModel):
+    reconciliation_id: int
+    status: str
+    notes: str
+
+
+class CashFlowResponse(BaseModel):
+    period: str
+    operating: float
+    investing: float
+    financing: float
+    net_cash_flow: float
+
+
+class ARAgingDetailResponse(BaseModel):
+    installment_id: int
+    user_id: int
+    loan_id: int
+    plan_type: str
+    due_date: str
+    days_overdue: int
+    outstanding_amount: float
+
+
+class FiscalYearSeedRequest(BaseModel):
+    year: int = Field(..., ge=2020, le=2100)
+
+
+class PeriodManagementResponse(BaseModel):
+    period_key: str
+    status: str
+    fiscal_year: int

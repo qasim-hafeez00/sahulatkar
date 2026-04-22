@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.payment import Installment
 from sk_shared.redis_client import RedisClient
 from src.billing.overdue_processor import OverdueProcessor
+from src.events.publisher import EventPublisher
 
 
 logger = logging.getLogger(__name__)
@@ -23,6 +24,7 @@ class BillingSweepService:
     def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
         self.redis = redis
+        self.publisher = EventPublisher(redis) if redis else None
 
     async def load_due_installments(self, as_of: date | None = None, limit: int = 500, offset: int = 0) -> list[Installment]:
         """
@@ -87,17 +89,23 @@ class BillingSweepService:
         run_date = as_of or date.today()
         lock_owner: str | None = None
         supports_offset = "offset" in inspect.signature(self.load_due_installments).parameters
-        if self.redis is not None:
-            lock_owner = uuid4().hex
-            acquired = await self.redis.redis.set(self.LOCK_KEY, lock_owner, ex=self.LOCK_TTL_SECONDS, nx=True)
-            if not acquired:
-                logger.warning("Billing sweep lock already held; skipping run")
-                return {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
+        
+        if self.redis is None:
+            # P0-07: Mandatory lock enforcement in non-test environments.
+            # Assuming test environment can be detected via a setting or if redis is explicitly None in tests.
+            # For production readiness, we raise an error.
+            raise RuntimeError("Redis client is mandatory for BillingSweepService to ensure distributed locking.")
+
+        lock_owner = uuid4().hex
+        acquired = await self.redis.redis.set(self.LOCK_KEY, lock_owner, ex=self.LOCK_TTL_SECONDS, nx=True)
+        if not acquired:
+            logger.warning("Billing sweep lock already held; skipping run")
+            return {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
 
         try:
             # Aggregate stats across all batches
             aggregate_stats = {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
-            overdue_processor = OverdueProcessor(self.db)
+            overdue_processor = OverdueProcessor(self.db, publisher=self.publisher)
             late_fee_service = LateFeeService(self.db)
 
             # Count due installments for reporting only; payment trigger is external
@@ -124,10 +132,10 @@ class BillingSweepService:
             aggregate_stats["newly_overdue"] = await overdue_processor.mark_overdue_batch(overdue_ids, as_of=run_date)
 
             if aggregate_stats["newly_overdue"] > 0:
-                refreshed_stmt = select(Installment).where(Installment.id.in_(overdue_ids), Installment.status == "overdue")
-                overdue_rows = (await self.db.execute(refreshed_stmt)).scalars().all()
-                for overdue_inst in overdue_rows:
-                    late_fee = overdue_processor.compute_late_fee_amount(overdue_inst, overdue_inst.days_overdue)
+                for overdue_inst in overdue_candidates:
+                    # BV-01 fallback: We compute days_overdue in-memory since we no longer write it to DB
+                    days_overdue = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0
+                    late_fee = await overdue_processor.compute_late_fee_amount(overdue_inst, days_overdue)
                     if late_fee > 0:
                         result = await late_fee_service.apply_late_fee_to_installment(overdue_inst.id, late_fee)
                         if result["status"] == "applied":

@@ -17,6 +17,10 @@ class LedgerAccount(Base, TimestampMixin):
     account_type: Mapped[str] = mapped_column(String(20), nullable=False)
     normal_balance: Mapped[str] = mapped_column(String(6), nullable=False)
     parent_account_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("ledger_accounts.id", ondelete="SET NULL"), nullable=True)
+    parent_code: Mapped[Optional[str]] = mapped_column(String(20), ForeignKey("ledger_accounts.account_code", ondelete="SET NULL"), nullable=True)
+    account_group: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR")
+    is_control: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
@@ -33,10 +37,13 @@ class JournalEntry(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     entry_type: Mapped[str] = mapped_column(String(30), nullable=False)
     source_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
     source_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    source_reference: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     is_balanced: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     total_debit: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     total_credit: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR")
     period_key: Mapped[str] = mapped_column(String(10), nullable=False)
+    reversed_by_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("journal_entries.id", ondelete="SET NULL"), nullable=True)
 
     lines: Mapped[list["JournalEntryLine"]] = relationship(
         "JournalEntryLine",
@@ -59,6 +66,7 @@ class JournalEntryLine(Base, TimestampMixin):
     account_id: Mapped[int] = mapped_column(Integer, ForeignKey("ledger_accounts.id", ondelete="RESTRICT"), nullable=False)
     debit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     credit_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR")
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     journal_entry: Mapped["JournalEntry"] = relationship("JournalEntry", back_populates="lines")
@@ -98,6 +106,7 @@ class LateFeeCharityAllocation(Base, TimestampMixin, SoftDeleteMixin):
     loan_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("loans.id", ondelete="CASCADE"), nullable=False)
     late_fee_amount: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False)
     charity_org_id: Mapped[int] = mapped_column(Integer, ForeignKey("charity_organizations.id", ondelete="RESTRICT"), nullable=False)
+    journal_entry_id: Mapped[Optional[int]] = mapped_column(Integer, ForeignKey("journal_entries.id", ondelete="SET NULL"), nullable=True)
     allocated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     disbursed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     receipt_s3: Mapped[Optional[str]] = mapped_column(String(512), nullable=True)
@@ -116,11 +125,15 @@ class LedgerPeriod(Base, TimestampMixin):
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     period_key: Mapped[str] = mapped_column(String(10), unique=True, nullable=False)
+    fiscal_year: Mapped[int] = mapped_column(Integer, nullable=False)
     start_date: Mapped[date] = mapped_column(Date, nullable=False)
     end_date: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(10), nullable=False, default="open")
+    pre_close_snapshot_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     closed_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    reopened_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reopened_by: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
 
     __table_args__ = (
         Index("ix_ledger_periods_period_key", "period_key"),
@@ -136,6 +149,7 @@ class LedgerAccountBalance(Base, TimestampMixin):
     debit_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     credit_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     net_balance: Mapped[Decimal] = mapped_column(Numeric(14, 2), nullable=False, default=0)
+    currency: Mapped[str] = mapped_column(String(3), nullable=False, default="PKR")
 
     account: Mapped["LedgerAccount"] = relationship("LedgerAccount")
 

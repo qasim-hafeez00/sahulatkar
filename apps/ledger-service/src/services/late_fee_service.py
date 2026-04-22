@@ -6,12 +6,15 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import Installment
+from sk_shared.redis_client import RedisClient
+from src.events.publisher import EventPublisher
 from src.services.accounting_service import AccountingService
 
 
 class LateFeeService:
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
+        self.publisher = EventPublisher(redis) if redis else None
 
     async def apply_late_fee_to_installment(self, installment_id: int, amount: Decimal | float | int) -> dict[str, object]:
         installment = await self._get_installment(installment_id)
@@ -31,7 +34,12 @@ class LateFeeService:
 
         accounting = AccountingService(self.db)
         await accounting.record_late_fee(installment_id=installment_id, amount=fee_amount)
-        installment.late_fee_amount = fee_amount
+        
+        # BV-04: We no longer update the installments table directly.
+        # Instead, we publish an event.
+        if self.publisher:
+            await self.publisher.publish_late_fee_applied(installment_id, float(fee_amount))
+
         await self.db.commit()
         return {"status": "applied", "amount": float(fee_amount), "installment_id": installment_id}
 

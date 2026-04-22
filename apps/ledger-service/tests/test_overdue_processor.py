@@ -47,12 +47,15 @@ async def test_find_and_mark_newly_overdue(db_session):
     candidates = await processor.find_newly_overdue(as_of=date.today())
     assert any(i.id == inst.id for i in candidates)
 
+    # BV-01/BV-05: mark_overdue_batch no longer writes to the installments table;
+    # it only emits an event and returns the count of detected installments.
     updated = await processor.mark_overdue_batch([inst.id], as_of=date.today())
     assert updated == 1
 
+    # The status in DB remains 'pending' — it is the Payment Orchestrator's
+    # responsibility to transition it to 'overdue' upon receiving the event.
     await db_session.refresh(inst)
-    assert inst.status == "overdue"
-    assert inst.days_overdue >= 3
+    assert inst.status == "pending"
 
 
 @pytest.mark.asyncio
@@ -71,11 +74,12 @@ async def test_compute_late_fee_policy(db_session):
         late_fee_waived=False,
         late_fee_amount=0,
     )
-    assert processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("150.00")
+    # compute_late_fee_amount is now async (fetches from SystemParameter)
+    assert await processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("150.00")
 
     dummy.late_fee_waived = True
-    assert processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("0.00")
+    assert await processor.compute_late_fee_amount(dummy, days_overdue=2) == Decimal("0.00")
 
     dummy.late_fee_waived = False
     dummy.late_fee_amount = 100
-    assert processor.compute_late_fee_amount(dummy, days_overdue=5) == Decimal("0.00")
+    assert await processor.compute_late_fee_amount(dummy, days_overdue=5) == Decimal("0.00")

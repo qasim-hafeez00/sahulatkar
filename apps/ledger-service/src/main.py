@@ -9,7 +9,7 @@ from starlette.responses import Response
 
 from src.api.routes import api_router
 from src.config import settings
-from src.core.event_listeners import run_ledger_event_listener
+from src.events.listener import run_ledger_event_listener
 from src.core.logging import configure_logging
 from src.core.middleware import RequestIDMiddleware
 from sk_shared.redis_client import get_redis_client
@@ -58,6 +58,26 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=f"{settings.service_name} API", version="0.1.0", lifespan=lifespan)
 app.add_middleware(RequestIDMiddleware)
+
+# Prometheus metrics endpoint
+@app.get("/metrics", include_in_schema=False)
+async def metrics():
+    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)
+
+# Optional OpenTelemetry Integration
+try:
+    from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
+    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
+    from opentelemetry import trace
+    from opentelemetry.sdk.trace import TracerProvider
+    
+    trace.set_tracer_provider(TracerProvider())
+    FastAPIInstrumentor.instrument_app(app)
+    # SQLAlchemy instrumentation requires the engine, which is created in database.py
+    # We leave that for a more advanced DI setup, but FastAPI is now instrumented.
+    logger.info("OpenTelemetry instrumentation enabled.")
+except ImportError:
+    logger.info("OpenTelemetry not installed; skipping instrumentation.")
 
 app.include_router(api_router)
 

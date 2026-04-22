@@ -15,11 +15,13 @@ from sqlalchemy.orm import selectinload
 
 from sk_shared.models.ledger import CharityOrganization, JournalEntry, JournalEntryLine, LateFeeCharityAllocation, LedgerAccount
 from sk_shared.models.payment import Installment, Loan
+from sk_shared.redis_client import RedisClient
 
 from src.accounting.accounts import ACCOUNT_CODES
 from src.core.period_utils import get_period_bounds
 from src.core.readonly_guard import readonly_guard
 from src.domain.posting_engine import PostingLine, assert_balanced, validate_entry_metadata
+from src.events.publisher import EventPublisher
 from src.services.period_service import PeriodService
 from src.services.balance_service import BalanceService
 
@@ -31,10 +33,11 @@ class JournalEntryResult:
 
 
 class AccountingService:
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
         self.period_service = PeriodService(db_session)
         self.balance_service = BalanceService(db_session)
+        self.publisher = EventPublisher(redis) if redis else None
 
     async def record_down_payment(self, order_id: int, amount: Decimal | float | int) -> JournalEntryResult:
         result = await self._create_balanced_entry(
@@ -364,6 +367,10 @@ class AccountingService:
         if original.entry_type == "reversal":
             raise ValueError("CANNOT_REVERSE_A_REVERSAL")
 
+        # INC-03: Double-reversal guard
+        if original.reversed_by_id is not None:
+            raise ValueError("ENTRY_ALREADY_REVERSED")
+
         reversal_lines = []
         for line in original.lines:
             reversal_lines.append(
@@ -384,6 +391,8 @@ class AccountingService:
             entry_date=entry_date or date.today(),
         )
         if result.created:
+            # Mark the original entry as reversed
+            original.reversed_by_id = result.journal_entry.id
             await self.db.commit()
             await self.db.refresh(result.journal_entry)
         return result
@@ -432,54 +441,118 @@ class AccountingService:
             "margin_pct": float(margin_pct),
         }
 
-    async def get_trial_balance(self, period: str) -> dict[str, object]:
-        # Generate all monthly period keys within the requested period range
+    async def build_cash_flow_statement(self, period: str) -> dict[str, object]:
+        """
+        P3-01: Cash Flow Statement (Direct Method).
+        Analyzes all journal entries involving the cash account (1001).
+        """
         start_date, end_date = get_period_bounds(period)
-        period_keys = []
-        curr = start_date.replace(day=1)
-        while curr <= end_date:
-            period_keys.append(f"{curr.year}-{curr.month:02d}")
-            if curr.month == 12:
-                curr = date(curr.year + 1, 1, 1)
-            else:
-                curr = date(curr.year, curr.month + 1, 1)
-
+        
+        # Query all lines for the cash account in the period
         stmt = (
-            select(
-                LedgerAccount.account_code,
-                LedgerAccount.account_name,
-                LedgerAccount.account_type,
-                func.coalesce(func.sum(JournalEntryLine.debit_amount), 0).label("debit_total"),
-                func.coalesce(func.sum(JournalEntryLine.credit_amount), 0).label("credit_total"),
-            )
-            .join(JournalEntryLine, JournalEntryLine.account_id == LedgerAccount.id)
+            select(JournalEntryLine.journal_id, JournalEntryLine.debit_amount, JournalEntryLine.credit_amount)
+            .join(LedgerAccount, LedgerAccount.id == JournalEntryLine.account_id)
             .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
-            .where(JournalEntry.period_key.in_(period_keys))
-            .group_by(LedgerAccount.account_code, LedgerAccount.account_name, LedgerAccount.account_type)
-            .order_by(LedgerAccount.account_code.asc())
+            .where(LedgerAccount.account_code == ACCOUNT_CODES["cash"])
+            .where(JournalEntry.entry_date >= start_date, JournalEntry.entry_date <= end_date)
         )
-        rows = (await self.db.execute(stmt)).all()
+        cash_lines = (await self.db.execute(stmt)).all()
+        
+        # For each cash movement, find the counterparty lines to categorize
+        operating = Decimal("0.00")
+        investing = Decimal("0.00")
+        financing = Decimal("0.00")
+        
+        # To avoid multiple queries, fetch all counterparties for these journals
+        journal_ids = {line.journal_id for line in cash_lines}
+        if not journal_ids:
+            return {
+                "period": period,
+                "operating": 0.0,
+                "investing": 0.0,
+                "financing": 0.0,
+                "net_cash_flow": 0.0,
+            }
 
+        counter_stmt = (
+            select(JournalEntryLine.journal_id, LedgerAccount.account_code, JournalEntryLine.debit_amount, JournalEntryLine.credit_amount)
+            .join(LedgerAccount, LedgerAccount.id == JournalEntryLine.account_id)
+            .where(JournalEntryLine.journal_id.in_(list(journal_ids)))
+            .where(LedgerAccount.account_code != ACCOUNT_CODES["cash"])
+        )
+        counter_lines = (await self.db.execute(counter_stmt)).all()
+        
+        # Map journal_id to its counterparty accounts
+        journal_counters: dict[int, list[tuple[str, Decimal, Decimal]]] = {}
+        for row in counter_lines:
+            journal_counters.setdefault(row.journal_id, []).append((row.account_code, row.debit_amount, row.credit_amount))
+            
+        for cash_line in cash_lines:
+            net_cash = Decimal(str(cash_line.debit_amount)) - Decimal(str(cash_line.credit_amount))
+            counters = journal_counters.get(cash_line.journal_id, [])
+            if not counters:
+                continue
+            
+            # Use the first counterparty for categorization (simplified)
+            counter_code, _, _ = counters[0]
+            
+            if counter_code in {ACCOUNT_CODES["ar_installments"], ACCOUNT_CODES["cogs_merchant_payment"], 
+                               ACCOUNT_CODES["gateway_fees"], ACCOUNT_CODES["charity_payable"],
+                               ACCOUNT_CODES["murabaha_profit"], ACCOUNT_CODES["late_fee_collections"]}:
+                operating += net_cash
+            elif counter_code in {ACCOUNT_CODES["vcn_issued"], ACCOUNT_CODES["vcn_issuance"]}:
+                investing += net_cash
+            elif counter_code in {ACCOUNT_CODES["customer_deposits"], ACCOUNT_CODES["owner_equity"]}:
+                financing += net_cash
+            else:
+                # Default to operating for unknown counterparties
+                operating += net_cash
+                
+        return {
+            "period": period,
+            "operating": float(operating),
+            "investing": float(investing),
+            "financing": float(financing),
+            "net_cash_flow": float(operating + investing + financing),
+        }
+
+    async def get_trial_balance(self, period: str) -> dict[str, object]:
+        # P1-04: Trial Balance hierarchy support using BalanceService
+        _, end_date = get_period_bounds(period)
+        
+        stmt = select(LedgerAccount).order_by(LedgerAccount.account_code.asc())
+        accounts = (await self.db.execute(stmt)).scalars().all()
+        
         entries: list[dict[str, object]] = []
         total_debit = Decimal("0.00")
         total_credit = Decimal("0.00")
-        for row in rows:
-            debit_total = Decimal(str(row.debit_total))
-            credit_total = Decimal(str(row.credit_total))
-            total_debit += debit_total
-            total_credit += credit_total
+        
+        for account in accounts:
+            balance_data = await self.balance_service.get_account_balance(account.account_code, as_of=end_date)
+            debit = Decimal(str(balance_data["debit_total"]))
+            credit = Decimal(str(balance_data["credit_total"]))
+            
+            # Skip accounts with zero balance if they are not control accounts
+            if debit == 0 and credit == 0 and not account.is_control:
+                continue
+                
+            total_debit += debit
+            total_credit += credit
             entries.append(
                 {
-                    "account_code": row.account_code,
-                    "account_name": row.account_name,
-                    "account_type": row.account_type,
-                    "debit_total": float(debit_total),
-                    "credit_total": float(credit_total),
+                    "account_code": account.account_code,
+                    "account_name": account.account_name,
+                    "account_type": account.account_type,
+                    "is_control": bool(account.is_control),
+                    "debit_total": float(debit),
+                    "credit_total": float(credit),
+                    "balance": float(balance_data["balance"]),
                 }
             )
 
         return {
             "period": period,
+            "as_of": end_date.isoformat(),
             "entries": entries,
             "total_debit": float(total_debit),
             "total_credit": float(total_credit),
@@ -487,61 +560,37 @@ class AccountingService:
         }
 
     async def build_balance_sheet(self, as_of: str | None = None) -> dict[str, object]:
+        # P1-04: Balance Sheet hierarchy support using BalanceService
         as_of_date = date.fromisoformat(as_of) if as_of else date.today()
 
-        stmt = (
-            select(
-                LedgerAccount.account_code,
-                LedgerAccount.account_name,
-                LedgerAccount.account_type,
-                LedgerAccount.normal_balance,
-                func.coalesce(func.sum(JournalEntryLine.debit_amount), 0).label("debit_total"),
-                func.coalesce(func.sum(JournalEntryLine.credit_amount), 0).label("credit_total"),
-            )
-            .join(JournalEntryLine, JournalEntryLine.account_id == LedgerAccount.id)
-            .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
-            .where(JournalEntry.entry_date <= as_of_date)
-            .group_by(
-                LedgerAccount.account_code,
-                LedgerAccount.account_name,
-                LedgerAccount.account_type,
-                LedgerAccount.normal_balance,
-            )
-            .order_by(LedgerAccount.account_code.asc())
-        )
-        rows = (await self.db.execute(stmt)).all()
+        async def get_accounts_by_type(acc_type: str) -> list[dict[str, object]]:
+            stmt = select(LedgerAccount).where(LedgerAccount.account_type == acc_type).order_by(LedgerAccount.account_code.asc())
+            accounts = (await self.db.execute(stmt)).scalars().all()
+            results = []
+            for acc in accounts:
+                balance_data = await self.balance_service.get_account_balance(acc.account_code, as_of=as_of_date)
+                if balance_data["balance"] == 0 and not acc.is_control:
+                    continue
+                results.append(
+                    {
+                        "account_code": acc.account_code,
+                        "account_name": acc.account_name,
+                        "is_control": bool(acc.is_control),
+                        "balance": float(balance_data["balance"]),
+                    }
+                )
+            return results
 
-        assets: list[dict[str, object]] = []
-        liabilities: list[dict[str, object]] = []
-        equity: list[dict[str, object]] = []
-        total_assets = Decimal("0.00")
-        total_liabilities = Decimal("0.00")
-        total_equity = Decimal("0.00")
+        assets = await get_accounts_by_type("asset")
+        liabilities = await get_accounts_by_type("liability")
+        equity = await get_accounts_by_type("equity")
 
-        for row in rows:
-            debit_total = Decimal(str(row.debit_total))
-            credit_total = Decimal(str(row.credit_total))
-            if row.normal_balance == "debit":
-                balance = debit_total - credit_total
-            else:
-                balance = credit_total - debit_total
-
-            item = {
-                "account_code": row.account_code,
-                "account_name": row.account_name,
-                "balance": float(balance),
-            }
-            if row.account_type == "asset":
-                assets.append(item)
-                total_assets += balance
-            elif row.account_type == "liability":
-                liabilities.append(item)
-                total_liabilities += balance
-            elif row.account_type == "equity":
-                equity.append(item)
-                total_equity += balance
+        total_assets = sum((a["balance"] for a in assets if not a["is_control"]), 0.0)
+        total_liabilities = sum((l["balance"] for l in liabilities if not l["is_control"]), 0.0)
+        total_equity = sum((e["balance"] for e in equity if not e["is_control"]), 0.0)
 
         total_liabilities_and_equity = total_liabilities + total_equity
+
         return {
             "as_of": as_of_date.isoformat(),
             "assets": assets,
@@ -549,7 +598,7 @@ class AccountingService:
             "equity": equity,
             "total_assets": float(total_assets),
             "total_liabilities_and_equity": float(total_liabilities_and_equity),
-            "is_balanced": total_assets == total_liabilities_and_equity,
+            "is_balanced": round(total_assets, 2) == round(total_liabilities_and_equity, 2),
         }
 
     async def list_accounts(self, account_type: str | None = None, as_of: str | None = None) -> dict[str, object]:
@@ -558,56 +607,16 @@ class AccountingService:
         if account_type is not None and account_type not in allowed_account_types:
             raise ValueError("INVALID_ACCOUNT_TYPE")
 
-        totals_subquery = (
-            select(
-                JournalEntryLine.account_id.label("account_id"),
-                func.coalesce(func.sum(JournalEntryLine.debit_amount), 0).label("debit_total"),
-                func.coalesce(func.sum(JournalEntryLine.credit_amount), 0).label("credit_total"),
-            )
-            .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
-            .where(JournalEntry.entry_date <= as_of_date)
-            .group_by(JournalEntryLine.account_id)
-            .subquery()
-        )
-
-        stmt = (
-            select(
-                LedgerAccount.account_code,
-                LedgerAccount.account_name,
-                LedgerAccount.account_type,
-                LedgerAccount.normal_balance,
-                LedgerAccount.is_active,
-                func.coalesce(totals_subquery.c.debit_total, 0).label("debit_total"),
-                func.coalesce(totals_subquery.c.credit_total, 0).label("credit_total"),
-            )
-            .outerjoin(totals_subquery, totals_subquery.c.account_id == LedgerAccount.id)
-            .order_by(LedgerAccount.account_code.asc())
-        )
+        stmt = select(LedgerAccount).order_by(LedgerAccount.account_code.asc())
         if account_type is not None:
             stmt = stmt.where(LedgerAccount.account_type == account_type)
 
-        rows = (await self.db.execute(stmt)).all()
+        accounts = (await self.db.execute(stmt)).scalars().all()
         items: list[dict[str, object]] = []
-        for row in rows:
-            debit_total = Decimal(str(row.debit_total))
-            credit_total = Decimal(str(row.credit_total))
-            if row.normal_balance == "debit":
-                balance = debit_total - credit_total
-            else:
-                balance = credit_total - debit_total
-
-            items.append(
-                {
-                    "account_code": row.account_code,
-                    "account_name": row.account_name,
-                    "account_type": row.account_type,
-                    "normal_balance": row.normal_balance,
-                    "is_active": bool(row.is_active),
-                    "debit_total": float(debit_total),
-                    "credit_total": float(credit_total),
-                    "balance": float(balance),
-                }
-            )
+        for account in accounts:
+            # P1-01: Use BalanceService for accurate rollups and snapshot utilization
+            balance_data = await self.balance_service.get_account_balance(account.account_code, as_of=as_of_date)
+            items.append(balance_data)
 
         return {
             "as_of": as_of_date.isoformat(),
@@ -617,54 +626,7 @@ class AccountingService:
 
     async def get_account_balance(self, account_code: str, as_of: str | None = None) -> dict[str, object]:
         as_of_date = date.fromisoformat(as_of) if as_of else date.today()
-
-        totals_subquery = (
-            select(
-                JournalEntryLine.account_id.label("account_id"),
-                func.coalesce(func.sum(JournalEntryLine.debit_amount), 0).label("debit_total"),
-                func.coalesce(func.sum(JournalEntryLine.credit_amount), 0).label("credit_total"),
-            )
-            .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
-            .where(JournalEntry.entry_date <= as_of_date)
-            .group_by(JournalEntryLine.account_id)
-            .subquery()
-        )
-
-        stmt = (
-            select(
-                LedgerAccount.account_code,
-                LedgerAccount.account_name,
-                LedgerAccount.account_type,
-                LedgerAccount.normal_balance,
-                LedgerAccount.is_active,
-                func.coalesce(totals_subquery.c.debit_total, 0).label("debit_total"),
-                func.coalesce(totals_subquery.c.credit_total, 0).label("credit_total"),
-            )
-            .outerjoin(totals_subquery, totals_subquery.c.account_id == LedgerAccount.id)
-            .where(LedgerAccount.account_code == account_code)
-        )
-        row = (await self.db.execute(stmt)).one_or_none()
-        if row is None:
-            raise LookupError("ACCOUNT_NOT_FOUND")
-
-        debit_total = Decimal(str(row.debit_total))
-        credit_total = Decimal(str(row.credit_total))
-        if row.normal_balance == "debit":
-            balance = debit_total - credit_total
-        else:
-            balance = credit_total - debit_total
-
-        return {
-            "as_of": as_of_date.isoformat(),
-            "account_code": row.account_code,
-            "account_name": row.account_name,
-            "account_type": row.account_type,
-            "normal_balance": row.normal_balance,
-            "is_active": bool(row.is_active),
-            "debit_total": float(debit_total),
-            "credit_total": float(credit_total),
-            "balance": float(balance),
-        }
+        return await self.balance_service.get_account_balance(account_code, as_of=as_of_date)
 
     async def list_journal_entries(
         self,
@@ -860,6 +822,61 @@ class AccountingService:
             "total_outstanding": float(self._money(total_outstanding)),
         }
 
+    @readonly_guard
+    async def get_ar_aging_details(
+        self,
+        *,
+        as_of: str | None = None,
+        min_days_overdue: int = 0,
+        limit: int = 1000,
+    ) -> list[dict[str, object]]:
+        """
+        P3-02: AR aging detail export.
+        Returns granular data for each outstanding installment.
+        """
+        as_of_date = date.fromisoformat(as_of) if as_of else date.today()
+        
+        stmt = (
+            select(
+                Installment.id,
+                Installment.user_id,
+                Installment.loan_id,
+                Installment.due_date,
+                Installment.amount,
+                Installment.paid_amount,
+                Loan.plan_type,
+            )
+            .join(Loan, Loan.id == Installment.loan_id)
+            .where(Installment.deleted_at.is_(None))
+            .where(Installment.status.in_(["pending", "overdue"]))
+            .where(Installment.amount > Installment.paid_amount)
+            .order_by(Installment.due_date.asc())
+            .limit(limit)
+        )
+        
+        rows = (await self.db.execute(stmt)).all()
+        details = []
+        for row in rows:
+            outstanding = self._money(row.amount) - self._money(row.paid_amount)
+            days_overdue = max((as_of_date - row.due_date).days, 0)
+            
+            if days_overdue < min_days_overdue:
+                continue
+                
+            details.append(
+                {
+                    "installment_id": row.id,
+                    "user_id": row.user_id,
+                    "loan_id": row.loan_id,
+                    "plan_type": row.plan_type,
+                    "due_date": row.due_date.isoformat(),
+                    "days_overdue": days_overdue,
+                    "outstanding_amount": float(outstanding),
+                }
+            )
+            
+        return details
+
     async def build_shariah_audit_report(self, period: str) -> dict[str, object]:
         start_date, end_date = get_period_bounds(period)
 
@@ -926,7 +943,7 @@ class AccountingService:
         
         # 2. Validate and balance lines (Domain Layer)
         normalized_lines = list(lines)
-        total_debit, total_credit = assert_balanced(normalized_lines)
+        total_debit, total_credit, entry_currency = assert_balanced(normalized_lines)
 
         # 3. Create entry with sequential number
         entry = JournalEntry(
@@ -940,6 +957,7 @@ class AccountingService:
             is_balanced=True,
             total_debit=total_debit,
             total_credit=total_credit,
+            currency=entry_currency,
         )
         self.db.add(entry)
         await self.db.flush()
@@ -954,11 +972,27 @@ class AccountingService:
                     account_id=account.id,
                     debit_amount=line.debit_amount,
                     credit_amount=line.credit_amount,
+                    currency=line.currency,
                     description=line.description,
                 )
             )
 
         await self.db.refresh(entry)
+        
+        # P0-04: Emit outbound event for downstream services
+        if self.publisher:
+            await self.publisher.publish_journal_posted(
+                entry_id=entry.id,
+                entry_number=entry.entry_number,
+                payload={
+                    "entry_type": entry.entry_type,
+                    "source_type": entry.source_type,
+                    "source_id": entry.source_id,
+                    "total_debit": float(entry.total_debit),
+                    "total_credit": float(entry.total_credit),
+                },
+            )
+            
         return JournalEntryResult(journal_entry=entry, created=True)
 
     async def _resolve_accounts(self, account_codes: set[str]) -> dict[str, LedgerAccount]:
@@ -987,21 +1021,22 @@ class AccountingService:
         return charity_org
 
     async def _next_entry_number(self, target_date: date) -> str:
-        # 3. Create entry with sequential number (dialect-aware for tests)
+        """
+        Generate a sequential entry number. 
+        P0-06: In production (Postgres), we MUST use the sequence to ensure gaps are visible and duplicates are impossible.
+        """
         from sqlalchemy import text
-        try:
-            bind = await self.db.get_bind()
-            if bind.dialect.name == "postgresql":
-                result = await self.db.execute(text("SELECT nextval('journal_entry_number_seq')"))
-                seq_val = result.scalar()
-                entry_number = f"JE-{target_date.strftime('%Y%m')}-{seq_val:06d}"
-            else:
-                from uuid import uuid4
-                entry_number = f"JE-{target_date.strftime('%Y%m')}-{uuid4().hex[:6].upper()}"
-        except Exception:
-            from uuid import uuid4
-            entry_number = f"JE-{target_date.strftime('%Y%m')}-{uuid4().hex[:6].upper()}"
-        return entry_number
+        bind = self.db.get_bind()
+        
+        if bind.dialect.name == "postgresql":
+            # Using nextval ensures atomicity and sequential integrity.
+            # If this fails, we WANT the transaction to fail rather than using an unsafe UUID fallback.
+            result = await self.db.execute(text("SELECT nextval('journal_entry_number_seq')"))
+            seq_val = result.scalar()
+            return f"JE-{target_date.strftime('%Y%m')}-{seq_val:06d}"
+        
+        # Fallback for non-postgres (sqlite in tests)
+        return f"JE-{target_date.strftime('%Y%m')}-{uuid4().hex[:6].upper()}"
 
     def _money(self, value: Decimal | float | int) -> Decimal:
         return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)

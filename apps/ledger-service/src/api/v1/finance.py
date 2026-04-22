@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import date
 
 import json
 
@@ -7,11 +8,13 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
 from src.core.dependencies import RequestContext, get_redis, require_admin_role, require_internal_request
-from src.core.event_dlq import EventDeadLetterQueue
+from src.events.dlq import EventDeadLetterQueue
 from src.schemas.finance import (
     ARAgingResponse,
+    ARAgingDetailResponse,
     AccountBalanceResponse,
     BalanceSheetResponse,
+    CashFlowResponse,
     CharityDisbursementRequest,
     CharityDisbursementResponse,
     CharityReportResponse,
@@ -22,15 +25,20 @@ from src.schemas.finance import (
     JournalEntryResponse,
     LedgerAccountsListResponse,
     ProfitLossResponse,
+    PeriodManagementResponse,
     ReconciliationImportRequest,
     ReconciliationImportResponse,
     ReconciliationListResponse,
+    ReconciliationOverrideRequest,
+    ReconciliationOverrideResponse,
     ShariahAuditResponse,
     TrialBalanceResponse,
+    FiscalYearSeedRequest,
 )
 from src.services.accounting_service import AccountingService
 from src.services.charity_service import CharityService
 from src.services.reconciliation_service import ReconciliationService
+from src.services.period_service import PeriodService
 from src.billing.billing_sweep import BillingSweepService
 from sk_shared.events import build_event_envelope, event_channel
 from sk_shared.redis_client import RedisClient
@@ -43,9 +51,10 @@ router = APIRouter()
 async def get_profit_loss(
     period: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.build_profit_loss_report(period)
     except ValueError as exc:
@@ -58,9 +67,10 @@ async def get_profit_loss(
 async def get_trial_balance(
     period: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.get_trial_balance(period)
     except ValueError as exc:
@@ -73,9 +83,10 @@ async def get_trial_balance(
 async def get_balance_sheet(
     as_of: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.build_balance_sheet(as_of=as_of)
     except ValueError as exc:
@@ -87,9 +98,10 @@ async def get_ledger_accounts(
     account_type: str | None = Query(default=None),
     as_of: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.list_accounts(account_type=account_type, as_of=as_of)
     except ValueError as exc:
@@ -105,9 +117,10 @@ async def get_ledger_account_balance(
     account_code: str,
     as_of: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.get_account_balance(account_code=account_code, as_of=as_of)
     except ValueError as exc:
@@ -129,9 +142,10 @@ async def get_journal_entries(
     cursor: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.list_journal_entries(
             from_date=from_date,
@@ -149,9 +163,10 @@ async def get_journal_entries(
 async def get_journal_entry_detail(
     entry_number: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.get_journal_entry(entry_number=entry_number)
     except LookupError as exc:
@@ -167,9 +182,10 @@ async def get_ar_aging(
     plan_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.build_ar_aging_report(
             as_of=as_of,
@@ -280,9 +296,10 @@ async def get_reconciliation(
     page: int = Query(default=1, ge=1),
     limit: int = Query(default=50, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = ReconciliationService(db)
+    service = ReconciliationService(db, redis=redis)
     try:
         return await service.query_snapshots(gateway=gateway, settlement_date=settlement_date, page=page, limit=limit)
     except ValueError as exc:
@@ -293,9 +310,10 @@ async def get_reconciliation(
 async def get_shariah_audit(
     period: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.build_shariah_audit_report(period)
     except ValueError as exc:
@@ -308,9 +326,10 @@ async def get_shariah_audit(
 async def import_reconciliation(
     request: ReconciliationImportRequest,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: None = Depends(require_internal_request),
 ) -> dict[str, object]:
-    service = ReconciliationService(db)
+    service = ReconciliationService(db, redis=redis)
     return await service.import_snapshot(
         gateway=request.gateway,
         settlement_date=request.settlement_date.isoformat(),
@@ -321,13 +340,124 @@ async def import_reconciliation(
     )
 
 
-@router.get("/admin/finance/charity-report", response_model=CharityReportResponse)
-async def get_charity_report(
+@router.post("/admin/finance/reconciliation/{reconciliation_id}/override", response_model=ReconciliationOverrideResponse)
+async def manual_reconciliation_override(
+    reconciliation_id: int,
+    request: ReconciliationOverrideRequest,
+    db: AsyncSession = Depends(get_db),
+    ctx: RequestContext = Depends(require_admin_role(["super_admin"])),
+) -> dict[str, object]:
+    """Force-match a discrepant reconciliation (super admin only)."""
+    service = ReconciliationService(db)
+    try:
+        return await service.manual_override(
+            reconciliation_id=reconciliation_id,
+            reason=request.reason,
+            admin_user=ctx.user_id,
+        )
+    except (LookupError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/admin/finance/cash-flow", response_model=CashFlowResponse)
+async def get_cash_flow(
     period: str,
     db: AsyncSession = Depends(get_db),
     _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
 ) -> dict[str, object]:
-    service = CharityService(db)
+    """P3-01: Cash Flow Statement (Direct Method)."""
+    service = AccountingService(db)
+    try:
+        return await service.build_cash_flow_statement(period)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.get("/admin/finance/ar-aging/export", response_model=list[ARAgingDetailResponse])
+async def export_ar_aging_details(
+    as_of: str | None = None,
+    min_days_overdue: int = Query(0, ge=0),
+    limit: int = Query(1000, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
+) -> list[dict[str, object]]:
+    """P3-02: AR aging detail export for granular analysis."""
+    service = AccountingService(db)
+    try:
+        return await service.get_ar_aging_details(
+            as_of=as_of,
+            min_days_overdue=min_days_overdue,
+            limit=limit,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@router.post("/admin/finance/periods/seed", response_model=list[PeriodManagementResponse])
+async def seed_periods(
+    request: FiscalYearSeedRequest,
+    db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(["super_admin"])),
+) -> list[dict[str, object]]:
+    """P3-03: Seed 12 monthly periods for a fiscal year."""
+    service = PeriodService(db)
+    periods = await service.seed_fiscal_year(request.year)
+    await db.commit()
+    return [
+        {
+            "period_key": p.period_key,
+            "status": p.status,
+            "fiscal_year": p.fiscal_year,
+        }
+        for p in periods
+    ]
+
+
+@router.post("/admin/finance/periods/{period_key}/close", response_model=PeriodManagementResponse)
+async def close_period(
+    period_key: str,
+    db: AsyncSession = Depends(get_db),
+    ctx: RequestContext = Depends(require_admin_role(["super_admin"])),
+) -> dict[str, object]:
+    """P3-03: Close an accounting period."""
+    service = PeriodService(db)
+    try:
+        period = await service.close_period(period_key, closed_by=str(ctx.user_id))
+        await db.commit()
+        return {
+            "period_key": period.period_key,
+            "status": period.status,
+            "fiscal_year": period.fiscal_year,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/admin/finance/periods/{period_key}/reopen", response_model=PeriodManagementResponse)
+async def reopen_period(
+    period_key: str,
+    db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(["super_admin"])),
+) -> dict[str, object]:
+    """P3-03: Reopen a closed accounting period."""
+    service = PeriodService(db)
+    period = await service.reopen_period(period_key)
+    await db.commit()
+    return {
+        "period_key": period.period_key,
+        "status": period.status,
+        "fiscal_year": period.fiscal_year,
+    }
+
+
+@router.get("/admin/finance/charity-report", response_model=CharityReportResponse)
+async def get_charity_report(
+    period: str,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
+) -> dict[str, object]:
+    service = CharityService(db, redis=redis)
     try:
         return await service.get_charity_summary(period)
     except ValueError as exc:
@@ -336,13 +466,17 @@ async def get_charity_report(
         raise
 
 
+from src.core.rate_limit import rate_limit_admin_writes
+
 @router.post("/admin/finance/charity-disbursement", response_model=CharityDisbursementResponse)
 async def post_charity_disbursement(
     request: CharityDisbursementRequest,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["super_admin"])),
+    __: bool = Depends(rate_limit_admin_writes),
 ) -> dict[str, object]:
-    service = CharityService(db)
+    service = CharityService(db, redis=redis)
     return await service.record_disbursement(
         allocation_ids=request.allocation_ids,
         payment_reference=request.payment_reference,
@@ -356,6 +490,7 @@ async def trigger_billing_sweep(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     _: RequestContext = Depends(require_admin_role(["super_admin"])),
+    __: bool = Depends(rate_limit_admin_writes),
 ) -> dict[str, object]:
     """Trigger the billing sweep manually for a specific date."""
     sweep_date = date.fromisoformat(as_of) if as_of else None

@@ -7,6 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from src.core.database import get_db
+from src.core.dependencies import get_redis
+from sk_shared.redis_client import RedisClient
 from src.services.accounting_service import AccountingService
 
 router = APIRouter(prefix="/entries", tags=["Journal Entries"])
@@ -41,9 +43,10 @@ async def list_journal_entries(
     cursor: str | None = None,
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
     """Query journal entries with cursor-based pagination."""
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     return await service.list_journal_entries(
         from_date=from_date,
         to_date=to_date,
@@ -58,23 +61,28 @@ async def list_journal_entries(
 async def get_entry(
     entry_number: str,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
     """Get detailed information for a specific journal entry."""
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         return await service.get_journal_entry(entry_number)
     except LookupError:
         raise HTTPException(status_code=404, detail="ENTRY_NOT_FOUND")
 
 
+from src.core.rate_limit import rate_limit_admin_writes
+
 @router.post("/manual")
 async def create_manual_entry(
     req: ManualEntryRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    __: bool = Depends(rate_limit_admin_writes),
 ):
     """Create a manual journal entry (finance admin only)."""
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         # Use idempotency key as reference if provided
         reference = idempotency_key or req.reference
@@ -98,9 +106,11 @@ async def reverse_entry(
     req: ReversalRequest,
     idempotency_key: str | None = Header(None, alias="Idempotency-Key"),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    __: bool = Depends(rate_limit_admin_writes),
 ):
     """Reverse an existing journal entry."""
-    service = AccountingService(db)
+    service = AccountingService(db, redis=redis)
     try:
         # Use idempotency key as reversal_id if provided
         reversal_id = idempotency_key or req.reversal_id or f"REV-{entry_number}"

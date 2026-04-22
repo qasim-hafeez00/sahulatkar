@@ -8,12 +8,15 @@ from sqlalchemy import case, func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import PaymentTransaction, Reconciliation, ReconciliationItem
+from sk_shared.redis_client import RedisClient
 from src.core.readonly_guard import readonly_guard
+from src.events.publisher import EventPublisher
 
 
 class ReconciliationService:
-    def __init__(self, db_session: AsyncSession) -> None:
+    def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
+        self.publisher = EventPublisher(redis) if redis else None
 
     async def import_snapshot(
         self,
@@ -29,17 +32,32 @@ class ReconciliationService:
         expected_decimal = Decimal(str(expected_amount))
         actual_decimal = Decimal(str(actual_amount))
 
-        matched_stmt = (
-            select(PaymentTransaction.id, PaymentTransaction.amount)
-            .where(PaymentTransaction.deleted_at.is_(None))
-            .where(PaymentTransaction.gateway == gateway)
-            .where(func.date(PaymentTransaction.created_at) == target_date)
-        )
-        matched_rows = (await self.db.execute(matched_stmt)).all()
-        matched_ids = [int(row[0]) for row in matched_rows]
-        matched_amount = sum((Decimal(str(row[1])) for row in matched_rows), Decimal("0.00"))
-        now = self._utc_now()
+        # INC-08: Paginated matched rows query to avoid OOM
+        matched_ids: list[int] = []
+        matched_amount = Decimal("0.00")
+        offset = 0
+        batch_size = 1000
 
+        while True:
+            matched_stmt = (
+                select(PaymentTransaction.id, PaymentTransaction.amount)
+                .where(PaymentTransaction.deleted_at.is_(None))
+                .where(PaymentTransaction.gateway == gateway)
+                .where(func.date(PaymentTransaction.created_at) == target_date)
+                .offset(offset)
+                .limit(batch_size)
+            )
+            batch_rows = (await self.db.execute(matched_stmt)).all()
+            if not batch_rows:
+                break
+            
+            for row in batch_rows:
+                matched_ids.append(int(row[0]))
+                matched_amount += Decimal(str(row[1]))
+            
+            offset += batch_size
+
+        now = self._utc_now()
         discrepancy = actual_decimal - expected_decimal
         status = "matched" if discrepancy == Decimal("0") else "discrepant"
 
@@ -57,20 +75,36 @@ class ReconciliationService:
         self.db.add(reconciliation)
         await self.db.flush()
 
-        for txn in matched_rows:
-            txn_id = int(txn[0])
-            txn_amount = Decimal(str(txn[1]))
-            self.db.add(
-                ReconciliationItem(
-                    reconciliation_id=reconciliation.id,
-                    payment_txn_id=txn_id,
-                    gateway_ref=reference,
-                    expected_amount=txn_amount,
-                    actual_amount=txn_amount,
-                    status="matched",
-                    created_at=now,
-                )
+        # BV-02: Redo the loop to keep amounts and create items
+        matched_data: list[tuple[int, Decimal]] = []
+        offset = 0
+        while True:
+            stmt = (
+                select(PaymentTransaction.id, PaymentTransaction.amount)
+                .where(PaymentTransaction.deleted_at.is_(None))
+                .where(PaymentTransaction.gateway == gateway)
+                .where(func.date(PaymentTransaction.created_at) == target_date)
+                .offset(offset)
+                .limit(batch_size)
             )
+            rows = (await self.db.execute(stmt)).all()
+            if not rows:
+                break
+            for r in rows:
+                txn_id, txn_amount = int(r[0]), Decimal(str(r[1]))
+                matched_data.append((txn_id, txn_amount))
+                self.db.add(
+                    ReconciliationItem(
+                        reconciliation_id=reconciliation.id,
+                        payment_txn_id=txn_id,
+                        gateway_ref=reference,
+                        expected_amount=txn_amount,
+                        actual_amount=txn_amount,
+                        status="matched",
+                        created_at=now,
+                    )
+                )
+            offset += batch_size
 
         if discrepancy != Decimal("0"):
             self.db.add(
@@ -86,13 +120,10 @@ class ReconciliationService:
                 )
             )
 
-        if matched_ids:
-            await self.db.execute(
-                update(PaymentTransaction)
-                .where(PaymentTransaction.id.in_(matched_ids))
-                .values(reconciled_at=now, settlement_id=reconciliation.id)
-                .execution_options(synchronize_session=False)
-            )
+        # BV-02: We no longer update PaymentTransaction directly.
+        # Instead, we publish an event.
+        if self.publisher and matched_data:
+            await self.publisher.publish_reconciliation_matched(reconciliation.id, [m[0] for m in matched_data])
 
         await self.db.commit()
 
@@ -101,12 +132,38 @@ class ReconciliationService:
             "settlement_date": settlement_date,
             "expected_amount": float(expected_decimal),
             "actual_amount": float(actual_decimal),
-            "matched_transaction_count": len(matched_ids),
+            "matched_transaction_count": len(matched_data),
             "matched_transaction_amount": float(matched_amount),
             "discrepancy": float(discrepancy),
             "reference": reference,
             "notes": notes,
             "status": status,
+        }
+
+    async def manual_override(self, reconciliation_id: int, reason: str, admin_user: str) -> dict[str, object]:
+        """
+        P1-05: Manual reconciliation override API.
+        Allows finance admin to force-match a discrepant settlement.
+        """
+        stmt = select(Reconciliation).where(Reconciliation.id == reconciliation_id)
+        reconciliation = (await self.db.execute(stmt)).scalar_one_or_none()
+        if not reconciliation:
+            raise LookupError("RECONCILIATION_NOT_FOUND")
+            
+        if reconciliation.status == "matched":
+            raise ValueError("ALREADY_MATCHED")
+            
+        reconciliation.status = "force_matched"
+        reconciliation.notes = f"{reconciliation.notes or ''}\n[Override by {admin_user}]: {reason}".strip()
+        reconciliation.reconciled_at = self._utc_now()
+        
+        await self.db.commit()
+        await self.db.refresh(reconciliation)
+        
+        return {
+            "reconciliation_id": reconciliation.id,
+            "status": reconciliation.status,
+            "notes": reconciliation.notes,
         }
 
     @readonly_guard

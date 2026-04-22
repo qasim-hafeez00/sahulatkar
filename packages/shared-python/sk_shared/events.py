@@ -19,6 +19,14 @@ EVENT_DELIVERY_STATUS_CHANGED = "delivery.status_changed"
 EVENT_DELIVERY_CONFIRMED = "delivery.confirmed"
 EVENT_DELIVERY_RETURNED = "delivery.returned"
 
+# Ledger Outbound Events
+EVENT_LEDGER_JOURNAL_POSTED = "ledger.journal_posted"
+EVENT_LEDGER_INSTALLMENTS_OVERDUE = "ledger.installments_overdue"
+EVENT_LEDGER_LATE_FEE_APPLIED = "ledger.late_fee_applied"
+EVENT_LEDGER_RECONCILIATION_MATCHED = "ledger.reconciliation_matched"
+EVENT_LEDGER_CHARITY_DISBURSED = "ledger.charity_disbursed"
+EVENT_LEDGER_SHARIAH_VIOLATION_DETECTED = "ledger.shariah_violation_detected"
+
 
 @dataclass(slots=True)
 class EventEnvelope:
