@@ -31,8 +31,15 @@ async def test_safepay_webhook_processes_paid_event(client, test_user, redis_moc
     )
     assert resp.status_code == 200
     assert resp.json()["status"] == "ok"
-    # VCN issue should be queued
-    assert await redis_mock.redis.llen("sk:queue:vcn_issue") >= 1
+    
+    # VCN issue should be queued in Outbox
+    from src.models.outbox import OutboxEvent
+    from sqlalchemy import select
+    from tests.conftest import TestingSessionLocal
+    async with TestingSessionLocal() as session:
+        result = await session.execute(select(OutboxEvent).where(OutboxEvent.event_name == "vcn.issue"))
+        events = result.scalars().all()
+        assert len(events) >= 1
 
 
 async def test_safepay_webhook_rejects_invalid_signature(client):

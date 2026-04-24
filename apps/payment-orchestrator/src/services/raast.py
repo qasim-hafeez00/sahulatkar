@@ -145,6 +145,54 @@ class RaastClient:
             reference_no=f"SBP-REF-{gateway_txn_id[:8].upper()}",
         )
 
+    # ── Mandate Management ────────────────────────────────────────────────
+    
+    def setup_mandate(
+        self,
+        *,
+        user_id: int,
+        payer_iban: str,
+        max_amount: Decimal,
+    ) -> dict[str, Any]:
+        """
+        Request the payer to authorize a recurring debit mandate.
+        In the SBP model, this triggers a mandate authorization request
+        to the payer's bank app/USSD.
+        """
+        mandate_ref = f"MND_{uuid4().hex[:12]}"
+        logger.info(
+            "Raast mandate setup initiated (mock)",
+            extra={"user_id": user_id, "mandate_ref": mandate_ref}
+        )
+        return {
+            "status": "initiated",
+            "mandate_reference": mandate_ref,
+            "payer_iban": payer_iban,
+        }
+
+    def charge_mandate(
+        self,
+        *,
+        mandate_reference: str,
+        amount_pkr: Decimal,
+        reference_no: str,
+    ) -> RaastTransferResult:
+        """
+        Execute an auto-debit against a previously authorized Raast mandate.
+        Used for installment auto-collection.
+        """
+        gateway_txn_id = f"raast_mnd_{uuid4().hex}"
+        logger.info(
+            "Raast mandate charge executed (mock)",
+            extra={"mandate_ref": mandate_reference, "amount_pkr": str(amount_pkr)}
+        )
+        return RaastTransferResult(
+            gateway_txn_id=gateway_txn_id,
+            success=True,
+            status="success",
+            reference_no=reference_no,
+        )
+
     # ── Signature / Webhook Verification ──────────────────────────────────
 
     def _sign_payload(self, body: bytes) -> str:

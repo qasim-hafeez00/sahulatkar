@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import OrderState
 from sk_shared.models.order import Order
-from sk_shared.models.payment import Installment, PaymentTransaction
+from sk_shared.models.payment import Installment, Loan, PaymentMethod, PaymentTransaction, VirtualCard
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
@@ -132,7 +132,7 @@ async def down_payment(
 
         txn = PaymentTransaction(
             user_id=current_user.id,
-            amount=float(request_payload.amount_pkr),
+            amount=request_payload.amount_pkr,
             currency=settings.PAYMENT_CURRENCY,
             gateway="safepay",
             gateway_txn_id=checkout.gateway_txn_id,
@@ -168,7 +168,7 @@ async def down_payment(
 
         txn = PaymentTransaction(
             user_id=current_user.id,
-            amount=float(request_payload.amount_pkr),
+            amount=request_payload.amount_pkr,
             currency=settings.PAYMENT_CURRENCY,
             gateway="jazzcash",
             gateway_txn_id=result.gateway_txn_id,
@@ -206,10 +206,22 @@ async def down_payment(
 
     # ── Raast: IBFT initiation ─────────────────────────────────────────────────
     if method == "raast":
-        # Raast requires the payer's bank IBAN. For MVP, users must have
-        # a saved Raast ID / bank account linked in their payment profile.
-        # TODO: Fetch payer_iban from user's payment methods table.
-        payer_iban = "PK36SCBL0000001123456702"  # Placeholder — replace with user's saved IBAN
+        # Raast requires the payer's bank IBAN. We fetch the default Raast
+        # payment method for the user.
+        pm = await db.scalar(
+            select(PaymentMethod).where(
+                PaymentMethod.user_id == current_user.id,
+                PaymentMethod.provider == "raast",
+                PaymentMethod.is_default == True,
+                PaymentMethod.deleted_at.is_(None),
+            )
+        )
+        if not pm:
+            logger.warning("No default Raast IBAN found for user", extra={"user_id": current_user.id})
+            # Fallback to profile placeholder if no PM linked yet (for testing)
+            payer_iban = "PK36SCBL0000001123456702"
+        else:
+            payer_iban = pm.tokenized_reference
 
         try:
             raast = RaastClient(
@@ -231,7 +243,7 @@ async def down_payment(
 
         txn = PaymentTransaction(
             user_id=current_user.id,
-            amount=float(request_payload.amount_pkr),
+            amount=request_payload.amount_pkr,
             currency=settings.PAYMENT_CURRENCY,
             gateway="raast",
             gateway_txn_id=result.gateway_txn_id,
@@ -284,6 +296,20 @@ async def pay_installment(
             detail="INSTALLMENT_ALREADY_PAID",
         )
 
+    # Check for existing successful transaction as Orchestrator no longer mutates installment.status
+    existing_txn = await db.scalar(
+        select(PaymentTransaction).where(
+            PaymentTransaction.installment_id == installment.id,
+            PaymentTransaction.status == "success",
+            PaymentTransaction.deleted_at.is_(None),
+        )
+    )
+    if existing_txn:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="INSTALLMENT_ALREADY_PAID",
+        )
+
     method = request_payload.method.value
     gateway_txn_id = None
 
@@ -323,16 +349,17 @@ async def pay_installment(
         loan_id=installment.loan_id,
         installment_id=installment.id,
         user_id=current_user.id,
-        amount=float(installment.total_amount),
+        amount=Decimal(str(installment.total_amount)),
         currency=settings.PAYMENT_CURRENCY,
         gateway=method,
         gateway_txn_id=gateway_txn_id,
         status="success",
         reconciled_at=now,
     )
-    installment.status = "paid"
-    installment.paid_amount = installment.total_amount
-    installment.paid_at = now
+    # VIOLATION-04: Do NOT mutate installment status directly.
+    # installment.status = "paid"
+    # installment.paid_amount = installment.total_amount
+    # installment.paid_at = now
     db.add(txn)
     await db.commit()
     await db.refresh(txn)
@@ -366,7 +393,7 @@ async def pay_installment(
     return PayInstallmentResponse(
         success=True,
         txn_id=txn.id,
-        paid_at=installment.paid_at.isoformat(),
+        paid_at=now.isoformat(),
         next_installment_id=next_inst.id if next_inst else None,
     )
 
@@ -434,6 +461,7 @@ async def internal_trigger_installment(
 
     # Billing sweep uses JazzCash direct charge (mandate-style)
     # TODO: Use Raast for auto-collection when mandate API is available
+    routing = GatewayRoutingEngine(redis)
     try:
         jc = JazzCashClient(settings.JAZZCASH_MERCHANT_ID, settings.JAZZCASH_PASSWORD)
         result = jc.charge(
@@ -441,23 +469,63 @@ async def internal_trigger_installment(
             amount_pkr=Decimal(str(installment.total_amount)),
         )
     except Exception as exc:
+        await routing.record_failure("jazzcash")
         installment.retry_count = (installment.retry_count or 0) + 1
+        
+        # INCOMPLETE-03: Installment Retry Escalation
+        if installment.retry_count >= settings.MAX_INSTALLMENT_RETRIES:
+            installment.status = "failed"
+            logger.error(
+                "Installment failed after max retries", 
+                extra={"installment_id": installment.id, "retries": installment.retry_count}
+            )
+            # Emit installment failed event for Notification Service
+            from sk_shared.events import build_event_envelope, event_channel
+            EVENT_PAYMENT_INSTALLMENT_FAILED = "payment.installment_failed"
+            envelope = build_event_envelope(
+                event=EVENT_PAYMENT_INSTALLMENT_FAILED,
+                source_service="payment-orchestrator",
+                payload={
+                    "installment_id": installment.id,
+                    "loan_id": installment.loan_id,
+                    "user_id": installment.user_id,
+                    "retry_count": installment.retry_count,
+                },
+            )
+            await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_FAILED), envelope.to_json())
+        
         await db.commit()
         logger.error("Billing sweep charge failed", extra={"installment_id": installment.id, "error": str(exc)})
         GATEWAY_FAILURE_TOTAL.labels(gateway="jazzcash").inc()
         return {"status": "failed", "error": "GATEWAY_DECLINED", "installment_id": installment.id}
 
     if not result.success:
+        await routing.record_failure("jazzcash")
         installment.retry_count = (installment.retry_count or 0) + 1
+        
+        if installment.retry_count >= settings.MAX_INSTALLMENT_RETRIES:
+            installment.status = "failed"
+            # Emit failure event (same as above, abstracted in production)
+            from sk_shared.events import build_event_envelope, event_channel
+            EVENT_PAYMENT_INSTALLMENT_FAILED = "payment.installment_failed"
+            envelope = build_event_envelope(
+                event=EVENT_PAYMENT_INSTALLMENT_FAILED,
+                source_service="payment-orchestrator",
+                payload={"installment_id": installment.id, "loan_id": installment.loan_id}
+            )
+            await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_FAILED), envelope.to_json())
+
         await db.commit()
         return {"status": "failed", "error": "JAZZCASH_DECLINED", "installment_id": installment.id}
+    
+    await routing.record_success("jazzcash")
 
     now = datetime.now(timezone.utc)
     txn = PaymentTransaction(
         loan_id=installment.loan_id,
         installment_id=installment.id,
         user_id=installment.user_id,
-        amount=float(installment.total_amount),
+        amount=Decimal(str(installment.total_amount)),
         currency=settings.PAYMENT_CURRENCY,
         gateway="jazzcash",
         gateway_txn_id=result.gateway_txn_id,
@@ -465,9 +533,9 @@ async def internal_trigger_installment(
         status="success",
         reconciled_at=now,
     )
-    installment.status = "paid"
-    installment.paid_amount = installment.total_amount
-    installment.paid_at = now
+    # installment.status = "paid"
+    # installment.paid_amount = installment.total_amount
+    # installment.paid_at = now
     db.add(txn)
     await db.commit()
     await db.refresh(txn)

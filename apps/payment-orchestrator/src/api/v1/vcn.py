@@ -39,6 +39,8 @@ async def issue_vcn(
         amount_pkr=Decimal(str(request_payload.amount_pkr)),
         merchant_domain=request_payload.merchant_domain,
     )
+    await db.commit()
+    await db.refresh(card)
     return VcnIssueResponse(
         vcn_id=card.id,
         order_id=card.order_id,

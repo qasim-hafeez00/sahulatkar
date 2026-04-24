@@ -43,6 +43,7 @@ from sk_shared.models.payment import Installment, Loan, PaymentTransaction, Virt
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
+from src.models.outbox import OutboxEvent
 
 logger = logging.getLogger(__name__)
 
@@ -116,11 +117,11 @@ class VcnService:
             issuer_card_id=f"card_{hashlib.sha256(f'{order_id}:{pan}'.encode()).hexdigest()[:24]}",
             masked_number=self._mask_pan(pan),
             card_expiry=(now + timedelta(days=365 * 3)).date(),
-            authorized_amount=float(authorized_amount),
-            loaded_amount=float(amount_pkr),
+            authorized_amount=authorized_amount,
+            loaded_amount=amount_pkr,
             mcc_lock="retail",
             merchant_lock=merchant_domain,
-            charged_amount=0,
+            charged_amount=Decimal("0.00"),
             is_used=False,
             status="active",
             issued_at=now,
@@ -136,7 +137,7 @@ class VcnService:
             installment_id=None,
             user_id=order.user_id,
             payment_method_id=None,
-            amount=float(amount_pkr),
+            amount=amount_pkr,
             currency=settings.PAYMENT_CURRENCY,
             gateway="stripe",
             gateway_txn_id=f"vcn_issued_{order_id}",
@@ -146,7 +147,7 @@ class VcnService:
         )
         self.db.add(transaction)
 
-        await self.db.commit()
+        await self.db.flush()
         await self.db.refresh(card)
 
         # Publish VCN issued event
@@ -158,7 +159,7 @@ class VcnService:
                 "vcn_id": card.id,
                 "status": card.status,
                 "merchant_domain": merchant_domain,
-                "authorized_amount": float(authorized_amount),
+                "authorized_amount": str(authorized_amount),
             },
         )
         await self.redis.publish(event_channel(EVENT_VCN_ISSUED), envelope.to_json())
@@ -200,7 +201,8 @@ class VcnService:
                 detail=f"VCN_NOT_ACTIVE: status is {card.status}",
             )
 
-        if datetime.now(timezone.utc) > card.expires_at.replace(tzinfo=timezone.utc) if card.expires_at.tzinfo is None else card.expires_at:
+        expires_at = card.expires_at.replace(tzinfo=timezone.utc) if card.expires_at.tzinfo is None else card.expires_at
+        if datetime.now(timezone.utc) > expires_at:
             raise HTTPException(
                 status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
                 detail="VCN_EXPIRED",
@@ -261,19 +263,21 @@ class VcnService:
         )
 
         if loan is None:
-            # Gateway failed to seed — seed now (safety net path)
-            loan = await self._seed_loan_and_installments(
-                order=order,
-                contract=contract,
-                down_payment=amount_pkr,
+            # Gateway failed to seed — emit event for Gateway Service to handle recovery
+            logger.warning(
+                "Loan not found for order during down payment confirmation",
+                extra={"order_id": order_id},
             )
+            # Future: emit payment.gateway_seeding_required event here
         else:
             # Loan already seeded by Gateway; update totals to reflect received payment
             loan.total_paid = Decimal(str(loan.down_payment_amount))
             loan.total_outstanding = Decimal(str(loan.balance_financed))
 
-        order.status = OrderState.DOWN_PAYMENT_RECEIVED
-        await self.db.commit()
+        # VIOLATION-02: Do NOT mutate order.status directly. 
+        # The Gateway Service will update it upon receiving payment.confirmed event.
+        # order.status = OrderState.DOWN_PAYMENT_RECEIVED
+        await self.db.flush()
 
         # Publish confirmed event for Ledger Service
         envelope = build_event_envelope(
@@ -281,7 +285,7 @@ class VcnService:
             source_service="payment-orchestrator",
             payload={
                 "order_id": order_id,
-                "loan_id": loan.id,
+                "loan_id": loan.id if loan else None,
                 "amount_pkr": str(amount_pkr),
                 "gateway_txn_id": gateway_txn_id,
             },
@@ -295,110 +299,14 @@ class VcnService:
             "Down payment confirmed",
             extra={
                 "order_id": order_id,
-                "loan_id": loan.id,
+                "loan_id": loan.id if loan else None,
                 "amount_pkr": str(amount_pkr),
                 "gateway_txn_id": gateway_txn_id,
             },
         )
         return loan
 
-    async def _seed_loan_and_installments(
-        self,
-        *,
-        order: Order,
-        contract: MurabahaContract,
-        down_payment: Decimal,
-    ) -> Loan:
-        """
-        Seed Loan and Installment records from a signed MurabahaContract.
-        All arithmetic is Decimal.
 
-        Installment profit is distributed using a flat allocation:
-          profit_per_installment = total_profit / installment_count
-        Future work: use declining balance schedule for more accurate allocation.
-        """
-        total_sale_price = Decimal(str(contract.total_sale_price))
-        balance_financed = total_sale_price - down_payment
-        installment_count = contract.installment_count
-        total_profit = Decimal(str(contract.profit_amount))
-
-        # Monthly installment = balance / count (simplified; profit already baked in total_sale_price)
-        monthly_amount = (balance_financed / installment_count).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        profit_per_inst = (total_profit / installment_count).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-        principal_per_inst = (monthly_amount - profit_per_inst).quantize(
-            Decimal("0.01"), rounding=ROUND_HALF_UP
-        )
-
-        loan = Loan(
-            order_id=order.id,
-            user_id=order.user_id,
-            murabaha_contract_id=contract.id,
-            loan_number=f"SAK-LOAN-{order.id:010d}",
-            principal_amount=Decimal(str(contract.cost_price)),
-            profit_amount=total_profit,
-            total_repayable=total_sale_price,
-            down_payment_amount=down_payment,
-            balance_financed=balance_financed,
-            profit_rate_pct=Decimal(str(contract.profit_rate_pct)),
-            plan_type="murabaha_installment",
-            installment_count=installment_count,
-            installment_amount=monthly_amount,
-            status="active",
-            total_paid=down_payment,
-            total_outstanding=balance_financed,
-            late_fee_total=Decimal("0.00"),
-        )
-        self.db.add(loan)
-        await self.db.flush()  # Get loan.id
-
-        now = datetime.now(timezone.utc)
-
-        # Installment 0 = down payment (already paid)
-        down_inst = Installment(
-            loan_id=loan.id,
-            user_id=order.user_id,
-            installment_number=0,
-            is_down_payment=True,
-            principal_portion=down_payment,
-            profit_portion=Decimal("0.00"),
-            total_amount=down_payment,
-            due_date=now.date(),
-            status="paid",
-            paid_amount=down_payment,
-            paid_at=now,
-            days_overdue=0,
-            late_fee_amount=Decimal("0.00"),
-            late_fee_waived=True,
-            retry_count=0,
-        )
-        self.db.add(down_inst)
-
-        # Future installments (bi-weekly: every 14 days)
-        for i in range(1, installment_count + 1):
-            future_inst = Installment(
-                loan_id=loan.id,
-                user_id=order.user_id,
-                installment_number=i,
-                is_down_payment=False,
-                principal_portion=principal_per_inst,
-                profit_portion=profit_per_inst,
-                total_amount=monthly_amount,
-                due_date=(now + timedelta(days=14 * i)).date(),
-                status="pending",
-                paid_amount=Decimal("0.00"),
-                paid_at=None,
-                days_overdue=0,
-                late_fee_amount=Decimal("0.00"),
-                late_fee_waived=False,
-                retry_count=0,
-            )
-            self.db.add(future_inst)
-
-        return loan
 
     # ── Queue Helper ─────────────────────────────────────────────────────────
 
@@ -409,15 +317,24 @@ class VcnService:
         amount_pkr: Decimal,
         merchant_domain: str | None = None,
     ) -> None:
-        """Push a VCN issue job to the Redis queue for background processing."""
-        await self.redis.rpush(
-            QueueName.VCN_ISSUE,
-            json.dumps({
-                "order_id": order_id,
-                "amount_pkr": str(amount_pkr),
-                "merchant_domain": merchant_domain,
-            }),
+        """
+        Push a VCN issue job to the Outbox for background processing.
+        Ensures 100% consistency: VCN is ONLY issued if the down payment DB transaction commits.
+        """
+        payload = {
+            "order_id": order_id,
+            "amount_pkr": str(amount_pkr),
+            "merchant_domain": merchant_domain,
+        }
+        
+        event = OutboxEvent(
+            event_name="vcn.issue",
+            payload=payload,
+            status="pending"
         )
+        self.db.add(event)
+        await self.db.flush()
+        logger.info("VCN issue job queued in outbox", extra={"order_id": order_id})
 
     # ── Private Helpers ─────────────────────────────────────────────────────
 

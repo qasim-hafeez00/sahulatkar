@@ -28,7 +28,9 @@ from src.schemas.payments import WebhookAck
 from src.services.jazzcash import JazzCashClient
 from src.services.raast import RaastClient
 from src.services.safepay import SafepayClient
+import stripe
 from src.services.vcn import VcnService
+from src.orchestration.vcn_orchestrator import VcnOrchestrator
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhooks"])
@@ -83,6 +85,7 @@ async def safepay_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         merchant_domain=event.get("merchant_domain"),
     )
+    await db.commit()
 
     WEBHOOK_RECEIVED_TOTAL.labels(gateway="safepay", outcome="processed").inc()
     logger.info("SafePay webhook processed", extra={"order_id": event["order_id"]})
@@ -123,6 +126,7 @@ async def jazzcash_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         merchant_domain=None,
     )
+    await db.commit()
 
     WEBHOOK_RECEIVED_TOTAL.labels(gateway="jazzcash", outcome="processed").inc()
     logger.info("JazzCash webhook processed", extra={"order_id": event["order_id"]})
@@ -171,7 +175,52 @@ async def raast_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         merchant_domain=None,
     )
+    await db.commit()
 
     WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast", outcome="processed").inc()
     logger.info("Raast webhook processed", extra={"order_id": event["order_id"]})
+    return WebhookAck(status="ok")
+
+
+@router.post("/webhooks/stripe", response_model=WebhookAck)
+async def stripe_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """
+    Stripe Issuing webhook handler.
+    Tracks VCN authorizations and transactions.
+    """
+    payload = await request.body()
+    sig_header = request.headers.get("Stripe-Signature")
+    endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
+
+    if not endpoint_secret:
+        logger.warning("STRIPE_WEBHOOK_SECRET not configured, skipping verification")
+        # In dev, we might skip signature verification if secret is missing
+        import json
+        event = json.loads(payload)
+    else:
+        try:
+            event = stripe.Webhook.construct_event(
+                payload, sig_header, endpoint_secret
+            )
+        except ValueError:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_PAYLOAD")
+        except stripe.error.SignatureVerificationError:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
+
+    # Deduplication
+    if sig_header and not await _dedupe_webhook(redis, payload, sig_header):
+        return WebhookAck(status="duplicate")
+
+    orchestrator = VcnOrchestrator(db)
+    # Stripe events have type and data.object
+    await orchestrator.handle_stripe_event(event["type"], event["data"]["object"])
+    
+    await db.commit()
+    
+    WEBHOOK_RECEIVED_TOTAL.labels(gateway="stripe", outcome="processed").inc()
+    logger.info(f"Stripe webhook {event['type']} processed")
     return WebhookAck(status="ok")

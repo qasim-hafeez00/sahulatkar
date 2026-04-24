@@ -86,8 +86,15 @@ class VcnIssueWorker:
                 )
                 if retry_count < settings.DLQ_MAX_RETRIES:
                     payload["_retry_count"] = retry_count + 1
+                    # Exponential backoff: 2^retry * 5 seconds (5, 10, 20, 40...)
+                    backoff_delay = 5 * (2 ** retry_count)
+                    logger.info(
+                        "VCN job waiting for backoff", 
+                        extra={"order_id": order_id, "retry_count": retry_count + 1, "delay_sec": backoff_delay}
+                    )
+                    await asyncio.sleep(backoff_delay)
                     await redis.redis.lpush(QueueName.VCN_ISSUE, json.dumps(payload))
-                    logger.info("VCN job re-queued for retry", extra={"order_id": order_id, "retry_count": retry_count + 1})
+                    logger.info("VCN job re-queued after backoff", extra={"order_id": order_id})
                 else:
                     await redis.redis.lpush(DLQ_KEY, raw_payload)
                     logger.error(

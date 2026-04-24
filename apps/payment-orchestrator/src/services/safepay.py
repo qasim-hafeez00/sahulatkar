@@ -75,6 +75,51 @@ class SafepayClient:
             payload=payload,
         )
 
+    def authorize_payment(
+        self,
+        *,
+        gateway_txn_id: str,
+        amount_pkr: Decimal,
+    ) -> dict[str, Any]:
+        """
+        Explicitly authorize a payment (reserve funds).
+        In SafePay, this is usually part of the checkout flow, but we can verify it here.
+        """
+        logger.info(
+            "SafePay payment authorized (mock)",
+            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
+        )
+        return {"status": "authorized", "gateway_txn_id": gateway_txn_id}
+
+    def capture_payment(
+        self,
+        *,
+        gateway_txn_id: str,
+        amount_pkr: Decimal,
+    ) -> dict[str, Any]:
+        """
+        Capture a previously authorized payment.
+        """
+        logger.info(
+            "SafePay payment captured (mock)",
+            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
+        )
+        return {"status": "captured", "gateway_txn_id": gateway_txn_id}
+
+    def void_payment(
+        self,
+        *,
+        gateway_txn_id: str,
+    ) -> dict[str, Any]:
+        """
+        Void an authorized but uncaptured payment.
+        """
+        logger.info(
+            "SafePay payment voided (mock)",
+            extra={"gateway_txn_id": gateway_txn_id},
+        )
+        return {"status": "voided", "gateway_txn_id": gateway_txn_id}
+
     def initiate_refund(
         self,
         *,

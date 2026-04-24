@@ -26,9 +26,43 @@ from sk_shared.database import SessionLocal
 from src.config import settings
 from src.core.logging import setup_logging
 from src.schemas.reconciliation import ReconciliationImportRequest, ReconciliationRecord
+from src.schemas.reconciliation import ReconciliationImportRequest, ReconciliationRecord
 from src.services.reconciliation import ReconciliationService
 
-logger = logging.getLogger(__name__)
+
+class SettlementFetcher:
+    """
+    Handles fetching settlement files from gateway providers.
+    Supports SFTP (JazzCash) and API-based polling (SafePay/Stripe).
+    """
+
+    async def fetch_settlement(self, gateway: str, settlement_date: date) -> list[ReconciliationRecord]:
+        """
+        Main entry point for fetching settlement data.
+        """
+        if gateway == "jazzcash":
+            return await self._fetch_jazzcash_sftp(settlement_date)
+        elif gateway == "safepay":
+            return await self._fetch_safepay_api(settlement_date)
+        
+        logger.warning(f"No automated fetcher implemented for gateway: {gateway}")
+        return []
+
+    async def _fetch_jazzcash_sftp(self, settlement_date: date) -> list[ReconciliationRecord]:
+        """
+        Mock SFTP fetch for JazzCash settlement.
+        """
+        logger.info(f"Fetching JazzCash settlement via SFTP for {settlement_date}")
+        # In production: use paramiko or asyncssh to download CSV from JazzCash SFTP
+        return []
+
+    async def _fetch_safepay_api(self, settlement_date: date) -> list[ReconciliationRecord]:
+        """
+        Mock API fetch for SafePay settlement.
+        """
+        logger.info(f"Fetching SafePay settlement via API for {settlement_date}")
+        # In production: use httpx to call SafePay's reporting API
+        return []
 
 
 async def run_reconciliation(gateway: str, settlement_date: date) -> None:
@@ -38,23 +72,28 @@ async def run_reconciliation(gateway: str, settlement_date: date) -> None:
     Settlement file path: {RECONCILIATION_AUDIT_DIR}/settlement_{gateway}_{date}.json
     File format: list of ReconciliationRecord JSON objects.
     """
-    settlement_file = Path(settings.RECONCILIATION_AUDIT_DIR) / f"settlement_{gateway}_{settlement_date}.json"
-    if not settlement_file.exists():
-        logger.warning("Settlement file not found", extra={"file": str(settlement_file)})
-        return
+    fetcher = SettlementFetcher()
+    records = await fetcher.fetch_settlement(gateway, settlement_date)
+    
+    if not records:
+        # Fallback to local file ingestion (GAP-08 MVP path)
+        settlement_file = Path(settings.RECONCILIATION_AUDIT_DIR) / f"settlement_{gateway}_{settlement_date}.json"
+        if not settlement_file.exists():
+            logger.warning("Settlement file not found and fetcher returned no records", extra={"file": str(settlement_file)})
+            return
 
-    with open(settlement_file) as f:
-        raw = json.load(f)
+        with open(settlement_file) as f:
+            raw = json.load(f)
 
-    records = [
-        ReconciliationRecord(
-            gateway_txn_id=r["gateway_txn_id"],
-            amount_pkr=Decimal(str(r["amount_pkr"])),
-            status=r["status"],
-            settled_at=r["settled_at"],
-        )
-        for r in raw
-    ]
+        records = [
+            ReconciliationRecord(
+                gateway_txn_id=r["gateway_txn_id"],
+                amount_pkr=Decimal(str(r["amount_pkr"])),
+                status=r["status"],
+                settled_at=r["settled_at"],
+            )
+            for r in raw
+        ]
 
     request = ReconciliationImportRequest(
         gateway=gateway,
