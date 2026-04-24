@@ -1,3 +1,14 @@
+"""
+VCN API endpoints.
+
+External endpoints (JWT auth):
+  - POST /payments/vcn/issue         — Issue VCN for an order
+  - POST /payments/vcn/{id}/void     — Void a VCN
+  - GET  /payments/vcn/{order_id}/status — VCN status for an order
+
+Internal-only endpoint (X-Internal-Token):
+  - GET  /internal/vcn/{order_id}/decrypt — Return plaintext PAN/CVV for Product Service checkout agent
+"""
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -6,9 +17,11 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import VirtualCard
 
-from src.core.dependencies import get_db, get_redis
-from src.schemas.vcn import VcnIssueRequest, VcnIssueResponse, VcnStatusResponse
+from src.core.dependencies import get_db, get_redis, require_internal_token
+from src.core.metrics import VCN_VOID_TOTAL
+from src.schemas.vcn import VcnDecryptResponse, VcnIssueRequest, VcnIssueResponse, VcnStatusResponse
 from src.services.vcn import VcnService
+from decimal import Decimal
 
 router = APIRouter(prefix="/payments", tags=["vcn"])
 
@@ -19,10 +32,11 @@ async def issue_vcn(
     request: Request,
     db: AsyncSession = Depends(get_db),
 ):
+    """Issue a VCN for an order. Requires CONTRACTS_SIGNED state."""
     service = VcnService(db, get_redis(request))
     card = await service.issue_vcn(
         order_id=request_payload.order_id,
-        amount_pkr=request_payload.amount_pkr,
+        amount_pkr=Decimal(str(request_payload.amount_pkr)),
         merchant_domain=request_payload.merchant_domain,
     )
     return VcnIssueResponse(
@@ -39,19 +53,37 @@ async def issue_vcn(
 
 
 @router.post("/vcn/{vcn_id}/void")
-async def void_vcn(vcn_id: int, reason: str = "manual_void", db: AsyncSession = Depends(get_db)):
-    card = await db.scalar(select(VirtualCard).where(VirtualCard.id == vcn_id, VirtualCard.deleted_at.is_(None)))
+async def void_vcn(
+    vcn_id: int,
+    reason: str = "manual_void",
+    db: AsyncSession = Depends(get_db),
+):
+    """Void a VCN. Blocked VCN cannot be re-activated."""
+    card = await db.scalar(
+        select(VirtualCard).where(VirtualCard.id == vcn_id, VirtualCard.deleted_at.is_(None))
+    )
     if card is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VCN_NOT_FOUND")
+    if card.status == "voided":
+        return {"status": "already_voided", "vcn_id": vcn_id}
+
     card.status = "voided"
     card.void_reason = reason
     await db.commit()
-    return {"status": "voided", "vcn_id": vcn_id}
+
+    VCN_VOID_TOTAL.labels(reason=reason).inc()
+    return {"status": "voided", "vcn_id": vcn_id, "reason": reason}
 
 
 @router.get("/vcn/{order_id}/status", response_model=VcnStatusResponse)
 async def vcn_status(order_id: int, db: AsyncSession = Depends(get_db)):
-    card = await db.scalar(select(VirtualCard).where(VirtualCard.order_id == order_id, VirtualCard.deleted_at.is_(None)))
+    """Get VCN status for a given order."""
+    card = await db.scalar(
+        select(VirtualCard).where(
+            VirtualCard.order_id == order_id,
+            VirtualCard.deleted_at.is_(None),
+        )
+    )
     if card is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VCN_NOT_FOUND")
     return VcnStatusResponse(
@@ -61,3 +93,22 @@ async def vcn_status(order_id: int, db: AsyncSession = Depends(get_db)):
         issued_at=card.issued_at,
         expires_at=card.expires_at,
     )
+
+
+@router.get("/internal/vcn/{order_id}/decrypt", response_model=VcnDecryptResponse)
+async def internal_decrypt_vcn(
+    order_id: int,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_internal_token),
+):
+    """
+    INTERNAL ONLY — Decrypt and return plaintext PAN/CVV for the checkout agent.
+
+    This endpoint is NEVER called by the customer frontend.
+    Only the Product Service (checkout agent) calls this with X-Internal-Token.
+    The response must NOT be logged in full at INFO level.
+    """
+    service = VcnService(db, get_redis(request))
+    result = await service.decrypt_vcn(order_id)
+    return VcnDecryptResponse(**result)

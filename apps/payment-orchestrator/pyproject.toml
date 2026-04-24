@@ -5,12 +5,16 @@ build-backend = "hatchling.build"
 [project]
 name = "sk-payment-orchestrator"
 version = "0.1.0"
-description = "payment-orchestrator for SahulatKar"
+description = "Payment orchestrator for SahulatKar — VCN lifecycle, gateway integrations, reconciliation"
 requires-python = ">=3.12"
 dependencies = [
     "fastapi>=0.110.0",
     "uvicorn[standard]>=0.29.0",
-    "sk-shared"
+    "httpx>=0.27.0",
+    "cryptography>=42.0.0",
+    "prometheus-client>=0.20.0",
+    "python-json-logger>=2.0.7",
+    "sk-shared",
 ]
 
 [project.optional-dependencies]
@@ -21,10 +25,19 @@ test = [
     "fakeredis>=2.23.0",
     "aiosqlite>=0.20.0",
     "httpx>=0.27.0",
+    "respx>=0.21.0",
 ]
+
+[project.scripts]
+vcn-worker        = "src.workers.vcn_issue_worker:main"
+recon-worker      = "src.workers.reconciliation_worker:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
 pythonpath = ["src"]
+
+[tool.coverage.run]
+source = ["src"]
+omit = ["tests/*", "src/workers/*"]

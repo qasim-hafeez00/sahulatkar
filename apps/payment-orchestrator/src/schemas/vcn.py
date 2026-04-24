@@ -14,11 +14,27 @@ class VcnIssueResponse(BaseModel):
     vcn_id: int
     order_id: int
     status: str
-    pan: str
+    pan: str                  # Masked: **** **** **** XXXX
     expiry_month: str
     expiry_year: str
-    cvv: str
+    cvv: str                  # Always "***" in this response
     issued_at: datetime
+    expires_at: datetime
+
+
+class VcnDecryptResponse(BaseModel):
+    """
+    Only returned to authenticated internal callers (X-Internal-Token).
+    Used by the Product Service checkout agent to load the VCN into the browser.
+    Never exposed to external/user-facing endpoints.
+    """
+    vcn_id: int
+    order_id: int
+    pan: str                  # Full 16-digit PAN
+    expiry_month: str
+    expiry_year: str
+    cvv: str                  # 3-digit CVV
+    cardholder_name: str      # SahulatKar Agent
     expires_at: datetime
 
 

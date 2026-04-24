@@ -55,12 +55,12 @@ class Installment(Base, TimestampMixin, SoftDeleteMixin):
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     paid_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
-    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    paid_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     days_overdue: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     late_fee_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     late_fee_waived: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
     retry_count: Mapped[int] = mapped_column(SmallInteger, nullable=False, default=0)
-    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    next_retry_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     loan: Mapped["Loan"] = relationship("Loan", back_populates="installments")
     payment_transactions: Mapped[list["PaymentTransaction"]] = relationship("PaymentTransaction", back_populates="installment")
@@ -114,7 +114,7 @@ class PaymentTransaction(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     failure_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     retry_of_txn_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("payment_transactions.id", ondelete="SET NULL"), nullable=True)
     settlement_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     loan: Mapped[Optional["Loan"]] = relationship("Loan", back_populates="payment_transactions")
     installment: Mapped[Optional["Installment"]] = relationship("Installment", back_populates="payment_transactions")
@@ -140,7 +140,7 @@ class Reconciliation(Base, UUIDMixin, TimestampMixin):
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="open")
     period_key: Mapped[str] = mapped_column(String(10), nullable=False)
     reconciled_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("admin_users.id", ondelete="SET NULL"), nullable=True)
-    reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    reconciled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
 
     items: Mapped[list["ReconciliationItem"]] = relationship(
@@ -166,7 +166,7 @@ class ReconciliationItem(Base):
     actual_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="pending")
     discrepancy_note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     reconciliation: Mapped["Reconciliation"] = relationship("Reconciliation", back_populates="items")
 
@@ -192,12 +192,12 @@ class VirtualCard(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     merchant_lock: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     charged_amount: Mapped[float] = mapped_column(Numeric(14, 2), nullable=False, default=0)
     is_used: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    used_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     status: Mapped[str] = mapped_column(String(20), nullable=False, default="active")
-    voided_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    voided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     void_reason: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
-    issued_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     encrypted_pan: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     encrypted_cvv: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
 

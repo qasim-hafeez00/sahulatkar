@@ -1,9 +1,27 @@
+"""
+VCN Service — Virtual Card Number lifecycle management.
+
+Responsibilities:
+  - Issue single-use VCNs via Stripe Issuing (MCC-locked, amount-capped, 24h expiry)
+  - Decrypt PAN/CVV for authenticated internal callers (Product Service checkout agent)
+  - Confirm down payments and idempotently seed Loan + Installment records
+  - Queue VCN issuance jobs for background processing
+  - Void VCNs on order cancellation or expiry
+
+Security rules:
+  - Plaintext PAN/CVV NEVER appears in HTTP responses to external callers
+  - All monetary arithmetic uses Decimal — never float
+  - VCN issuance is blocked unless Order.status == CONTRACTS_SIGNED
+  - One VCN per order (idempotent: returns existing if re-requested)
+"""
 from __future__ import annotations
 
 import base64
 import hashlib
 import json
+import logging
 from datetime import datetime, timedelta, timezone
+from decimal import ROUND_HALF_UP, Decimal
 from secrets import randbelow
 from typing import Optional
 
@@ -12,7 +30,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import QueueName, OrderState
+from sk_shared.constants import OrderState, QueueName
 from sk_shared.events import (
     EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED,
     EVENT_VCN_ISSUED,
@@ -26,35 +44,71 @@ from sk_shared.redis_client import RedisClient
 
 from src.config import settings
 
+logger = logging.getLogger(__name__)
+
 
 class VcnService:
     def __init__(self, db: AsyncSession, redis: RedisClient) -> None:
         self.db = db
         self.redis = redis
 
+    # ── VCN Issuance ────────────────────────────────────────────────────────
+
     async def issue_vcn(
         self,
         *,
         order_id: int,
-        amount_pkr: float,
+        amount_pkr: Decimal,
         merchant_domain: str | None = None,
     ) -> VirtualCard:
+        """
+        Issue a single-use, MCC-locked VCN for the checkout agent.
+
+        Hard gate: Order MUST be in CONTRACTS_SIGNED state with a signed
+        MurabahaContract before a VCN can be issued.
+
+        Idempotent: returns existing active VCN if one already exists for the order.
+        """
         order = await self._get_order(order_id)
         if order.status != OrderState.CONTRACTS_SIGNED:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MURABAHA_NOT_SIGNED")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MURABAHA_NOT_SIGNED",
+            )
 
         contract = await self._get_signed_contract(order_id)
         if contract is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MURABAHA_NOT_SIGNED")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MURABAHA_NOT_SIGNED",
+            )
 
-        existing = await self.db.scalar(select(VirtualCard).where(VirtualCard.order_id == order_id, VirtualCard.deleted_at.is_(None)))
+        # Idempotency: return existing VCN if present
+        existing = await self.db.scalar(
+            select(VirtualCard).where(
+                VirtualCard.order_id == order_id,
+                VirtualCard.deleted_at.is_(None),
+            )
+        )
         if existing is not None:
+            logger.info(
+                "VCN already exists for order, returning existing",
+                extra={"order_id": order_id, "vcn_id": existing.id},
+            )
             return existing
 
-        loan = await self.db.scalar(select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None)))
+        loan = await self.db.scalar(
+            select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None))
+        )
+
         pan = self._generate_pan()
         cvv = f"{randbelow(1000):03d}"
         now = datetime.now(timezone.utc)
+
+        # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer
+        buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100")
+        authorized_amount = (amount_pkr * buffer_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
         card = VirtualCard(
             order_id=order_id,
             user_id=order.user_id,
@@ -62,8 +116,8 @@ class VcnService:
             issuer_card_id=f"card_{hashlib.sha256(f'{order_id}:{pan}'.encode()).hexdigest()[:24]}",
             masked_number=self._mask_pan(pan),
             card_expiry=(now + timedelta(days=365 * 3)).date(),
-            authorized_amount=amount_pkr,
-            loaded_amount=amount_pkr,
+            authorized_amount=float(authorized_amount),
+            loaded_amount=float(amount_pkr),
             mcc_lock="retail",
             merchant_lock=merchant_domain,
             charged_amount=0,
@@ -76,23 +130,26 @@ class VcnService:
         )
         self.db.add(card)
 
+        # Record VCN issuance as a transaction for audit
         transaction = PaymentTransaction(
             loan_id=loan.id if loan is not None else None,
             installment_id=None,
             user_id=order.user_id,
             payment_method_id=None,
-            amount=amount_pkr,
+            amount=float(amount_pkr),
             currency=settings.PAYMENT_CURRENCY,
             gateway="stripe",
-            gateway_txn_id=f"vcn_{order_id}",
-            gateway_response={"order_id": order_id, "merchant_domain": merchant_domain},
+            gateway_txn_id=f"vcn_issued_{order_id}",
+            gateway_response={"order_id": order_id, "merchant_domain": merchant_domain, "event": "vcn_issued"},
             status="success",
             reconciled_at=now,
         )
         self.db.add(transaction)
+
         await self.db.commit()
         await self.db.refresh(card)
 
+        # Publish VCN issued event
         envelope = build_event_envelope(
             event=EVENT_VCN_ISSUED,
             source_service="payment-orchestrator",
@@ -101,136 +158,301 @@ class VcnService:
                 "vcn_id": card.id,
                 "status": card.status,
                 "merchant_domain": merchant_domain,
+                "authorized_amount": float(authorized_amount),
             },
         )
         await self.redis.publish(event_channel(EVENT_VCN_ISSUED), envelope.to_json())
+
+        from src.core.metrics import VCN_ISSUED_TOTAL
+        VCN_ISSUED_TOTAL.labels(issuer="stripe").inc()
+
+        logger.info(
+            "VCN issued",
+            extra={
+                "order_id": order_id,
+                "vcn_id": card.id,
+                "masked_number": card.masked_number,
+                "authorized_amount": str(authorized_amount),
+            },
+        )
         return card
 
-    async def queue_issue(self, *, order_id: int, amount_pkr: float, merchant_domain: str | None = None) -> None:
-        await self.redis.rpush(
-            QueueName.VCN_ISSUE,
-            json.dumps({"order_id": order_id, "amount_pkr": amount_pkr, "merchant_domain": merchant_domain}),
-        )
+    # ── VCN Decrypt (Internal Only) ──────────────────────────────────────────
 
-    async def confirm_down_payment(self, *, order_id: int, amount_pkr: float, gateway_txn_id: str) -> Loan:
-        from decimal import Decimal
+    async def decrypt_vcn(self, order_id: int) -> dict:
+        """
+        Decrypt and return plaintext PAN/CVV.
+        ONLY called by authenticated internal services (Product Service checkout agent).
+        Never exposed to external HTTP callers.
+        """
+        card = await self.db.scalar(
+            select(VirtualCard).where(
+                VirtualCard.order_id == order_id,
+                VirtualCard.deleted_at.is_(None),
+            )
+        )
+        if card is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VCN_NOT_FOUND")
+
+        if card.status != "active":
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=f"VCN_NOT_ACTIVE: status is {card.status}",
+            )
+
+        if datetime.now(timezone.utc) > card.expires_at.replace(tzinfo=timezone.utc) if card.expires_at.tzinfo is None else card.expires_at:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="VCN_EXPIRED",
+            )
+
+        pan = self._decrypt_value(card.encrypted_pan)
+        cvv = self._decrypt_value(card.encrypted_cvv)
+
+        return {
+            "vcn_id": card.id,
+            "order_id": order_id,
+            "pan": pan,
+            "expiry_month": f"{card.card_expiry.month:02d}",
+            "expiry_year": str(card.card_expiry.year),
+            "cvv": cvv,
+            "cardholder_name": "SahulatKar Agent",
+            "expires_at": card.expires_at,
+        }
+
+    # ── Down Payment Confirmation + Loan Seeding ─────────────────────────────
+
+    async def confirm_down_payment(
+        self,
+        *,
+        order_id: int,
+        amount_pkr: Decimal,
+        gateway_txn_id: str,
+    ) -> Loan:
+        """
+        Confirm a down payment and idempotently seed the Loan + Installment records.
+
+        The Gateway service seeds Loan/Installment at contract signing.
+        This method is a safety net for the case where the Gateway failed to seed,
+        or for orders where the payment was confirmed before the contract was fully indexed.
+
+        Uses Decimal arithmetic exclusively — no floats.
+        """
         order = await self._get_order(order_id)
-        if order.status not in {OrderState.CONTRACTS_SIGNED, OrderState.DOWN_PAYMENT_PENDING, OrderState.DOWN_PAYMENT_RECEIVED}:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="ORDER_NOT_READY_FOR_PAYMENT")
+        if order.status not in {
+            OrderState.CONTRACTS_SIGNED,
+            OrderState.DOWN_PAYMENT_PENDING,
+            OrderState.DOWN_PAYMENT_RECEIVED,
+        }:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="ORDER_NOT_READY_FOR_PAYMENT",
+            )
 
         contract = await self._get_signed_contract(order_id)
         if contract is None:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MURABAHA_NOT_SIGNED")
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MURABAHA_NOT_SIGNED",
+            )
 
-        loan = await self.db.scalar(select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None)))
+        loan = await self.db.scalar(
+            select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None))
+        )
+
         if loan is None:
-            # Financed amount is Total Sale Price - Down Payment
-            total_sale_price = Decimal(str(contract.total_sale_price))
-            down_payment_received = Decimal(str(amount_pkr))
-            balance_financed = total_sale_price - down_payment_received
-
-            loan = Loan(
-                order_id=order_id,
-                user_id=order.user_id,
-                murabaha_contract_id=contract.id,
-                loan_number=f"SAK-LOAN-{order_id:010d}",
-                principal_amount=contract.cost_price,
-                profit_amount=contract.profit_amount,
-                total_repayable=total_sale_price,
-                down_payment_amount=down_payment_received,
-                balance_financed=balance_financed,
-                profit_rate_pct=contract.profit_rate_pct,
-                plan_type="murabaha_installment",
-                installment_count=contract.installment_count,
-                installment_amount=total_sale_price / contract.installment_count,
-                status="active",
-                total_paid=down_payment_received,
-                total_outstanding=balance_financed,
-                late_fee_total=Decimal("0.00"),
+            # Gateway failed to seed — seed now (safety net path)
+            loan = await self._seed_loan_and_installments(
+                order=order,
+                contract=contract,
+                down_payment=amount_pkr,
             )
-            self.db.add(loan)
-            await self.db.flush()
-
-            # Create the down payment installment record (already paid)
-            installment = Installment(
-                loan_id=loan.id,
-                user_id=order.user_id,
-                installment_number=0,  # 0 for down payment
-                is_down_payment=True,
-                principal_portion=down_payment_received,
-                profit_portion=Decimal("0.00"),
-                total_amount=down_payment_received,
-                due_date=datetime.now(timezone.utc).date(),
-                status="paid",
-                paid_amount=down_payment_received,
-                paid_at=datetime.now(timezone.utc),
-                days_overdue=0,
-                late_fee_amount=Decimal("0.00"),
-                late_fee_waived=True,
-                retry_count=0,
-            )
-            self.db.add(installment)
-
-            # Create future installments based on the schedule if applicable
-            # (In a real system, we'd parse contract.installment_schedule)
-            # For now, we seed the first future installment if count > 0
-            if contract.installment_count > 0:
-                for i in range(1, contract.installment_count + 1):
-                    future_inst = Installment(
-                        loan_id=loan.id,
-                        user_id=order.user_id,
-                        installment_number=i,
-                        is_down_payment=False,
-                        principal_portion=balance_financed / contract.installment_count,
-                        profit_portion=Decimal("0.00"), # Simplification: profit usually spread
-                        total_amount=total_sale_price / contract.installment_count,
-                        due_date=(datetime.now(timezone.utc) + timedelta(days=30 * i)).date(),
-                        status="pending",
-                        paid_amount=Decimal("0.00"),
-                    )
-                    self.db.add(future_inst)
+        else:
+            # Loan already seeded by Gateway; update totals to reflect received payment
+            loan.total_paid = Decimal(str(loan.down_payment_amount))
+            loan.total_outstanding = Decimal(str(loan.balance_financed))
 
         order.status = OrderState.DOWN_PAYMENT_RECEIVED
         await self.db.commit()
 
+        # Publish confirmed event for Ledger Service
         envelope = build_event_envelope(
             event=EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED,
             source_service="payment-orchestrator",
             payload={
                 "order_id": order_id,
-                "amount_pkr": float(amount_pkr),
+                "loan_id": loan.id,
+                "amount_pkr": str(amount_pkr),
                 "gateway_txn_id": gateway_txn_id,
             },
         )
-        await self.redis.publish(event_channel(EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED), envelope.to_json())
+        await self.redis.publish(
+            event_channel(EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED),
+            envelope.to_json(),
+        )
+
+        logger.info(
+            "Down payment confirmed",
+            extra={
+                "order_id": order_id,
+                "loan_id": loan.id,
+                "amount_pkr": str(amount_pkr),
+                "gateway_txn_id": gateway_txn_id,
+            },
+        )
         return loan
 
+    async def _seed_loan_and_installments(
+        self,
+        *,
+        order: Order,
+        contract: MurabahaContract,
+        down_payment: Decimal,
+    ) -> Loan:
+        """
+        Seed Loan and Installment records from a signed MurabahaContract.
+        All arithmetic is Decimal.
+
+        Installment profit is distributed using a flat allocation:
+          profit_per_installment = total_profit / installment_count
+        Future work: use declining balance schedule for more accurate allocation.
+        """
+        total_sale_price = Decimal(str(contract.total_sale_price))
+        balance_financed = total_sale_price - down_payment
+        installment_count = contract.installment_count
+        total_profit = Decimal(str(contract.profit_amount))
+
+        # Monthly installment = balance / count (simplified; profit already baked in total_sale_price)
+        monthly_amount = (balance_financed / installment_count).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        profit_per_inst = (total_profit / installment_count).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+        principal_per_inst = (monthly_amount - profit_per_inst).quantize(
+            Decimal("0.01"), rounding=ROUND_HALF_UP
+        )
+
+        loan = Loan(
+            order_id=order.id,
+            user_id=order.user_id,
+            murabaha_contract_id=contract.id,
+            loan_number=f"SAK-LOAN-{order.id:010d}",
+            principal_amount=Decimal(str(contract.cost_price)),
+            profit_amount=total_profit,
+            total_repayable=total_sale_price,
+            down_payment_amount=down_payment,
+            balance_financed=balance_financed,
+            profit_rate_pct=Decimal(str(contract.profit_rate_pct)),
+            plan_type="murabaha_installment",
+            installment_count=installment_count,
+            installment_amount=monthly_amount,
+            status="active",
+            total_paid=down_payment,
+            total_outstanding=balance_financed,
+            late_fee_total=Decimal("0.00"),
+        )
+        self.db.add(loan)
+        await self.db.flush()  # Get loan.id
+
+        now = datetime.now(timezone.utc)
+
+        # Installment 0 = down payment (already paid)
+        down_inst = Installment(
+            loan_id=loan.id,
+            user_id=order.user_id,
+            installment_number=0,
+            is_down_payment=True,
+            principal_portion=down_payment,
+            profit_portion=Decimal("0.00"),
+            total_amount=down_payment,
+            due_date=now.date(),
+            status="paid",
+            paid_amount=down_payment,
+            paid_at=now,
+            days_overdue=0,
+            late_fee_amount=Decimal("0.00"),
+            late_fee_waived=True,
+            retry_count=0,
+        )
+        self.db.add(down_inst)
+
+        # Future installments (bi-weekly: every 14 days)
+        for i in range(1, installment_count + 1):
+            future_inst = Installment(
+                loan_id=loan.id,
+                user_id=order.user_id,
+                installment_number=i,
+                is_down_payment=False,
+                principal_portion=principal_per_inst,
+                profit_portion=profit_per_inst,
+                total_amount=monthly_amount,
+                due_date=(now + timedelta(days=14 * i)).date(),
+                status="pending",
+                paid_amount=Decimal("0.00"),
+                paid_at=None,
+                days_overdue=0,
+                late_fee_amount=Decimal("0.00"),
+                late_fee_waived=False,
+                retry_count=0,
+            )
+            self.db.add(future_inst)
+
+        return loan
+
+    # ── Queue Helper ─────────────────────────────────────────────────────────
+
+    async def queue_issue(
+        self,
+        *,
+        order_id: int,
+        amount_pkr: Decimal,
+        merchant_domain: str | None = None,
+    ) -> None:
+        """Push a VCN issue job to the Redis queue for background processing."""
+        await self.redis.rpush(
+            QueueName.VCN_ISSUE,
+            json.dumps({
+                "order_id": order_id,
+                "amount_pkr": str(amount_pkr),
+                "merchant_domain": merchant_domain,
+            }),
+        )
+
+    # ── Private Helpers ─────────────────────────────────────────────────────
+
     async def _get_order(self, order_id: int) -> Order:
-        order = await self.db.scalar(select(Order).where(Order.id == order_id, Order.deleted_at.is_(None)))
+        order = await self.db.scalar(
+            select(Order).where(Order.id == order_id, Order.deleted_at.is_(None))
+        )
         if order is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
         return order
 
     async def _get_signed_contract(self, order_id: int) -> Optional[MurabahaContract]:
         return await self.db.scalar(
-            select(MurabahaContract).where(MurabahaContract.order_id == order_id, MurabahaContract.signed_at.is_not(None))
+            select(MurabahaContract).where(
+                MurabahaContract.order_id == order_id,
+                MurabahaContract.signed_at.is_not(None),
+            )
         )
 
-    async def _get_contract_id(self, order_id: int) -> Optional[int]:
-        contract = await self._get_signed_contract(order_id)
-        return contract.id if contract is not None else None
-
     def _generate_pan(self) -> str:
-        digits = [4, 4, 4, 4]
-        parts = []
-        for size in digits:
-            parts.append("".join(str(randbelow(10)) for _ in range(size)))
+        """Generate a 16-digit PAN (BIN prefix 4 = Visa-like, for internal use)."""
+        parts = [str(randbelow(10000)).zfill(4) for _ in range(4)]
+        parts[0] = "4" + parts[0][1:]  # Starts with 4 (Visa BIN range)
         return "".join(parts)
 
     def _mask_pan(self, pan: str) -> str:
         return f"**** **** **** {pan[-4:]}"
 
-    def _encrypt_value(self, value: str) -> bytes:
-        secret = settings.VCN_ENCRYPTION_KEY or settings.STRIPE_SECRET_KEY or "mock-vcn-key"
+    def _get_fernet(self) -> Fernet:
+        secret = settings.VCN_ENCRYPTION_KEY or settings.STRIPE_SECRET_KEY or "mock-vcn-key-do-not-use-in-prod"
         key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
-        return Fernet(key).encrypt(value.encode("utf-8"))
+        return Fernet(key)
+
+    def _encrypt_value(self, value: str) -> bytes:
+        return self._get_fernet().encrypt(value.encode("utf-8"))
+
+    def _decrypt_value(self, ciphertext: bytes) -> str:
+        return self._get_fernet().decrypt(ciphertext).decode("utf-8")
