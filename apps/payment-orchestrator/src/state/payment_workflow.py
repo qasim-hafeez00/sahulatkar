@@ -4,6 +4,7 @@ from typing import Dict, Set
 
 class PaymentStatus(str, Enum):
     INITIATED = "initiated"
+    PENDING = "pending"            # Async gateways: awaiting webhook (SafePay redirect, Raast IBFT)
     AUTHORIZED = "authorized"
     CAPTURED = "captured"
     EXPIRED = "expired"
@@ -22,10 +23,16 @@ class PaymentWorkflowError(Exception):
 # Legal state transitions matrix
 _TRANSITIONS: Dict[PaymentStatus, Set[PaymentStatus]] = {
     PaymentStatus.INITIATED: {
+        PaymentStatus.PENDING,       # Async gateway redirect issued (SafePay, Raast)
         PaymentStatus.AUTHORIZED,
-        PaymentStatus.CAPTURED,  # For sync gateways
+        PaymentStatus.CAPTURED,      # Sync gateways (JazzCash direct charge)
         PaymentStatus.EXPIRED,
         PaymentStatus.FAILED,
+    },
+    PaymentStatus.PENDING: {
+        PaymentStatus.CAPTURED,      # Webhook confirms payment cleared
+        PaymentStatus.FAILED,        # Webhook signals failure
+        PaymentStatus.EXPIRED,       # Session TTL exceeded before webhook arrived
     },
     PaymentStatus.AUTHORIZED: {
         PaymentStatus.CAPTURED,
@@ -33,12 +40,12 @@ _TRANSITIONS: Dict[PaymentStatus, Set[PaymentStatus]] = {
         PaymentStatus.FAILED,
     },
     PaymentStatus.FAILED: {
-        PaymentStatus.INITIATED,  # Retry
+        PaymentStatus.INITIATED,     # Retry (admin force-retry)
         PaymentStatus.ABANDONED,
     },
     PaymentStatus.CAPTURED: {
         PaymentStatus.REFUND_INITIATED,
-        PaymentStatus.VOID, # Allow voiding if not yet settled in bank
+        PaymentStatus.VOID,          # Allow voiding if not yet settled in bank
     },
     PaymentStatus.REFUND_INITIATED: {
         PaymentStatus.REFUNDED,

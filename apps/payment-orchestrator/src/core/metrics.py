@@ -87,3 +87,21 @@ VCN_ISSUE_LATENCY = Histogram(
     "Latency for VCN issuance end-to-end",
     buckets=[0.1, 0.25, 0.5, 1.0, 2.5, 5.0],
 )
+
+# ── Orchestration State Machine ──────────────────────────────────────────────
+
+WORKFLOW_STATE_TRANSITIONS_TOTAL = Counter(
+    "payment_workflow_state_transitions_total",
+    "Total payment workflow state transitions",
+    ["from_status", "to_status", "gateway"],
+)
+
+# ── Outbox Publisher ─────────────────────────────────────────────────────────
+
+from prometheus_client import Gauge
+
+OUTBOX_QUEUE_DEPTH = Gauge(
+    "payment_outbox_queue_depth",
+    "Number of pending/failed outbox events awaiting publication",
+)
+

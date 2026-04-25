@@ -11,6 +11,10 @@ from src.services.jazzcash import JazzCashClient
 from src.services.raast import RaastClient
 from src.services.safepay import SafepayClient
 
+from tests.conftest import TestingSessionLocal
+from src.models.outbox import OutboxEvent
+from sqlalchemy import select
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -33,9 +37,7 @@ async def test_safepay_webhook_processes_paid_event(client, test_user, redis_moc
     assert resp.json()["status"] == "ok"
     
     # VCN issue should be queued in Outbox
-    from src.models.outbox import OutboxEvent
     from sqlalchemy import select
-    from tests.conftest import TestingSessionLocal
     async with TestingSessionLocal() as session:
         result = await session.execute(select(OutboxEvent).where(OutboxEvent.event_name == "vcn.issue"))
         events = result.scalars().all()

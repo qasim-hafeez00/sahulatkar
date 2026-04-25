@@ -27,3 +27,15 @@ class PaymentAdapter(ABC):
     def parse_event(self, body: bytes) -> Dict[str, Any]:
         """Parse the webhook payload into a normalized dict."""
         pass
+    @abstractmethod
+    async def refund(
+        self, 
+        gateway_txn_id: str, 
+        amount_pkr: Decimal, 
+        reason: str
+    ) -> Dict[str, Any]:
+        """
+        Initiate a refund with the gateway.
+        Returns a dict with gateway_refund_id and optional status.
+        """
+        pass

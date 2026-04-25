@@ -145,6 +145,28 @@ class RaastClient:
             reference_no=f"SBP-REF-{gateway_txn_id[:8].upper()}",
         )
 
+    def refund(
+        self,
+        *,
+        gateway_txn_id: str,
+        amount_pkr: Decimal,
+        reason: str,
+    ) -> dict[str, Any]:
+        """
+        Initiate a refund for a Raast IBFT transaction.
+        TODO: Integrate with Raast IBFT reversal API.
+        """
+        from uuid import uuid4
+        refund_id = f"raast_ref_{uuid4().hex}"
+        logger.info(
+            "Raast refund initiated (mock)",
+            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
+        )
+        return {
+            "gateway_refund_id": refund_id,
+            "status": "success",
+        }
+
     # ── Mandate Management ────────────────────────────────────────────────
     
     def setup_mandate(
@@ -196,10 +218,10 @@ class RaastClient:
     # ── Signature / Webhook Verification ──────────────────────────────────
 
     def _sign_payload(self, body: bytes) -> str:
-        digest = hmac.new(
-            self.api_secret.encode("utf-8"),
-            body,
-            hashlib.sha256,
+        digest = hmac.HMAC(
+            key=self.api_secret.encode("utf-8"),
+            msg=body,
+            digestmod=hashlib.sha256,
         )
         return digest.hexdigest()
 

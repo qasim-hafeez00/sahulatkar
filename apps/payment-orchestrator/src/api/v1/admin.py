@@ -7,6 +7,7 @@ Used by the Web Admin dashboard for payment visibility.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -191,24 +192,39 @@ async def force_retry_workflow(
 ):
     """
     Force a retry of a failed payment workflow.
-    Resets the status to INITIATED and increments attempt count.
+    Resets the status to INITIATED and invalidates the old idempotency key.
+
+    INR-06 fix: The idempotency key is suffixed with _retry_{count} so a fresh
+    payment attempt by the user doesn't immediately short-circuit back to this
+    (now-reset) workflow via the key collision path.
     """
     workflow = await db.get(PaymentWorkflow, workflow_id)
     if not workflow:
         return {"error": "WORKFLOW_NOT_FOUND"}
-    
+
     if workflow.status not in [PaymentStatus.FAILED, PaymentStatus.EXPIRED]:
         return {"error": "WORKFLOW_NOT_RETRYABLE", "status": workflow.status}
-    
+
+    old_attempt = workflow.attempt_count
     workflow.status = PaymentStatus.INITIATED
-    workflow.attempt_count += 1
-    
-    # Emit event via outbox to re-trigger whatever initiated it if needed,
-    # or just let the user know they can try paying again.
-    
+    workflow.attempt_count = old_attempt + 1
+    workflow.last_error = None
+
+    # INR-06: Invalidate the stale idempotency key so the next payment attempt
+    # creates a fresh workflow instead of returning this one.
+    workflow.idempotency_key = f"{workflow.idempotency_key}_retry_{workflow.attempt_count}"
+
     await db.commit()
-    logger.info(f"Admin forced retry for workflow {workflow_id}")
-    return {"status": "ok", "new_status": workflow.status, "attempts": workflow.attempt_count}
+    logger.info(
+        "Admin forced retry for workflow",
+        extra={"workflow_id": workflow_id, "attempt_count": workflow.attempt_count},
+    )
+    return {
+        "status": "ok",
+        "new_status": workflow.status,
+        "attempts": workflow.attempt_count,
+        "new_idempotency_key": workflow.idempotency_key,
+    }
 
 
 @router.post(
@@ -226,10 +242,17 @@ async def create_adjustment(
     Issue a manual adjustment (credit or debit) for an order.
     Used for compensation or manual corrections.
     """
+    # BV-05 fix: Derive loan_id from order_id. PaymentTransaction links to Loan, 
+    # not directly to Order.
+    from sk_shared.models.payment import Loan
+    loan = await db.scalar(select(Loan).where(Loan.order_id == order_id))
+    if not loan:
+        raise HTTPException(status_code=404, detail="LOAN_NOT_FOUND_FOR_ORDER")
+
     # Create a manual PaymentTransaction
     txn = PaymentTransaction(
-        order_id=order_id,
-        user_id=0,  # System/Admin adjustment
+        loan_id=loan.id,
+        user_id=loan.user_id,
         amount=amount_pkr,
         currency="PKR",
         gateway="system",

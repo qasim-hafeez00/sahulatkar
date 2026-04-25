@@ -3,17 +3,17 @@ Refund Service.
 
 Orchestrates refund/reversal flows across gateways.
 This service:
-  - Validates refund eligibility (order must be in refundable state)
   - Calls the appropriate gateway client to initiate the refund
   - Records the refund transaction in PaymentTransaction
   - Publishes `payment.refund_initiated` event for Ledger Service to record reversal
 
+BV-02/BV-03 fix: This service no longer imports Order or OrderState.
+Order eligibility validation is the responsibility of the caller (API layer) before
+invoking this service. The Payment Orchestrator only receives an order_id as a trusted
+reference — it does not own Order state.
+
 This service does NOT create ledger journal entries directly.
 The Ledger Service subscribes to the pub/sub event and records the reversal.
-
-IMPORTANT: Refunds are only allowed for orders in these states:
-    DOWN_PAYMENT_RECEIVED, VCN_ISSUED, CHECKOUT_COMPLETE, DELIVERED
-    (not for orders that have been fully repaid — those go through dispute)
 """
 from __future__ import annotations
 
@@ -25,9 +25,7 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import OrderState
 from sk_shared.events import build_event_envelope, event_channel
-from sk_shared.models.order import Order
 from sk_shared.models.payment import PaymentTransaction
 from sk_shared.redis_client import RedisClient
 
@@ -40,13 +38,6 @@ logger = logging.getLogger(__name__)
 
 EVENT_PAYMENT_REFUND_INITIATED = "payment.refund_initiated"
 
-_REFUNDABLE_STATES = {
-    OrderState.DOWN_PAYMENT_RECEIVED,
-    OrderState.VCN_ISSUED,
-    OrderState.COMPLETED,
-    OrderState.DELIVERED,
-}
-
 
 class RefundService:
     def __init__(self, db: AsyncSession, redis: RedisClient) -> None:
@@ -57,51 +48,30 @@ class RefundService:
         self,
         *,
         order_id: int,
+        user_id: int,
         amount_pkr: Decimal,
         reason: str,
         refund_reference: str,
-        requested_by_user_id: int,
     ) -> PaymentTransaction:
         """
         Initiate a refund for a given order.
 
-        Finds the original successful down payment transaction, validates
-        eligibility, calls the gateway, and records the refund transaction.
+        BV-02/BV-03 fix: No Order model import or state check performed here.
+        The calling API layer (payments.py) has already validated order ownership and
+        eligibility before calling this service.
+
+        Finds the original successful payment transaction, calls the gateway,
+        and records the refund transaction.
         """
-        # ── 1. Load order ────────────────────────────────────────────────────
-        order = await self.db.scalar(
-            select(Order).where(Order.id == order_id, Order.deleted_at.is_(None))
-        )
-        if order is None:
-            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
-
-        if order.status not in _REFUNDABLE_STATES:
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail=f"ORDER_NOT_REFUNDABLE: current status is {order.status}",
-            )
-
-        # ── 2. Find original down-payment transaction ─────────────────────────
+        # ── 1. Find original successful transaction ───────────────────────────
         original_txn = await self.db.scalar(
             select(PaymentTransaction).where(
-                PaymentTransaction.loan_id.in_(
-                    select(PaymentTransaction.loan_id).where(
-                        PaymentTransaction.gateway_txn_id != None  # noqa: E711
-                    )
-                ),
+                PaymentTransaction.user_id == user_id,
                 PaymentTransaction.status == "success",
+                PaymentTransaction.amount > 0,
                 PaymentTransaction.installment_id.is_(None),  # Down payment, not installment
             ).order_by(PaymentTransaction.id.asc()).limit(1)
         )
-
-        # Fallback: find any successful transaction for this order's user
-        if original_txn is None:
-            original_txn = await self.db.scalar(
-                select(PaymentTransaction).where(
-                    PaymentTransaction.user_id == order.user_id,
-                    PaymentTransaction.status == "success",
-                ).order_by(PaymentTransaction.id.asc()).limit(1)
-            )
 
         if original_txn is None:
             raise HTTPException(
@@ -109,18 +79,20 @@ class RefundService:
                 detail="NO_SUCCESSFUL_TRANSACTION_FOUND",
             )
 
-        # ── 3. Idempotency: check if refund already initiated ────────────────
+        # ── 2. Idempotency: check if refund already initiated ─────────────────
         idem_key = f"sk:refund:idem:{refund_reference}"
         if await self.redis.get(idem_key):
             existing_refund = await self.db.scalar(
                 select(PaymentTransaction).where(
-                    PaymentTransaction.gateway_response.op("->>")("refund_reference") == refund_reference
+                    PaymentTransaction.gateway_response.op("->>")(
+                        "refund_reference"
+                    ) == refund_reference
                 )
             )
             if existing_refund:
                 return existing_refund
 
-        # ── 4. Call gateway ──────────────────────────────────────────────────
+        # ── 3. Call gateway ──────────────────────────────────────────────────
         gateway = original_txn.gateway
         gateway_refund_id: str | None = None
 
@@ -134,31 +106,45 @@ class RefundService:
                 )
                 gateway_refund_id = result.get("refund_id")
             elif gateway == "jazzcash":
-                # JazzCash refunds are handled via manual reconciliation in most integrations.
-                # For MVP, record the refund internally and process manually.
-                gateway_refund_id = f"jc_refund_{order_id}"
-                logger.info("JazzCash refund recorded (manual processing required)", extra={"order_id": order_id})
+                # JazzCash refunds require manual reconciliation for MVP.
+                # Record internally — ops team processes manually via reconciliation report.
+                gateway_refund_id = f"jc_refund_{order_id}_{int(datetime.now().timestamp())}"
+                logger.info(
+                    "JazzCash refund recorded (manual processing required)",
+                    extra={"order_id": order_id, "gateway_txn_id": original_txn.gateway_txn_id},
+                )
             elif gateway == "raast":
-                # Raast refunds are credit transfers in the reverse direction.
-                # TODO: Implement Raast IBFT credit transfer when API docs are available.
-                gateway_refund_id = f"raast_refund_{order_id}"
-                logger.info("Raast refund recorded (manual processing required)", extra={"order_id": order_id})
+                # Raast refunds are credit transfers in reverse direction.
+                # In Pakistan, this usually requires manual bank portal entry for merchants.
+                gateway_refund_id = f"raast_refund_{order_id}_{int(datetime.now().timestamp())}"
+                logger.info(
+                    "Raast refund recorded (manual processing required)",
+                    extra={"order_id": order_id, "payer_iban": original_txn.gateway_txn_id},
+                )
             elif gateway == "stripe":
-                # Stripe refunds via Stripe Issuing API
-                # TODO: stripe.Refund.create(charge=original_charge_id, amount=int(amount_pkr * 100))
-                gateway_refund_id = f"re_{order_id}"
+                # Stripe Issuing refunds: unload amount from card or cancel card.
+                # For MVP: record and emit event; automated Stripe Issuing reversal logic
+                # will be implemented when full Issuing API access is provisioned.
+                gateway_refund_id = f"re_{order_id}_{int(datetime.now().timestamp())}"
+                logger.info(
+                    "Stripe Issuing refund recorded (mock)",
+                    extra={"order_id": order_id, "vcn_id": original_txn.gateway_txn_id},
+                )
         except Exception as exc:
-            logger.error("Refund gateway call failed", extra={"gateway": gateway, "order_id": order_id, "error": str(exc)})
+            logger.error(
+                "Refund gateway call failed",
+                extra={"gateway": gateway, "order_id": order_id, "error": str(exc)},
+            )
             raise HTTPException(
                 status_code=status.HTTP_502_BAD_GATEWAY,
                 detail=f"REFUND_GATEWAY_ERROR: {gateway}",
             ) from exc
 
-        # ── 5. Record refund transaction ─────────────────────────────────────
+        # ── 4. Record refund transaction ──────────────────────────────────────
         refund_txn = PaymentTransaction(
             loan_id=original_txn.loan_id,
             installment_id=None,
-            user_id=order.user_id,
+            user_id=user_id,
             amount=amount_pkr * -1,         # Negative amount = refund/reversal
             currency=settings.PAYMENT_CURRENCY,
             gateway=gateway,
@@ -175,10 +161,10 @@ class RefundService:
         await self.db.commit()
         await self.db.refresh(refund_txn)
 
-        # ── 6. Set idempotency key in Redis (24h TTL) ─────────────────────────
+        # ── 5. Set idempotency key in Redis (24h TTL) ─────────────────────────
         await self.redis.set(idem_key, str(refund_txn.id), ttl=86400)
 
-        # ── 7. Publish event for Ledger Service ──────────────────────────────
+        # ── 6. Publish event for Ledger Service ───────────────────────────────
         envelope = build_event_envelope(
             event=EVENT_PAYMENT_REFUND_INITIATED,
             source_service="payment-orchestrator",

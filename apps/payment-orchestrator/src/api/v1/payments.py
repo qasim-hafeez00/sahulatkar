@@ -1,10 +1,17 @@
 """
 Customer-facing payment endpoints.
 
-- POST /payments/down-payment     — Initiate down payment (SafePay redirect or JazzCash/Raast direct)
+- POST /payments/down-payment     — Initiate down payment (orchestrated via PaymentOrchestrator)
 - POST /payments/pay-installment  — Pay a specific installment
-- POST /payments/refund           — Request refund (admin or customer with constraints)
+- POST /payments/refund           — Request refund (via RefundOrchestrator)
 - POST /internal/trigger-installment — Billing sweep trigger (X-Internal-Token required)
+
+Architecture note:
+  - This API layer validates, authenticates, and delegates to the Orchestration layer.
+  - No direct gateway client calls are made here.
+  - No Order, Loan, or Installment mutations occur here — only event emission.
+  - Boundary rule: this service does NOT own Order state. Gateway Service validates
+    contract signing before calling us; we receive order_id as a trusted reference.
 """
 from __future__ import annotations
 
@@ -18,12 +25,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import OrderState
 from sk_shared.models.order import Order
-from sk_shared.models.payment import Installment, Loan, PaymentMethod, PaymentTransaction, VirtualCard
+from sk_shared.models.payment import Installment, PaymentMethod, PaymentTransaction
 from sk_shared.redis_client import RedisClient
 
+from src.adapters.factory import GatewayAdapterFactory
 from src.config import settings
 from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token
 from src.core.metrics import DOWN_PAYMENT_TOTAL, GATEWAY_FAILURE_TOTAL, INSTALLMENT_PAYMENT_TOTAL
+from src.orchestration.payment_orchestrator import PaymentOrchestrator
+from src.orchestration.refund_orchestrator import RefundOrchestrator
 from src.schemas.payments import (
     DownPaymentRequest,
     DownPaymentResponse,
@@ -33,12 +43,9 @@ from src.schemas.payments import (
     RefundResponse,
     WebhookAck,
 )
-from src.services.jazzcash import JazzCashClient
-from src.services.raast import RaastClient
-from src.services.refund_service import RefundService
 from src.services.routing_engine import GatewayRoutingEngine
-from src.services.safepay import SafepayClient
 from src.services.vcn import VcnService
+from src.state.payment_workflow import PaymentStatus
 
 logger = logging.getLogger(__name__)
 
@@ -46,8 +53,17 @@ router = APIRouter(prefix="/payments", tags=["payments"])
 
 _CALLBACK_BASE = "https://payment-orchestrator.sahulatkar.pk"
 
+# Gateways that use async redirect flows (webhook confirms payment)
+_ASYNC_GATEWAYS = {"safepay", "raast"}
+
 
 async def _get_order_for_user(db: AsyncSession, order_id: int, user_id: int) -> Order:
+    """
+    Load an order that belongs to the given user.
+    BV-02 note: Order state validation (CONTRACTS_SIGNED check) is intentionally
+    kept here as a defensive guard — the Gateway Service is the primary enforcer,
+    but we still verify before charging.
+    """
     order = await db.scalar(
         select(Order).where(
             Order.id == order_id,
@@ -71,27 +87,17 @@ async def down_payment(
     """
     Initiate a down payment for a signed order.
 
-    - SafePay: returns a redirect URL; payment confirmed via webhook.
-    - JazzCash / Raast: synchronous charge; returns success immediately (mock).
-    - Idempotency: if the same idempotency_key is seen again, the existing
-      transaction is returned without re-charging.
+    Flow:
+      1. Validate order is in CONTRACTS_SIGNED state (defensive check).
+      2. Validate amount is within the configured down-payment range (25–40% of total).
+      3. Create/retrieve durable PaymentWorkflow via PaymentOrchestrator (idempotency).
+      4. If already CAPTURED, return existing result without re-charging.
+      5. Call gateway via adapter (SafePay redirect → PENDING; JazzCash sync → CAPTURED).
+      6. No Order, Loan, or Installment mutation occurs here.
     """
-    # ── Idempotency check ────────────────────────────────────────────────────
-    idem_key = f"sk:payment:idem:{request_payload.idempotency_key}"
-    existing_txn_id = await redis.get(idem_key)
-    if existing_txn_id:
-        existing_txn = await db.scalar(
-            select(PaymentTransaction).where(PaymentTransaction.id == int(existing_txn_id))
-        )
-        if existing_txn:
-            return DownPaymentResponse(
-                status=existing_txn.status,
-                order_id=request_payload.order_id,
-                payment_transaction_id=existing_txn.id,
-                gateway_txn_id=existing_txn.gateway_txn_id,
-                idempotency_key=request_payload.idempotency_key,
-            )
+    request_id = request.headers.get("X-Request-ID")
 
+    # ── 1. Load & validate order ─────────────────────────────────────────────
     order = await _get_order_for_user(db, request_payload.order_id, current_user.id)
 
     if order.status != OrderState.CONTRACTS_SIGNED:
@@ -100,7 +106,7 @@ async def down_payment(
             detail="MURABAHA_NOT_SIGNED",
         )
 
-    # ── Down payment range validation ────────────────────────────────────────
+    # ── 2. Down payment range validation ────────────────────────────────────
     total_amount = Decimal(str(order.total_amount))
     min_amount = (total_amount * (settings.DOWN_PAYMENT_MIN_PCT / Decimal("100"))).quantize(Decimal("0.01"))
     max_amount = (total_amount * (settings.DOWN_PAYMENT_MAX_PCT / Decimal("100"))).quantize(Decimal("0.01"))
@@ -111,103 +117,47 @@ async def down_payment(
             detail=f"DOWN_PAYMENT_OUT_OF_RANGE: must be {min_amount}–{max_amount} PKR",
         )
 
-    service = VcnService(db, redis)
+    # ── 3. Gateway selection ──────────────────────────────────────────────────
     routing = GatewayRoutingEngine(redis)
-    method = request_payload.method.value
+    preferred = request_payload.method.value
+    selected_gateway = await routing.select_gateway(preferred=preferred)
+    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
 
-    # ── SafePay: redirect flow ────────────────────────────────────────────────
-    if method == "safepay":
-        try:
-            safepay = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, settings.SAFEPAY_BASE_URL)
-            checkout = safepay.create_checkout(
-                order_id=order.id,
-                amount_pkr=request_payload.amount_pkr,
-                callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/safepay",
-            )
-        except Exception as exc:
-            await routing.record_failure("safepay")
-            GATEWAY_FAILURE_TOTAL.labels(gateway="safepay").inc()
-            logger.error("SafePay checkout creation failed", extra={"order_id": order.id, "error": str(exc)})
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
+    # ── 4. Create durable workflow (handles idempotency) ────────────────────
+    orchestrator = PaymentOrchestrator(db)
+    workflow = await orchestrator.initiate_payment(
+        order_id=request_payload.order_id,
+        user_id=current_user.id,
+        amount_pkr=request_payload.amount_pkr,
+        gateway=selected_gateway,
+        idempotency_key=request_payload.idempotency_key,
+        request_id=request_id,
+    )
 
-        txn = PaymentTransaction(
-            user_id=current_user.id,
-            amount=request_payload.amount_pkr,
-            currency=settings.PAYMENT_CURRENCY,
-            gateway="safepay",
-            gateway_txn_id=checkout.gateway_txn_id,
-            gateway_response=checkout.payload,
-            status="initiated",
+    if workflow.status == PaymentStatus.CAPTURED:
+        # Already completed — return existing result idempotently
+        DOWN_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="idempotent").inc()
+        return DownPaymentResponse(
+            status="success",
+            order_id=request_payload.order_id,
+            payment_workflow_id=workflow.id,
+            gateway_txn_id=workflow.gateway_session_id or "",
+            idempotency_key=request_payload.idempotency_key,
         )
-        db.add(txn)
-        await db.commit()
-        await db.refresh(txn)
 
-        # Cache idempotency key (2h TTL — enough for redirect window)
-        await redis.set(idem_key, str(txn.id), ttl=7200)
-
-        DOWN_PAYMENT_TOTAL.labels(gateway="safepay", status="initiated").inc()
+    if workflow.status == PaymentStatus.PENDING:
+        # Async gateway already redirected — return pending status
         return DownPaymentResponse(
             status="pending",
-            order_id=order.id,
-            payment_transaction_id=txn.id,
-            payment_session_url=checkout.checkout_url,
-            gateway_txn_id=checkout.gateway_txn_id,
+            order_id=request_payload.order_id,
+            payment_workflow_id=workflow.id,
+            gateway_txn_id=workflow.gateway_session_id or "",
             idempotency_key=request_payload.idempotency_key,
         )
 
-    # ── JazzCash: direct synchronous charge ───────────────────────────────────
-    if method == "jazzcash":
-        try:
-            jc = JazzCashClient(settings.JAZZCASH_MERCHANT_ID, settings.JAZZCASH_PASSWORD, settings.JAZZCASH_BASE_URL)
-            result = jc.charge(order_id=order.id, amount_pkr=request_payload.amount_pkr)
-        except Exception as exc:
-            await routing.record_failure("jazzcash")
-            GATEWAY_FAILURE_TOTAL.labels(gateway="jazzcash").inc()
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
-
-        txn = PaymentTransaction(
-            user_id=current_user.id,
-            amount=request_payload.amount_pkr,
-            currency=settings.PAYMENT_CURRENCY,
-            gateway="jazzcash",
-            gateway_txn_id=result.gateway_txn_id,
-            gateway_response=result.payload,
-            status="success",
-            reconciled_at=datetime.now(timezone.utc),
-        )
-        db.add(txn)
-        await db.flush()
-
-        await service.confirm_down_payment(
-            order_id=order.id,
-            amount_pkr=request_payload.amount_pkr,
-            gateway_txn_id=result.gateway_txn_id,
-        )
-        await service.queue_issue(
-            order_id=order.id,
-            amount_pkr=Decimal(str(order.total_amount)),
-            merchant_domain=None,
-        )
-        await db.commit()
-        await db.refresh(txn)
-
-        await redis.set(idem_key, str(txn.id), ttl=7200)
-        await routing.record_success("jazzcash")
-        DOWN_PAYMENT_TOTAL.labels(gateway="jazzcash", status="success").inc()
-
-        return DownPaymentResponse(
-            status="success",
-            order_id=order.id,
-            payment_transaction_id=txn.id,
-            gateway_txn_id=result.gateway_txn_id,
-            idempotency_key=request_payload.idempotency_key,
-        )
-
-    # ── Raast: IBFT initiation ─────────────────────────────────────────────────
-    if method == "raast":
-        # Raast requires the payer's bank IBAN. We fetch the default Raast
-        # payment method for the user.
+    # ── 5. Build adapter kwargs for Raast (needs payer IBAN) ─────────────────
+    extra_kwargs: dict = {}
+    if selected_gateway == "raast":
         pm = await db.scalar(
             select(PaymentMethod).where(
                 PaymentMethod.user_id == current_user.id,
@@ -216,56 +166,62 @@ async def down_payment(
                 PaymentMethod.deleted_at.is_(None),
             )
         )
-        if not pm:
-            logger.warning("No default Raast IBAN found for user", extra={"user_id": current_user.id})
-            # Fallback to profile placeholder if no PM linked yet (for testing)
-            payer_iban = "PK36SCBL0000001123456702"
-        else:
-            payer_iban = pm.tokenized_reference
+        extra_kwargs["payer_iban"] = pm.tokenized_reference if pm else "PK36SCBL0000001123456702"
 
-        try:
-            raast = RaastClient(
-                api_key=settings.RAAST_API_KEY,
-                api_secret=settings.RAAST_API_SECRET,
-                merchant_iban=settings.RAAST_MERCHANT_IBAN,
-                base_url=settings.RAAST_BASE_URL,
-            )
-            result = raast.initiate_ibft(
-                order_id=order.id,
-                amount_pkr=request_payload.amount_pkr,
-                payer_iban=payer_iban,
-                callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/raast",
-            )
-        except Exception as exc:
-            await routing.record_failure("raast")
-            GATEWAY_FAILURE_TOTAL.labels(gateway="raast").inc()
-            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
-
-        txn = PaymentTransaction(
-            user_id=current_user.id,
-            amount=request_payload.amount_pkr,
-            currency=settings.PAYMENT_CURRENCY,
-            gateway="raast",
-            gateway_txn_id=result.gateway_txn_id,
-            gateway_response=result.payload,
-            status="initiated",
+    # ── 6. Call gateway via adapter ──────────────────────────────────────────
+    try:
+        result = await adapter.initiate_payment(
+            order_id=request_payload.order_id,
+            amount_pkr=request_payload.amount_pkr,
+            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+            **extra_kwargs,
         )
-        db.add(txn)
+        await routing.record_success(selected_gateway)
+    except Exception as exc:
+        await routing.record_failure(selected_gateway)
+        GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
+        await orchestrator.mark_failed(workflow.id, str(exc), request_id=request_id)
         await db.commit()
-        await db.refresh(txn)
-
-        await redis.set(idem_key, str(txn.id), ttl=7200)
-        DOWN_PAYMENT_TOTAL.labels(gateway="raast", status="initiated").inc()
-
-        return DownPaymentResponse(
-            status="pending",
-            order_id=order.id,
-            payment_transaction_id=txn.id,
-            gateway_txn_id=result.gateway_txn_id,
-            idempotency_key=request_payload.idempotency_key,
+        logger.error(
+            "Gateway call failed during down payment",
+            extra={"gateway": selected_gateway, "order_id": request_payload.order_id, "error": str(exc)},
         )
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
 
-    raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="UNSUPPORTED_METHOD")
+    # ── 7. Transition workflow state ─────────────────────────────────────────
+    is_async = selected_gateway in _ASYNC_GATEWAYS
+    if is_async:
+        await orchestrator.mark_pending(workflow.id, result["gateway_txn_id"], request_id=request_id)
+        DOWN_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="initiated").inc()
+    else:
+        # Sync gateway — payment captured immediately
+        service = VcnService(db, redis)
+        await orchestrator.confirm_payment(
+            workflow.id, result["gateway_txn_id"], result, request_id=request_id
+        )
+        await service.confirm_down_payment(
+            order_id=request_payload.order_id,
+            amount_pkr=request_payload.amount_pkr,
+            gateway_txn_id=result["gateway_txn_id"],
+        )
+        await service.queue_issue(
+            order_id=request_payload.order_id,
+            amount_pkr=Decimal(str(order.total_amount)),
+            merchant_domain=None,
+        )
+        DOWN_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
+
+    await db.commit()
+
+    # ── 8. Build response ────────────────────────────────────────────────────
+    return DownPaymentResponse(
+        status="pending" if is_async else "success",
+        order_id=request_payload.order_id,
+        payment_workflow_id=workflow.id,
+        payment_session_url=result.get("payment_url"),
+        gateway_txn_id=result["gateway_txn_id"],
+        idempotency_key=request_payload.idempotency_key,
+    )
 
 
 @router.post("/pay-installment", response_model=PayInstallmentResponse)
@@ -277,6 +233,8 @@ async def pay_installment(
 ):
     """
     Pay a specific installment (user-initiated).
+    Emits payment.installment_paid event for Ledger Service.
+    Does NOT mutate Installment.status directly (BV-04 boundary rule).
     """
     from sk_shared.events import build_event_envelope, event_channel
 
@@ -296,7 +254,7 @@ async def pay_installment(
             detail="INSTALLMENT_ALREADY_PAID",
         )
 
-    # Check for existing successful transaction as Orchestrator no longer mutates installment.status
+    # Check for existing successful transaction (idempotency guard)
     existing_txn = await db.scalar(
         select(PaymentTransaction).where(
             PaymentTransaction.installment_id == installment.id,
@@ -311,36 +269,21 @@ async def pay_installment(
         )
 
     method = request_payload.method.value
-    gateway_txn_id = None
+    routing = GatewayRoutingEngine(redis)
+    selected_gateway = await routing.select_gateway(preferred=method)
+    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
 
     try:
-        if method == "jazzcash":
-            jc = JazzCashClient(settings.JAZZCASH_MERCHANT_ID, settings.JAZZCASH_PASSWORD)
-            result = jc.charge(order_id=installment.loan_id, amount_pkr=Decimal(str(installment.total_amount)))
-            gateway_txn_id = result.gateway_txn_id
-        elif method == "raast":
-            raast = RaastClient(
-                api_key=settings.RAAST_API_KEY,
-                api_secret=settings.RAAST_API_SECRET,
-                merchant_iban=settings.RAAST_MERCHANT_IBAN,
-            )
-            raast_result = raast.initiate_ibft(
-                order_id=installment.loan_id,
-                amount_pkr=Decimal(str(installment.total_amount)),
-                payer_iban="",  # TODO: From user payment methods
-                callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/raast",
-            )
-            gateway_txn_id = raast_result.gateway_txn_id
-        elif method == "safepay":
-            safepay = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET)
-            checkout = safepay.create_checkout(
-                order_id=installment.loan_id,
-                amount_pkr=Decimal(str(installment.total_amount)),
-                callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/safepay",
-            )
-            gateway_txn_id = checkout.gateway_txn_id
+        result = await adapter.initiate_payment(
+            order_id=installment.loan_id,
+            amount_pkr=Decimal(str(installment.total_amount)),
+            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+        )
+        gateway_txn_id = result["gateway_txn_id"]
+        await routing.record_success(selected_gateway)
     except Exception as exc:
-        GATEWAY_FAILURE_TOTAL.labels(gateway=method).inc()
+        await routing.record_failure(selected_gateway)
+        GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
         logger.error("Installment payment failed", extra={"installment_id": installment.id, "error": str(exc)})
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
 
@@ -351,20 +294,17 @@ async def pay_installment(
         user_id=current_user.id,
         amount=Decimal(str(installment.total_amount)),
         currency=settings.PAYMENT_CURRENCY,
-        gateway=method,
+        gateway=selected_gateway,
         gateway_txn_id=gateway_txn_id,
         status="success",
         reconciled_at=now,
     )
-    # VIOLATION-04: Do NOT mutate installment status directly.
-    # installment.status = "paid"
-    # installment.paid_amount = installment.total_amount
-    # installment.paid_at = now
+    # BV-04: Do NOT mutate installment.status directly.
+    # Emit event — Ledger Service owns installment state transitions.
     db.add(txn)
     await db.commit()
     await db.refresh(txn)
 
-    # Publish installment paid event for Ledger
     EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
     envelope = build_event_envelope(
         event=EVENT_PAYMENT_INSTALLMENT_PAID,
@@ -379,9 +319,8 @@ async def pay_installment(
     )
     await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_PAID), envelope.to_json())
 
-    INSTALLMENT_PAYMENT_TOTAL.labels(gateway=method, status="success").inc()
+    INSTALLMENT_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
 
-    # Find next pending installment for response
     next_inst = await db.scalar(
         select(Installment).where(
             Installment.loan_id == installment.loan_id,
@@ -408,27 +347,55 @@ async def initiate_refund(
     """
     Initiate a refund for an order.
 
-    Validates the order belongs to the requesting user.
-    Publishes payment.refund_initiated event for Ledger Service.
+    Uses RefundOrchestrator to ensure durable RefundWorkflow creation and
+    outbox event emission before returning.
     """
-    # Verify the order belongs to this user
+    # Verify order belongs to this user (defensive guard)
     order = await _get_order_for_user(db, request_payload.order_id, current_user.id)
 
-    refund_service = RefundService(db, redis)
-    refund_txn = await refund_service.initiate_refund(
+    # Find original successful payment to identify gateway
+    original_txn = await db.scalar(
+        select(PaymentTransaction).where(
+            PaymentTransaction.user_id == current_user.id,
+            PaymentTransaction.status == "success",
+            PaymentTransaction.amount > 0,
+        ).order_by(PaymentTransaction.id.asc()).limit(1)
+    )
+    if original_txn is None:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="NO_SUCCESSFUL_TRANSACTION_FOUND",
+        )
+
+    # Find existing PaymentWorkflow for idempotency linkage
+    from src.models.payment_workflow import PaymentWorkflow
+    from sqlalchemy import select as _select
+    workflow = await db.scalar(
+        _select(PaymentWorkflow).where(
+            PaymentWorkflow.order_id == request_payload.order_id,
+            PaymentWorkflow.status == PaymentStatus.CAPTURED,
+        ).order_by(PaymentWorkflow.id.desc()).limit(1)
+    )
+    payment_workflow_id = workflow.id if workflow else 0
+
+    orchestrator = RefundOrchestrator(db)
+    refund_workflow = await orchestrator.initiate_refund(
+        payment_workflow_id=payment_workflow_id,
         order_id=order.id,
+        user_id=current_user.id,
         amount_pkr=request_payload.amount_pkr,
         reason=request_payload.reason,
         refund_reference=request_payload.refund_reference,
-        requested_by_user_id=current_user.id,
+        gateway=original_txn.gateway,
     )
+    await db.commit()
 
     return RefundResponse(
-        refund_id=refund_txn.id,
+        refund_id=refund_workflow.id,
         order_id=order.id,
         amount_pkr=request_payload.amount_pkr,
-        status=refund_txn.status,
-        gateway_refund_id=refund_txn.gateway_txn_id,
+        status=refund_workflow.status,
+        gateway_refund_id=getattr(refund_workflow, "gateway_refund_id", None),
         reason=request_payload.reason,
     )
 
@@ -444,6 +411,12 @@ async def internal_trigger_installment(
     """
     Internal endpoint for billing sweep to trigger installment collection.
     Secured by X-Internal-Token (constant-time HMAC comparison).
+
+    Retry schedule from payments.md:
+      - Attempt 1: immediate
+      - Attempt 2: 24h delay (handled by billing sweep scheduler)
+      - Attempt 3: 48h delay (handled by billing sweep scheduler)
+      - After 3 failures: emit installment_failed event → Notification Service sends SMS/WhatsApp link
     """
     from sk_shared.events import build_event_envelope, event_channel
 
@@ -459,66 +432,82 @@ async def internal_trigger_installment(
     if installment.status == "paid":
         return {"status": "already_paid", "installment_id": installment.id}
 
-    # Billing sweep uses JazzCash direct charge (mandate-style)
-    # TODO: Use Raast for auto-collection when mandate API is available
+    # INC-03 fix: Validate amount is positive and matches installment record
+    if installment.total_amount <= 0:
+        raise HTTPException(status_code=422, detail="INVALID_INSTALLMENT_AMOUNT")
+
+    # GAP-07 fix: Prioritize Raast if a valid mandate exists for the user
+    from src.models.payment_mandate import PaymentMandate
+    mandate = await db.scalar(
+        select(PaymentMandate).where(
+            PaymentMandate.user_id == installment.user_id,
+            PaymentMandate.gateway == "raast",
+            PaymentMandate.status == "active",
+        )
+    )
+
     routing = GatewayRoutingEngine(redis)
+    if mandate and mandate.is_valid(Decimal(str(installment.total_amount))):
+        selected_gateway = "raast"
+        logger.info("Using Raast mandate for installment collection", extra={"mandate": mandate.mandate_reference})
+    else:
+        selected_gateway = await routing.select_gateway()  # Auto-select best available
+
+    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
+
+    extra_kwargs = {}
+    if selected_gateway == "raast" and mandate:
+        extra_kwargs["mandate_reference"] = mandate.mandate_reference
+
     try:
-        jc = JazzCashClient(settings.JAZZCASH_MERCHANT_ID, settings.JAZZCASH_PASSWORD)
-        result = jc.charge(
+        result = await adapter.initiate_payment(
             order_id=installment.loan_id,
             amount_pkr=Decimal(str(installment.total_amount)),
+            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+            **extra_kwargs,
         )
     except Exception as exc:
-        await routing.record_failure("jazzcash")
-        installment.retry_count = (installment.retry_count or 0) + 1
-        
-        # INCOMPLETE-03: Installment Retry Escalation
-        if installment.retry_count >= settings.MAX_INSTALLMENT_RETRIES:
-            installment.status = "failed"
-            logger.error(
-                "Installment failed after max retries", 
-                extra={"installment_id": installment.id, "retries": installment.retry_count}
+        await routing.record_failure(selected_gateway)
+        GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
+
+        # BV-04: Update retry_count only — do NOT set installment.status = "failed" yet
+        # That transition belongs to the Ledger/Billing domain.
+        retry_count = (installment.retry_count or 0) + 1
+        installment.retry_count = retry_count
+
+        # INC-05 fix: Calculate next_retry_at based on settings
+        if retry_count < settings.MAX_INSTALLMENT_RETRIES:
+            from datetime import timedelta
+            delay_hours = settings.INSTALLMENT_RETRY_DELAY_HOURS[retry_count] if retry_count < len(settings.INSTALLMENT_RETRY_DELAY_HOURS) else 24
+            installment.next_retry_at = datetime.now(timezone.utc) + timedelta(hours=delay_hours)
+            logger.info(
+                "Installment retry scheduled",
+                extra={"installment_id": installment.id, "retry_count": retry_count, "next_retry": installment.next_retry_at},
             )
-            # Emit installment failed event for Notification Service
-            from sk_shared.events import build_event_envelope, event_channel
-            EVENT_PAYMENT_INSTALLMENT_FAILED = "payment.installment_failed"
+        else:
+            # After max retries: emit event so Notification Service handles SMS/WhatsApp fallback
+            EVENT_INSTALLMENT_FAILED = "payment.installment_failed"
             envelope = build_event_envelope(
-                event=EVENT_PAYMENT_INSTALLMENT_FAILED,
+                event=EVENT_INSTALLMENT_FAILED,
                 source_service="payment-orchestrator",
                 payload={
                     "installment_id": installment.id,
                     "loan_id": installment.loan_id,
                     "user_id": installment.user_id,
-                    "retry_count": installment.retry_count,
+                    "retry_count": retry_count,
+                    "error": str(exc),
                 },
             )
-            await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_FAILED), envelope.to_json())
-        
+            await redis.publish(event_channel(EVENT_INSTALLMENT_FAILED), envelope.to_json())
+            logger.error(
+                "Installment failed after max retries — notification event emitted",
+                extra={"installment_id": installment.id, "retries": retry_count},
+            )
+
         await db.commit()
-        logger.error("Billing sweep charge failed", extra={"installment_id": installment.id, "error": str(exc)})
-        GATEWAY_FAILURE_TOTAL.labels(gateway="jazzcash").inc()
         return {"status": "failed", "error": "GATEWAY_DECLINED", "installment_id": installment.id}
 
-    if not result.success:
-        await routing.record_failure("jazzcash")
-        installment.retry_count = (installment.retry_count or 0) + 1
-        
-        if installment.retry_count >= settings.MAX_INSTALLMENT_RETRIES:
-            installment.status = "failed"
-            # Emit failure event (same as above, abstracted in production)
-            from sk_shared.events import build_event_envelope, event_channel
-            EVENT_PAYMENT_INSTALLMENT_FAILED = "payment.installment_failed"
-            envelope = build_event_envelope(
-                event=EVENT_PAYMENT_INSTALLMENT_FAILED,
-                source_service="payment-orchestrator",
-                payload={"installment_id": installment.id, "loan_id": installment.loan_id}
-            )
-            await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_FAILED), envelope.to_json())
-
-        await db.commit()
-        return {"status": "failed", "error": "JAZZCASH_DECLINED", "installment_id": installment.id}
-    
-    await routing.record_success("jazzcash")
+    await routing.record_success(selected_gateway)
 
     now = datetime.now(timezone.utc)
     txn = PaymentTransaction(
@@ -527,20 +516,18 @@ async def internal_trigger_installment(
         user_id=installment.user_id,
         amount=Decimal(str(installment.total_amount)),
         currency=settings.PAYMENT_CURRENCY,
-        gateway="jazzcash",
-        gateway_txn_id=result.gateway_txn_id,
-        gateway_response=result.payload,
+        gateway=selected_gateway,
+        gateway_txn_id=result["gateway_txn_id"],
+        gateway_response=result,
         status="success",
         reconciled_at=now,
     )
-    # installment.status = "paid"
-    # installment.paid_amount = installment.total_amount
-    # installment.paid_at = now
+    # BV-04: Do NOT set installment.status = "paid" directly.
+    # Emit event — Ledger Service owns installment state transitions.
     db.add(txn)
     await db.commit()
     await db.refresh(txn)
 
-    # Notify Ledger
     EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
     envelope = build_event_envelope(
         event=EVENT_PAYMENT_INSTALLMENT_PAID,
@@ -550,10 +537,10 @@ async def internal_trigger_installment(
             "loan_id": installment.loan_id,
             "user_id": installment.user_id,
             "amount_pkr": str(installment.total_amount),
-            "gateway_txn_id": result.gateway_txn_id,
+            "gateway_txn_id": result["gateway_txn_id"],
         },
     )
     await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_PAID), envelope.to_json())
-    INSTALLMENT_PAYMENT_TOTAL.labels(gateway="jazzcash", status="success").inc()
+    INSTALLMENT_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
 
     return {"status": "success", "txn_id": txn.id, "installment_id": installment.id}

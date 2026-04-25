@@ -140,7 +140,11 @@ class SafepayClient:
         return {"refund_id": refund_id, "status": "success", "amount_pkr": str(amount_pkr)}
 
     def sign_payload(self, body: bytes) -> str:
-        digest = hmac.new(self.api_secret.encode("utf-8"), body, hashlib.sha256)
+        digest = hmac.new(
+            key=self.api_secret.encode("utf-8"),
+            msg=body,
+            digestmod=hashlib.sha256,
+        )
         return digest.hexdigest()
 
     def verify_signature(self, body: bytes, signature: str) -> bool:

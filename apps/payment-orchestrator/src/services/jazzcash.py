@@ -113,8 +113,34 @@ class JazzCashClient:
             "gateway_txn_id": gateway_txn_id,
         }
 
+    def refund(
+        self,
+        *,
+        gateway_txn_id: str,
+        amount_pkr: Decimal,
+        reason: str,
+    ) -> dict[str, Any]:
+        """
+        Initiate a refund for a JazzCash transaction.
+        TODO: Integrate with JazzCash refund API.
+        """
+        from uuid import uuid4
+        refund_id = f"jc_ref_{uuid4().hex}"
+        logger.info(
+            "JazzCash refund initiated (mock)",
+            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
+        )
+        return {
+            "gateway_refund_id": refund_id,
+            "status": "success",
+        }
+
     def sign_payload(self, body: bytes) -> str:
-        digest = hmac.new(self.password.encode("utf-8"), body, hashlib.sha256)
+        digest = hmac.HMAC(
+            key=self.password.encode("utf-8"),
+            msg=body,
+            digestmod=hashlib.sha256,
+        )
         return digest.hexdigest()
 
     def verify_signature(self, body: bytes, signature: str) -> bool:

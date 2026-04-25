@@ -23,7 +23,8 @@ class DownPaymentRequest(BaseModel):
 class DownPaymentResponse(BaseModel):
     status: str                              # "pending" | "success"
     order_id: int
-    payment_transaction_id: int
+    payment_workflow_id: Optional[int] = None   # Durable workflow record (orchestrated path)
+    payment_transaction_id: Optional[int] = None  # Legacy — kept for backward compat
     payment_session_url: Optional[str] = None  # Present for SafePay redirect flow
     gateway_txn_id: Optional[str] = None
     idempotency_key: str

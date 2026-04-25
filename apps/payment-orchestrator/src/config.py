@@ -72,6 +72,25 @@ class Settings(BaseSettings):
     # ── Reconciliation ────────────────────────────────────────────────────────
     RECONCILIATION_AUDIT_DIR: str = "/tmp/recon-audit"
 
+    # ── Retry / Resilience ───────────────────────────────────────────────────
+    MAX_INSTALLMENT_RETRIES: int = 3                     # Used in billing sweep trigger
+    INSTALLMENT_RETRY_DELAY_HOURS: List[int] = Field(default_factory=lambda: [0, 24, 48])
+
+    # ── Session / Workflow ────────────────────────────────────────────────────
+    PAYMENT_SESSION_TTL_MINUTES: int = 30               # PaymentWorkflow session expiry
+
+    # ── VCN Expiry Worker ─────────────────────────────────────────────────────
+    VCN_EXPIRY_SWEEP_INTERVAL_SECONDS: int = 300        # How often VcnExpiryWorker runs
+    VCN_STATUS_POLL_INTERVAL_SECONDS: int = 600         # GAP-05: How often StripePollerWorker runs
+
+    # ── FX / Currency ─────────────────────────────────────────────────────────
+    FX_PKR_TO_USD_RATE: float = 0.0036                  # Required for Stripe Issuing USD conversion
+    FX_BUFFER_PCT: float = 2.0                          # FX drift tolerance buffer (%)
+
+    # ── Outbox Publisher ──────────────────────────────────────────────────────
+    OUTBOX_POLL_INTERVAL_SECONDS: int = 5               # OutboxPublisher loop interval
+    OUTBOX_BATCH_SIZE: int = 50                         # Events per poll cycle
+
     # ── CORS ──────────────────────────────────────────────────────────────────
     CORS_ALLOW_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
 

@@ -1,4 +1,11 @@
+"""
+Refund Orchestrator.
+
+Orchestrates the lifecycle of a refund, including recording state changes
+and calling the appropriate gateway adapter.
+"""
 import logging
+from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
@@ -8,7 +15,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.events import build_event_envelope
 from src.models.refund_workflow import RefundWorkflow, RefundStatus
+from src.models.payment_workflow import PaymentWorkflow
 from src.models.outbox import OutboxEvent
+from src.adapters.factory import GatewayAdapterFactory
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -29,14 +39,16 @@ class RefundOrchestrator:
         gateway: str,
     ) -> RefundWorkflow:
         """
-        Initiate a refund workflow.
+        Initiate a refund workflow and call the gateway adapter.
         """
+        # 1. Idempotency check
         existing = await self.db.scalar(
             select(RefundWorkflow).where(RefundWorkflow.refund_reference == refund_reference)
         )
         if existing:
             return existing
 
+        # 2. Record initiation
         refund = RefundWorkflow(
             original_payment_workflow_id=payment_workflow_id,
             order_id=order_id,
@@ -50,20 +62,79 @@ class RefundOrchestrator:
         self.db.add(refund)
         await self.db.flush()
 
-        await self._queue_event(
-            "payment.refund_initiated",
-            {
+        # 3. Look up original gateway transaction ID
+        original_workflow = await self.db.get(PaymentWorkflow, payment_workflow_id)
+        if not original_workflow or not original_workflow.gateway_session_id:
+            logger.error(
+                "Original payment transaction not found for refund",
+                extra={"payment_workflow_id": payment_workflow_id, "refund_reference": refund_reference}
+            )
+            refund.status = RefundStatus.FAILED
+            refund.failure_reason = "ORIGINAL_TRANSACTION_NOT_FOUND"
+            await self._queue_event("payment.refund_failed", {
                 "refund_id": refund.id,
-                "order_id": refund.order_id,
-                "amount_pkr": str(refund.amount_pkr),
-                "reason": refund.reason,
-            }
-        )
+                "order_id": order_id,
+                "reason": refund.failure_reason
+            })
+            return refund
+
+        # 4. Call gateway via adapter
+        adapter = GatewayAdapterFactory.get(gateway, settings)
+        try:
+            result = await adapter.refund(
+                gateway_txn_id=original_workflow.gateway_session_id,
+                amount_pkr=amount_pkr,
+                reason=reason
+            )
+            
+            refund.gateway_refund_id = result.get("gateway_refund_id")
+            
+            # If the gateway confirms it immediately (like SafePay)
+            if result.get("status") == "success":
+                refund.status = RefundStatus.SETTLED
+                refund.settled_at = datetime.now(timezone.utc)
+                event_name = "payment.refund_settled"
+            else:
+                refund.status = RefundStatus.PENDING
+                event_name = "payment.refund_initiated"
+
+            await self._queue_event(
+                event_name,
+                {
+                    "refund_id": refund.id,
+                    "order_id": refund.order_id,
+                    "amount_pkr": str(refund.amount_pkr),
+                    "gateway_refund_id": refund.gateway_refund_id,
+                    "reason": refund.reason,
+                }
+            )
+
+        except Exception as exc:
+            logger.error(
+                "Gateway refund call failed",
+                extra={"gateway": gateway, "refund_reference": refund_reference, "error": str(exc)}
+            )
+            refund.status = RefundStatus.FAILED
+            refund.failure_reason = str(exc)
+            refund.failed_at = datetime.now(timezone.utc)
+            
+            await self._queue_event("payment.refund_failed", {
+                "refund_id": refund.id,
+                "order_id": order_id,
+                "reason": refund.failure_reason
+            })
+
         return refund
 
     async def settle_refund(self, refund_id: int, gateway_refund_id: str) -> None:
+        """
+        Settle a pending refund (e.g. from webhook).
+        """
         refund = await self.db.get(RefundWorkflow, refund_id)
         if not refund:
+            return
+
+        if refund.status == RefundStatus.SETTLED:
             return
 
         refund.status = RefundStatus.SETTLED
@@ -88,7 +159,7 @@ class RefundOrchestrator:
         
         outbox = OutboxEvent(
             event_name=event_name,
-            payload=envelope.to_dict(),
+            payload=asdict(envelope),
             status="pending"
         )
         self.db.add(outbox)

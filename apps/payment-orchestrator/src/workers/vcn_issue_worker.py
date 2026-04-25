@@ -10,6 +10,7 @@ Features:
   - DLQ: after DLQ_MAX_RETRIES failures, job is pushed to sk:queue:dlq:vcn_issue
   - Structured JSON logging for each job
   - Retry counter tracked per-job in the payload
+  - Uses src.core.database for session management
 """
 from __future__ import annotations
 
@@ -20,10 +21,10 @@ import signal
 from decimal import Decimal
 
 from sk_shared.constants import QueueName
-from sk_shared.database import SessionLocal
 from sk_shared.redis_client import get_redis_client
 
 from src.config import settings
+from src.core.database import SessionLocal
 from src.core.logging import setup_logging
 from src.services.vcn import VcnService
 
@@ -33,32 +34,41 @@ DLQ_KEY = "sk:queue:dlq:vcn_issue"
 
 
 class VcnIssueWorker:
-    def __init__(self, concurrency: int = 4) -> None:
+    def __init__(self, redis=None, concurrency: int = 4) -> None:
         self._semaphore = asyncio.Semaphore(concurrency)
         self._running = True
+        self._redis = redis
 
     def stop(self) -> None:
         logger.info("VCN worker received shutdown signal")
         self._running = False
 
     async def run(self) -> None:
-        redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
+        # If redis is not provided, create a new connection
+        if self._redis is None:
+            self._redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
+            close_redis = True
+        else:
+            close_redis = False
+
         logger.info("VCN issue worker started", extra={"concurrency": self._semaphore._value})
 
         try:
             while self._running:
-                job = await redis.redis.brpop(QueueName.VCN_ISSUE, timeout=5)
+                # Use brpop with timeout to allow checking self._running
+                job = await self._redis.redis.brpop(QueueName.VCN_ISSUE, timeout=5)
                 if job is None:
-                    await asyncio.sleep(0)
                     continue
 
                 raw_payload = job[1]
-                asyncio.create_task(self._process(raw_payload, redis))
+                # Start processing in background task
+                asyncio.create_task(self._process(raw_payload))
         finally:
-            await redis.close()
+            if close_redis:
+                await self._redis.close()
             logger.info("VCN issue worker stopped cleanly")
 
-    async def _process(self, raw_payload: bytes, redis) -> None:
+    async def _process(self, raw_payload: bytes) -> None:
         async with self._semaphore:
             try:
                 payload = json.loads(raw_payload.decode("utf-8"))
@@ -71,7 +81,7 @@ class VcnIssueWorker:
 
             try:
                 async with SessionLocal() as db:
-                    service = VcnService(db, redis)
+                    service = VcnService(db, self._redis)
                     await service.issue_vcn(
                         order_id=order_id,
                         amount_pkr=Decimal(str(payload.get("amount_pkr", "0"))),
@@ -93,10 +103,10 @@ class VcnIssueWorker:
                         extra={"order_id": order_id, "retry_count": retry_count + 1, "delay_sec": backoff_delay}
                     )
                     await asyncio.sleep(backoff_delay)
-                    await redis.redis.lpush(QueueName.VCN_ISSUE, json.dumps(payload))
+                    await self._redis.redis.lpush(QueueName.VCN_ISSUE, json.dumps(payload))
                     logger.info("VCN job re-queued after backoff", extra={"order_id": order_id})
                 else:
-                    await redis.redis.lpush(DLQ_KEY, raw_payload)
+                    await self._redis.redis.lpush(DLQ_KEY, raw_payload)
                     logger.error(
                         "VCN job sent to DLQ — max retries exceeded",
                         extra={"order_id": order_id, "dlq": DLQ_KEY},

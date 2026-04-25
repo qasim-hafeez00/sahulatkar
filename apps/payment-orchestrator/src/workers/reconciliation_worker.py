@@ -50,18 +50,29 @@ class SettlementFetcher:
 
     async def _fetch_jazzcash_sftp(self, settlement_date: date) -> list[ReconciliationRecord]:
         """
-        Mock SFTP fetch for JazzCash settlement.
+        Fetch JazzCash settlement via SFTP (simulated for MVP).
         """
         logger.info(f"Fetching JazzCash settlement via SFTP for {settlement_date}")
         # In production: use paramiko or asyncssh to download CSV from JazzCash SFTP
+        # For MVP: simulate success if a mock file exists in the audit directory
+        mock_file = Path(settings.RECONCILIATION_AUDIT_DIR) / f"mock_jazzcash_{settlement_date}.json"
+        if mock_file.exists():
+            with open(mock_file) as f:
+                raw = json.load(f)
+                return [ReconciliationRecord(**r) for r in raw]
         return []
 
     async def _fetch_safepay_api(self, settlement_date: date) -> list[ReconciliationRecord]:
         """
-        Mock API fetch for SafePay settlement.
+        Fetch SafePay settlement via API (simulated for MVP).
         """
         logger.info(f"Fetching SafePay settlement via API for {settlement_date}")
         # In production: use httpx to call SafePay's reporting API
+        mock_file = Path(settings.RECONCILIATION_AUDIT_DIR) / f"mock_safepay_{settlement_date}.json"
+        if mock_file.exists():
+            with open(mock_file) as f:
+                raw = json.load(f)
+                return [ReconciliationRecord(**r) for r in raw]
         return []
 
 

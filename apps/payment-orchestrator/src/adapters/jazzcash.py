@@ -31,3 +31,19 @@ class JazzCashAdapter(PaymentAdapter):
 
     def parse_event(self, body: bytes) -> Dict[str, Any]:
         return self.client.parse_event(body)
+    async def refund(
+        self, 
+        gateway_txn_id: str, 
+        amount_pkr: Decimal, 
+        reason: str
+    ) -> Dict[str, Any]:
+        result = self.client.refund(
+            gateway_txn_id=gateway_txn_id,
+            amount_pkr=amount_pkr,
+            reason=reason
+        )
+        return {
+            "gateway_refund_id": result["gateway_refund_id"],
+            "status": result["status"],
+            "message": "Refund processed"
+        }

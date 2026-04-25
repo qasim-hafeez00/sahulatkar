@@ -4,7 +4,7 @@ VCN Service — Virtual Card Number lifecycle management.
 Responsibilities:
   - Issue single-use VCNs via Stripe Issuing (MCC-locked, amount-capped, 24h expiry)
   - Decrypt PAN/CVV for authenticated internal callers (Product Service checkout agent)
-  - Confirm down payments and idempotently seed Loan + Installment records
+  - Confirm down payments and emit events (does NOT mutate Loan/Order — BV-01 fix)
   - Queue VCN issuance jobs for background processing
   - Void VCNs on order cancellation or expiry
 
@@ -13,6 +13,12 @@ Security rules:
   - All monetary arithmetic uses Decimal — never float
   - VCN issuance is blocked unless Order.status == CONTRACTS_SIGNED
   - One VCN per order (idempotent: returns existing if re-requested)
+
+Boundary rules (DDD):
+  - BV-01: Do NOT mutate Loan.total_paid / Loan.total_outstanding here.
+           Emit payment.down_payment_confirmed event via outbox. Let Gateway/Ledger update Loan.
+  - INR-04: Do NOT create PaymentTransaction records for VCN issuance.
+            VCN issuance is not a payment transaction. Use structured logging + outbox event.
 """
 from __future__ import annotations
 
@@ -20,6 +26,7 @@ import base64
 import hashlib
 import json
 import logging
+from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_HALF_UP, Decimal
 from secrets import randbelow
@@ -39,7 +46,7 @@ from sk_shared.events import (
 )
 from sk_shared.models.contracts import MurabahaContract
 from sk_shared.models.order import Order
-from sk_shared.models.payment import Installment, Loan, PaymentTransaction, VirtualCard
+from sk_shared.models.payment import VirtualCard
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
@@ -69,6 +76,9 @@ class VcnService:
         MurabahaContract before a VCN can be issued.
 
         Idempotent: returns existing active VCN if one already exists for the order.
+
+        INR-04 fix: No PaymentTransaction record is created. VCN issuance is not a
+        payment transaction. Structured log + vcn.issued event via outbox.
         """
         order = await self._get_order(order_id)
         if order.status != OrderState.CONTRACTS_SIGNED:
@@ -93,22 +103,22 @@ class VcnService:
         )
         if existing is not None:
             logger.info(
-                "VCN already exists for order, returning existing",
+                "VCN already exists for order — returning existing",
                 extra={"order_id": order_id, "vcn_id": existing.id},
             )
             return existing
-
-        loan = await self.db.scalar(
-            select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None))
-        )
 
         pan = self._generate_pan()
         cvv = f"{randbelow(1000):03d}"
         now = datetime.now(timezone.utc)
 
-        # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer
-        buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100")
+        # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer + FX buffer
+        buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100") + Decimal(str(settings.FX_BUFFER_PCT)) / Decimal("100")
         authorized_amount = (amount_pkr * buffer_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+        
+        # Calculate USD limit for Stripe
+        fx_rate = Decimal(str(settings.FX_PKR_TO_USD_RATE))
+        authorized_amount_usd = (authorized_amount * fx_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
         card = VirtualCard(
             order_id=order_id,
@@ -131,26 +141,10 @@ class VcnService:
         )
         self.db.add(card)
 
-        # Record VCN issuance as a transaction for audit
-        transaction = PaymentTransaction(
-            loan_id=loan.id if loan is not None else None,
-            installment_id=None,
-            user_id=order.user_id,
-            payment_method_id=None,
-            amount=amount_pkr,
-            currency=settings.PAYMENT_CURRENCY,
-            gateway="stripe",
-            gateway_txn_id=f"vcn_issued_{order_id}",
-            gateway_response={"order_id": order_id, "merchant_domain": merchant_domain, "event": "vcn_issued"},
-            status="success",
-            reconciled_at=now,
-        )
-        self.db.add(transaction)
-
         await self.db.flush()
         await self.db.refresh(card)
 
-        # Publish VCN issued event
+        # Publish VCN issued event via transactional outbox
         envelope = build_event_envelope(
             event=EVENT_VCN_ISSUED,
             source_service="payment-orchestrator",
@@ -160,9 +154,10 @@ class VcnService:
                 "status": card.status,
                 "merchant_domain": merchant_domain,
                 "authorized_amount": str(authorized_amount),
+                "authorized_amount_usd": str(authorized_amount_usd),
             },
         )
-        await self.redis.publish(event_channel(EVENT_VCN_ISSUED), envelope.to_json())
+        await self._queue_outbox_event(EVENT_VCN_ISSUED, asdict(envelope))
 
         from src.core.metrics import VCN_ISSUED_TOTAL
         VCN_ISSUED_TOTAL.labels(issuer="stripe").inc()
@@ -174,6 +169,7 @@ class VcnService:
                 "vcn_id": card.id,
                 "masked_number": card.masked_number,
                 "authorized_amount": str(authorized_amount),
+                "authorized_amount_usd": str(authorized_amount_usd),
             },
         )
         return card
@@ -185,6 +181,7 @@ class VcnService:
         Decrypt and return plaintext PAN/CVV.
         ONLY called by authenticated internal services (Product Service checkout agent).
         Never exposed to external HTTP callers.
+        Plaintext PAN/CVV must NEVER appear in log output (security rule).
         """
         card = await self.db.scalar(
             select(VirtualCard).where(
@@ -211,6 +208,9 @@ class VcnService:
         pan = self._decrypt_value(card.encrypted_pan)
         cvv = self._decrypt_value(card.encrypted_cvv)
 
+        # Security: log at DEBUG only — never INFO, never include PAN/CVV in log record
+        logger.debug("VCN decrypted for checkout agent", extra={"order_id": order_id, "vcn_id": card.id})
+
         return {
             "vcn_id": card.id,
             "order_id": order_id,
@@ -222,7 +222,7 @@ class VcnService:
             "expires_at": card.expires_at,
         }
 
-    # ── Down Payment Confirmation + Loan Seeding ─────────────────────────────
+    # ── Down Payment Confirmation ─────────────────────────────────────────────
 
     async def confirm_down_payment(
         self,
@@ -230,15 +230,15 @@ class VcnService:
         order_id: int,
         amount_pkr: Decimal,
         gateway_txn_id: str,
-    ) -> Loan:
+    ) -> None:
         """
-        Confirm a down payment and idempotently seed the Loan + Installment records.
+        Confirm a down payment by emitting the payment.down_payment_confirmed event.
 
-        The Gateway service seeds Loan/Installment at contract signing.
-        This method is a safety net for the case where the Gateway failed to seed,
-        or for orders where the payment was confirmed before the contract was fully indexed.
+        BV-01 fix: This method does NOT mutate Loan.total_paid or Loan.total_outstanding.
+        Those fields are accounting concerns owned by the Ledger Service. The Gateway Service
+        updates Loan financial totals reactively upon receiving the payment.confirmed event.
 
-        Uses Decimal arithmetic exclusively — no floats.
+        All events flow through the outbox for transactional integrity.
         """
         order = await self._get_order(order_id)
         if order.status not in {
@@ -258,57 +258,38 @@ class VcnService:
                 detail="MURABAHA_NOT_SIGNED",
             )
 
-        loan = await self.db.scalar(
-            select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None))
-        )
-
-        if loan is None:
-            # Gateway failed to seed — emit event for Gateway Service to handle recovery
-            logger.warning(
-                "Loan not found for order during down payment confirmation",
-                extra={"order_id": order_id},
-            )
-            # Future: emit payment.gateway_seeding_required event here
-        else:
-            # Loan already seeded by Gateway; update totals to reflect received payment
-            loan.total_paid = Decimal(str(loan.down_payment_amount))
-            loan.total_outstanding = Decimal(str(loan.balance_financed))
-
-        # VIOLATION-02: Do NOT mutate order.status directly. 
-        # The Gateway Service will update it upon receiving payment.confirmed event.
-        # order.status = OrderState.DOWN_PAYMENT_RECEIVED
-        await self.db.flush()
-
-        # Publish confirmed event for Ledger Service
+        # Publish confirmed event via transactional outbox
         envelope = build_event_envelope(
             event=EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED,
             source_service="payment-orchestrator",
             payload={
                 "order_id": order_id,
-                "loan_id": loan.id if loan else None,
+                "loan_id": None,  # Gateway Service looks up its own Loan by order_id
                 "amount_pkr": str(amount_pkr),
                 "gateway_txn_id": gateway_txn_id,
             },
         )
-        await self.redis.publish(
-            event_channel(EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED),
-            envelope.to_json(),
-        )
+        await self._queue_outbox_event(EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED, asdict(envelope))
 
         logger.info(
-            "Down payment confirmed",
+            "Down payment confirmed — outbox event queued",
             extra={
                 "order_id": order_id,
-                "loan_id": loan.id if loan else None,
                 "amount_pkr": str(amount_pkr),
                 "gateway_txn_id": gateway_txn_id,
             },
         )
-        return loan
 
+    # ── Outbox Helper ────────────────────────────────────────────────────────
 
-
-    # ── Queue Helper ─────────────────────────────────────────────────────────
+    async def _queue_outbox_event(self, event_name: str, payload: dict) -> None:
+        event = OutboxEvent(
+            event_name=event_name,
+            payload=payload,
+            status="pending"
+        )
+        self.db.add(event)
+        await self.db.flush()
 
     async def queue_issue(
         self,
@@ -320,13 +301,15 @@ class VcnService:
         """
         Push a VCN issue job to the Outbox for background processing.
         Ensures 100% consistency: VCN is ONLY issued if the down payment DB transaction commits.
+        The OutboxPublisher worker bridges this to the VCN_ISSUE Redis queue.
         """
         payload = {
             "order_id": order_id,
             "amount_pkr": str(amount_pkr),
             "merchant_domain": merchant_domain,
         }
-        
+
+        # vcn.issue is a special internal outbox event handled by the publisher
         event = OutboxEvent(
             event_name="vcn.issue",
             payload=payload,

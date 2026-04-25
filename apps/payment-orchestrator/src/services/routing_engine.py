@@ -24,8 +24,10 @@ from src.config import settings
 
 logger = logging.getLogger(__name__)
 
-# Gateways in priority order (most preferred first)
-_GATEWAY_PRIORITY = ["raast", "jazzcash", "safepay"]
+# Gateways in priority order (most preferred first for auto-selection).
+# INR-03 fix: SafePay is the primary MVP gateway. Raast is Phase 3 (near-zero fee,
+# T+0 settlement, but requires bank partner provisioning — do not auto-select until live).
+_GATEWAY_PRIORITY = ["safepay", "jazzcash", "raast"]
 
 
 class GatewayRoutingEngine:

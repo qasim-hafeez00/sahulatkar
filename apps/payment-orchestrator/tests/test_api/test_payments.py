@@ -7,6 +7,11 @@ import pytest
 
 pytestmark = pytest.mark.asyncio
 
+from tests.conftest import TestingSessionLocal
+from sk_shared.models.auth import User
+from sk_shared.models.payment import Installment
+from sqlalchemy import select
+
 
 # ── Down Payment ─────────────────────────────────────────────────────────────
 
@@ -152,9 +157,7 @@ async def test_down_payment_idempotency_returns_same_transaction(client, test_us
 async def test_down_payment_rejects_wrong_user_order(client, test_user, seed_signed_order):
     user1, token1 = test_user
     # Create a second user's order
-    from sk_shared.models.auth import User
     import uuid
-    from tests.conftest import TestingSessionLocal
     async with TestingSessionLocal() as session:
         user2 = User(uuid=uuid.uuid4(), phone="+923009999999", status="kyc_approved")
         session.add(user2)
@@ -183,9 +186,7 @@ async def test_pay_installment_success(client, test_user, seed_order_with_loan):
 
     # Get first installment
     from sk_shared.models.payment import Installment
-    from sqlalchemy import select
     from src.config import settings as test_settings
-    from tests.conftest import TestingSessionLocal
 
     async with TestingSessionLocal() as session:
         inst = await session.scalar(
@@ -220,9 +221,7 @@ async def test_pay_installment_rejects_already_paid(client, test_user, seed_orde
     user, token = test_user
     order, loan = await seed_order_with_loan(user.id)
 
-    from sk_shared.models.payment import Installment
     from sqlalchemy import select
-    from tests.conftest import TestingSessionLocal
 
     async with TestingSessionLocal() as session:
         inst = await session.scalar(
@@ -255,9 +254,7 @@ async def test_internal_trigger_requires_token(client, test_user, seed_order_wit
     user, _ = test_user
     _, loan = await seed_order_with_loan(user.id)
 
-    from sk_shared.models.payment import Installment
     from sqlalchemy import select
-    from tests.conftest import TestingSessionLocal
 
     async with TestingSessionLocal() as session:
         inst = await session.scalar(
@@ -276,9 +273,7 @@ async def test_internal_trigger_with_valid_token(client, test_user, seed_order_w
     user, _ = test_user
     _, loan = await seed_order_with_loan(user.id)
 
-    from sk_shared.models.payment import Installment
     from sqlalchemy import select
-    from tests.conftest import TestingSessionLocal
 
     async with TestingSessionLocal() as session:
         inst = await session.scalar(

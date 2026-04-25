@@ -69,12 +69,30 @@ async def void_vcn(
     if card.status == "voided":
         return {"status": "already_voided", "vcn_id": vcn_id}
 
+    # GAP-04 fix: Cancel the card on Stripe so it stops being spendable immediately.
+    # A local-only status update leaves the card active on Stripe for up to 24h.
+    from src.adapters.stripe_issuing import StripeIssuingAdapter
+    from src.config import settings
+    stripe_adapter = StripeIssuingAdapter(
+        secret_key=settings.STRIPE_SECRET_KEY,
+        fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+        fx_buffer_pct=settings.FX_BUFFER_PCT,
+    )
+    stripe_cancel_ok = stripe_adapter.cancel_card(card.issuer_card_id)
+    if not stripe_cancel_ok:
+        # Log the failure but still mark locally as voided to prevent re-use
+        import logging
+        logging.getLogger(__name__).error(
+            "Stripe card cancellation failed — voiding locally only",
+            extra={"vcn_id": vcn_id, "issuer_card_id": card.issuer_card_id},
+        )
+
     card.status = "voided"
     card.void_reason = reason
     await db.commit()
 
     VCN_VOID_TOTAL.labels(reason=reason).inc()
-    return {"status": "voided", "vcn_id": vcn_id, "reason": reason}
+    return {"status": "voided", "vcn_id": vcn_id, "reason": reason, "stripe_canceled": stripe_cancel_ok}
 
 
 @router.get("/vcn/{order_id}/status", response_model=VcnStatusResponse)
