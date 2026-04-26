@@ -1,4 +1,5 @@
 import logging
+from dataclasses import asdict
 from decimal import Decimal
 from typing import Optional
 
@@ -37,20 +38,48 @@ class VcnOrchestrator:
             return
 
         if event_type == "issuing_transaction.created":
-            amount = Decimal(str(data.get("amount", 0))) / Decimal("100")  # Stripe amounts are in cents
-            card.charged_amount += amount
+            # BV-05 Fix: Do not mutate charged_amount here, emit event to Ledger
             card.is_used = True
-            logger.info(f"VCN {card.id} charged {amount} PKR", extra={"order_id": card.order_id})
+            logger.info(f"VCN {card.id} transaction created", extra={"order_id": card.order_id})
             
             await self._queue_event(
                 "vcn.charged",
                 {
                     "vcn_id": card.id,
                     "order_id": card.order_id,
-                    "amount_pkr": str(amount),
-                    "total_charged": str(card.charged_amount),
+                    "stripe_amount_cents": data.get("amount", 0),
+                    "stripe_txn_id": data.get("id"),
                 }
             )
+
+        elif event_type == "issuing_authorization.request":
+            import asyncio
+            import stripe
+            from src.adapters.stripe_issuing import StripeIssuingAdapter
+            from src.config import settings
+
+            amount = data.get("pending_request", {}).get("amount", 0)
+
+            stripe_adapter = StripeIssuingAdapter(
+                secret_key=settings.STRIPE_SECRET_KEY,
+                fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+                fx_buffer_pct=settings.FX_BUFFER_PCT,
+            )
+            # Stripe sends authorization request amounts in card currency smallest unit (USD cents).
+            authorized_cents = stripe_adapter._pkr_to_usd_cents(Decimal(str(card.authorized_amount)))
+            approved = card.status == "active" and amount <= authorized_cents
+
+            if approved:
+                await asyncio.to_thread(stripe.issuing.Authorization.approve, data["id"])
+                logger.info("VCN authorization approved", extra={"vcn_id": card.id, "amount_cents": amount})
+            else:
+                await asyncio.to_thread(stripe.issuing.Authorization.decline, data["id"])
+                logger.warning("VCN authorization declined", extra={"vcn_id": card.id, "amount_cents": amount, "authorized_limit": authorized_cents})
+                try:
+                    from src.core.metrics import VCN_AUTH_REJECTED_TOTAL
+                    VCN_AUTH_REJECTED_TOTAL.inc()
+                except ImportError:
+                    pass
 
         elif event_type == "issuing_card.updated":
             status = data.get("status")
@@ -67,7 +96,7 @@ class VcnOrchestrator:
         
         outbox = OutboxEvent(
             event_name=event_name,
-            payload=envelope.to_dict(),
+            payload=asdict(envelope),
             status="pending"
         )
         self.db.add(outbox)

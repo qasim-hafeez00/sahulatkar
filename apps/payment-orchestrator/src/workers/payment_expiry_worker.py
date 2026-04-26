@@ -31,7 +31,7 @@ class PaymentSessionExpiryWorker:
             
             result = await db.execute(
                 select(PaymentWorkflow)
-                .where(PaymentWorkflow.status == PaymentStatus.INITIATED)
+                .where(PaymentWorkflow.status.in_([PaymentStatus.INITIATED, PaymentStatus.PENDING]))
                 .where(PaymentWorkflow.session_expires_at < now)
             )
             expired_workflows = result.scalars().all()

@@ -5,12 +5,14 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import AsyncGenerator
+from unittest.mock import MagicMock, patch
 
 import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy import BigInteger, StaticPool
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.compiler import compiles
 
@@ -28,6 +30,26 @@ from src.config import settings
 from src.core.dependencies import get_db as service_get_db
 from src.core.dependencies import get_redis
 from src.main import app
+
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(_type, _compiler, **_kw):
+    return "JSON"
+
+
+@compiles(ARRAY, "sqlite")
+def _compile_array_sqlite(_type, _compiler, **_kw):
+    return "JSON"
+
+
+try:
+    from sqlalchemy.dialects.postgresql import TSVECTOR
+
+    @compiles(TSVECTOR, "sqlite")
+    def _compile_tsvector_sqlite(_type, _compiler, **_kw):
+        return "TEXT"
+except ImportError:
+    pass
+
 
 @compiles(BigInteger, "sqlite")
 def _compile_bigint_sqlite(_type, _compiler, **_kw):
@@ -71,6 +93,46 @@ def setup_keys():
     settings.INTERNAL_API_TOKEN = "test-internal-token-secret"
     settings.VCN_ENCRYPTION_KEY = "test-vcn-key"
     settings.RECONCILIATION_AUDIT_DIR = "./tmp/recon"
+
+@pytest.fixture(autouse=True)
+def mock_stripe(monkeypatch):
+    """Mock all stripe module calls to prevent real Stripe API calls in tests."""
+    mock = MagicMock()
+    # Card creation
+    mock_card = MagicMock()
+    mock_card.id = "ic_test_abc123"
+    mock_card.exp_month = 12
+    mock_card.exp_year = 2027
+    mock_card.number = "4242424242424242"
+    mock_card.cvc = "123"
+    mock.issuing.Card.create.return_value = mock_card
+    mock.issuing.Card.retrieve.return_value = mock_card
+    mock.issuing.Card.modify.return_value = mock_card
+    # Cardholder
+    mock_cardholder = MagicMock()
+    mock_cardholder.id = "ich_test_001"
+    mock.issuing.Cardholder.create.return_value = mock_cardholder
+    mock.issuing.Cardholder.list.return_value = MagicMock(data=[])
+    # Authorization
+    mock.issuing.Authorization.approve.return_value = MagicMock()
+    mock.issuing.Authorization.decline.return_value = MagicMock()
+    # Balance
+    mock.Balance.retrieve.return_value = MagicMock(available=[{"amount": 10000, "currency": "usd"}])
+    # Webhook
+    mock.error = MagicMock()
+    mock.error.StripeError = Exception
+    mock.Webhook.construct_event.return_value = MagicMock()
+    monkeypatch.setattr("stripe.issuing", mock.issuing)
+    monkeypatch.setattr("stripe.Balance", mock.Balance)
+    monkeypatch.setattr("stripe.Webhook", mock.Webhook)
+    monkeypatch.setattr("stripe.api_key", "sk_test_mock")
+    # Patch inside adapters/services too
+    import stripe as stripe_lib
+    monkeypatch.setattr(stripe_lib, "issuing", mock.issuing)
+    monkeypatch.setattr(stripe_lib, "Balance", mock.Balance)
+    monkeypatch.setattr(stripe_lib, "Webhook", mock.Webhook)
+    return mock
+
 
 @pytest.fixture
 def redis_mock():

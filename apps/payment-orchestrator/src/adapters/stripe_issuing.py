@@ -15,6 +15,7 @@ from typing import Any, Dict
 import stripe
 
 from src.adapters.base import PaymentAdapter
+from src.config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -69,6 +70,52 @@ class StripeIssuingAdapter(PaymentAdapter):
             "amount_usd_cents": amount_usd_cents,
         }
 
+    def create_card(
+        self,
+        cardholder_id: str,
+        authorized_amount_cents: int,
+        merchant_category: str = "5999",
+    ) -> Dict[str, Any]:
+        """
+        Create a Stripe Issuing virtual card.
+        Returns pan, cvv, expiry, and issuer_card_id.
+        """
+        try:
+            stripe.api_key = self.secret_key
+            card = stripe.issuing.Card.create(
+                cardholder=cardholder_id,
+                currency="usd",
+                type="virtual",
+                spending_controls={
+                    "spending_limits": [
+                        {"amount": authorized_amount_cents, "interval": "per_authorization"}
+                    ],
+                    "allowed_categories": [merchant_category],
+                },
+                status="active",
+            )
+            # Fetch card details (PAN/CVV only available right after creation)
+            card_details = stripe.issuing.Card.retrieve(card.id, expand=["number", "cvc"])
+            return {
+                "issuer_card_id": card.id,
+                "pan": card_details.number,
+                "cvv": card_details.cvc,
+                "expiry_month": str(card_details.exp_month).zfill(2),
+                "expiry_year": str(card_details.exp_year),
+            }
+        except stripe.error.StripeError as exc:
+            if settings.ENVIRONMENT == "local":
+                logger.warning("Using local Stripe card stub", extra={"error": str(exc)})
+                return {
+                    "issuer_card_id": f"ic_local_{cardholder_id}",
+                    "pan": "4242424242424242",
+                    "cvv": "123",
+                    "expiry_month": "12",
+                    "expiry_year": "2030",
+                }
+            logger.error("Stripe card creation failed", extra={"error": str(exc)})
+            raise
+
     def cancel_card(self, issuer_card_id: str) -> bool:
         """
         Cancel (void) a Stripe Issuing card.
@@ -89,8 +136,16 @@ class StripeIssuingAdapter(PaymentAdapter):
             return False
 
     def verify_signature(self, body: bytes, signature: str) -> bool:
-        """Stripe signature verification is handled in the webhook endpoint via stripe.Webhook."""
-        return True  # Handled upstream by stripe.Webhook.construct_event
+        """Verify Stripe signature when a webhook secret is configured."""
+        endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
+        if not endpoint_secret:
+            return settings.ENVIRONMENT == "local"
+
+        try:
+            stripe.Webhook.construct_event(body, signature, endpoint_secret)
+            return True
+        except Exception:
+            return False
 
     def parse_event(self, body: bytes) -> Dict[str, Any]:
         """Parse Stripe event — handled upstream in the webhook endpoint."""

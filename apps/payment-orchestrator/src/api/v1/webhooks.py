@@ -182,6 +182,55 @@ async def raast_webhook(
     return WebhookAck(status="ok")
 
 
+@router.post("/webhooks/raast/mandate", response_model=WebhookAck)
+async def raast_mandate_webhook(
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """
+    Raast Mandate confirmation webhook.
+    Sent by the aggregator when the payer authorizes the mandate.
+    """
+    body = await request.body()
+    signature = request.headers.get("X-Raast-Signature", "")
+    client = RaastClient(
+        api_key=settings.RAAST_API_KEY,
+        api_secret=settings.RAAST_API_SECRET,
+        merchant_iban=settings.RAAST_MERCHANT_IBAN,
+    )
+
+    if not client.verify_signature(body, signature):
+        WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="invalid_sig").inc()
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
+
+    if not await _dedupe_webhook(redis, body, signature):
+        WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="duplicate").inc()
+        return WebhookAck(status="duplicate")
+
+    import json
+    data = json.loads(body.decode("utf-8"))
+    mandate_ref = data.get("mandate_reference")
+    mandate_status = "active" if data.get("status") == "success" else "failed"
+
+    if not mandate_ref:
+        return WebhookAck(status="ignored")
+
+    from sqlalchemy import select
+    from src.models.payment_mandate import PaymentMandate
+
+    mandate = await db.scalar(
+        select(PaymentMandate).where(PaymentMandate.mandate_reference == mandate_ref)
+    )
+    if mandate:
+        mandate.status = mandate_status
+        await db.commit()
+
+    WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="processed").inc()
+    logger.info("Raast mandate webhook processed", extra={"mandate_ref": mandate_ref, "status": mandate_status})
+    return WebhookAck(status="ok")
+
+
 @router.post("/webhooks/stripe", response_model=WebhookAck)
 async def stripe_webhook(
     request: Request,
@@ -197,6 +246,8 @@ async def stripe_webhook(
     endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
 
     if not endpoint_secret:
+        if settings.ENVIRONMENT != "local":
+            raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="STRIPE_WEBHOOK_NOT_CONFIGURED")
         logger.warning("STRIPE_WEBHOOK_SECRET not configured, skipping verification")
         # In dev, we might skip signature verification if secret is missing
         import json

@@ -153,3 +153,57 @@ async def test_queue_issue_pushes_to_outbox(db_session, redis_mock, test_user, s
     events = result.scalars().all()
     assert len(events) == 1
     assert events[0].payload["order_id"] == order.id
+
+
+async def test_issue_vcn_price_drift_exact_match_allowed(db_session, redis_mock, test_user, seed_signed_order):
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    service = VcnService(db_session, redis_mock)
+    card = await service.issue_vcn(order_id=order.id, amount_pkr=Decimal("5200.00"))
+    assert card.order_id == order.id
+
+
+async def test_issue_vcn_price_drift_within_tolerance_allowed(db_session, redis_mock, test_user, seed_signed_order):
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    service = VcnService(db_session, redis_mock)
+    # 5% of 5200 = 260; choose 5450 (within tolerance)
+    card = await service.issue_vcn(order_id=order.id, amount_pkr=Decimal("5450.00"))
+    assert card.order_id == order.id
+
+
+async def test_issue_vcn_price_drift_exceeds_tolerance_rejected(db_session, redis_mock, test_user, seed_signed_order):
+    from fastapi import HTTPException
+
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    service = VcnService(db_session, redis_mock)
+    # 5% above 5200 is 5460; choose 5600 to exceed threshold
+    with pytest.raises(HTTPException) as exc_info:
+        await service.issue_vcn(order_id=order.id, amount_pkr=Decimal("5600.00"))
+
+    assert exc_info.value.status_code == 422
+    assert "PRICE_DRIFT_EXCEEDED" in str(exc_info.value.detail)
+
+
+async def test_issue_vcn_price_drift_zero_stored_total_guard(db_session, redis_mock, test_user, seed_signed_order):
+    from fastapi import HTTPException
+    from sk_shared.models.order import Order
+
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    # Force pathological order total to zero; guard should reject issuance.
+    order_row = await db_session.get(Order, order.id)
+    order_row.total_amount = Decimal("0")
+    await db_session.commit()
+
+    service = VcnService(db_session, redis_mock)
+    with pytest.raises(HTTPException) as exc_info:
+        await service.issue_vcn(order_id=order.id, amount_pkr=Decimal("100.00"))
+
+    assert exc_info.value.status_code == 422
+    assert "PRICE_DRIFT_EXCEEDED" in str(exc_info.value.detail)

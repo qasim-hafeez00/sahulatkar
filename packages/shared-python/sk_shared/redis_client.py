@@ -42,6 +42,12 @@ class RedisClient:
     async def lpush(self, key: str, value: str) -> None:
         await self.redis.lpush(key, value)
 
+    async def llen(self, key: str) -> int:
+        return await self.redis.llen(key)
+
+    async def ping(self) -> bool:
+        return await self.redis.ping()
+
     async def close(self) -> None:
         await self.redis.close()
 

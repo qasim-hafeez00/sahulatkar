@@ -67,13 +67,13 @@ class RaastClient:
         base_url: str = "https://sandbox.raast-gateway.pk/api/v1",
     ) -> None:
         self.api_key = api_key
-        self.api_secret = api_secret or "mock-raast-secret"
+        self.api_secret = api_secret
         self.merchant_iban = merchant_iban
         self.base_url = base_url
 
     # ── Payment Initiation ─────────────────────────────────────────────────
 
-    def initiate_ibft(
+    async def initiate_ibft(
         self,
         *,
         order_id: int,
@@ -83,12 +83,7 @@ class RaastClient:
     ) -> RaastTransferResult:
         """
         Initiates an IBFT transfer request from payer to SahulatKar.
-
-        In live environment, this makes an async HTTP call to the aggregator.
-        The aggregator sends an OTP to the payer's registered mobile number.
-        The payer confirms → aggregator calls our webhook.
-
-        Returns a RaastTransferResult with status="initiated".
+        Uses httpx to make an async HTTP call to the aggregator.
         """
         gateway_txn_id = f"raast_{uuid4().hex}"
         reference_no = f"SK{order_id:012d}"
@@ -106,26 +101,39 @@ class RaastClient:
             "order_id": order_id,
         }
 
-        # TODO: Replace mock with real HTTP call when credentials are provisioned:
-        #
-        # async with httpx.AsyncClient() as client:
-        #     headers = {
-        #         "X-API-Key": self.api_key,
-        #         "X-Raast-Signature": self._sign_payload(json.dumps(payload).encode()),
-        #         "Content-Type": "application/json",
-        #     }
-        #     resp = await client.post(f"{self.base_url}/ibft/initiate", json=payload, headers=headers, timeout=10)
-        #     resp.raise_for_status()
-        #     return self._parse_initiation_response(resp.json(), gateway_txn_id)
+        import httpx
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                headers = {
+                    "X-API-Key": self.api_key,
+                    "X-Raast-Signature": self._sign_payload(json.dumps(payload).encode()),
+                    "Content-Type": "application/json",
+                }
+                resp = await client.post("/ibft/initiate", json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("RAAST_IBFT_HTTP_ERROR") from exc
+            logger.warning(f"Raast IBFT call failed: {exc}, returning local stub success")
+            data = {"status": "initiated"}
+
+        provider_status = str(data.get("status", "initiated")).lower()
+        success = provider_status in {"initiated", "pending", "success", "queued"}
+        normalized_status = (
+            "success" if provider_status == "success" else
+            "pending" if provider_status in {"pending", "queued"} else
+            "initiated"
+        )
 
         logger.info(
-            "Raast IBFT initiated (mock)",
+            "Raast IBFT initiated",
             extra={"order_id": order_id, "gateway_txn_id": gateway_txn_id},
         )
         return RaastTransferResult(
             gateway_txn_id=gateway_txn_id,
-            success=True,
-            status="initiated",
+            success=success,
+            status=normalized_status,
             reference_no=reference_no,
             payload=payload,
         )
@@ -134,15 +142,26 @@ class RaastClient:
         """
         Polls the aggregator for the current status of a Raast transaction.
         Used as a safety net if the webhook is delayed.
-
-        TODO: Implement with real HTTP call when credentials are provisioned.
         """
-        logger.info("Raast status check (mock)", extra={"gateway_txn_id": gateway_txn_id})
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                headers = {"X-API-Key": self.api_key}
+                resp = client.get(f"/ibft/status/{gateway_txn_id}", headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("RAAST_STATUS_HTTP_ERROR") from exc
+            logger.warning(f"Raast status check failed: {exc}, returning local stub")
+            data = {"status": "success", "reference_no": f"SBP-REF-{gateway_txn_id[:8].upper()}"}
+
+        status_raw = str(data.get("status", "pending")).lower()
         return RaastTransferResult(
             gateway_txn_id=gateway_txn_id,
-            success=True,
-            status="success",
-            reference_no=f"SBP-REF-{gateway_txn_id[:8].upper()}",
+            success=status_raw in {"success", "pending", "initiated", "queued"},
+            status="success" if status_raw == "success" else "pending",
+            reference_no=data.get("reference_no", f"SBP-REF-{gateway_txn_id[:8].upper()}"),
+            payload=data,
         )
 
     def refund(
@@ -152,19 +171,31 @@ class RaastClient:
         amount_pkr: Decimal,
         reason: str,
     ) -> dict[str, Any]:
-        """
-        Initiate a refund for a Raast IBFT transaction.
-        TODO: Integrate with Raast IBFT reversal API.
-        """
-        from uuid import uuid4
-        refund_id = f"raast_ref_{uuid4().hex}"
-        logger.info(
-            "Raast refund initiated (mock)",
-            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
-        )
+        """Initiate a refund for a Raast IBFT transaction."""
+        payload = {
+            "gateway_txn_id": gateway_txn_id,
+            "amount_pkr": str(amount_pkr),
+            "reason": reason,
+        }
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                headers = {
+                    "X-API-Key": self.api_key,
+                    "X-Raast-Signature": self._sign_payload(json.dumps(payload).encode()),
+                    "Content-Type": "application/json",
+                }
+                resp = client.post("/ibft/refund", json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("RAAST_REFUND_HTTP_ERROR") from exc
+            logger.warning(f"Raast refund failed: {exc}, returning local stub")
+            data = {"refund_id": f"raast_ref_{uuid4().hex}", "status": "success"}
+
         return {
-            "gateway_refund_id": refund_id,
-            "status": "success",
+            "gateway_refund_id": data.get("refund_id", f"raast_ref_{uuid4().hex}"),
+            "status": data.get("status", "success"),
         }
 
     # ── Mandate Management ────────────────────────────────────────────────
@@ -181,14 +212,35 @@ class RaastClient:
         In the SBP model, this triggers a mandate authorization request
         to the payer's bank app/USSD.
         """
-        mandate_ref = f"MND_{uuid4().hex[:12]}"
-        logger.info(
-            "Raast mandate setup initiated (mock)",
-            extra={"user_id": user_id, "mandate_ref": mandate_ref}
-        )
+        payload = {
+            "user_id": user_id,
+            "payer_iban": payer_iban,
+            "max_amount_pkr": str(max_amount),
+        }
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                headers = {
+                    "X-API-Key": self.api_key,
+                    "X-Raast-Signature": self._sign_payload(json.dumps(payload).encode()),
+                    "Content-Type": "application/json",
+                }
+                resp = client.post("/mandates/setup", json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("RAAST_MANDATE_SETUP_HTTP_ERROR") from exc
+            logger.warning(f"Raast mandate setup failed: {exc}, returning local stub")
+            data = {
+                "status": "initiated",
+                "mandate_reference": f"MND_{uuid4().hex[:12]}",
+                "authorization_url": None,
+            }
+
         return {
-            "status": "initiated",
-            "mandate_reference": mandate_ref,
+            "status": data.get("status", "initiated"),
+            "mandate_reference": data.get("mandate_reference", f"MND_{uuid4().hex[:12]}"),
+            "authorization_url": data.get("authorization_url"),
             "payer_iban": payer_iban,
         }
 
@@ -203,16 +255,35 @@ class RaastClient:
         Execute an auto-debit against a previously authorized Raast mandate.
         Used for installment auto-collection.
         """
-        gateway_txn_id = f"raast_mnd_{uuid4().hex}"
-        logger.info(
-            "Raast mandate charge executed (mock)",
-            extra={"mandate_ref": mandate_reference, "amount_pkr": str(amount_pkr)}
-        )
+        payload = {
+            "mandate_reference": mandate_reference,
+            "amount_pkr": str(amount_pkr),
+            "reference_no": reference_no,
+        }
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                headers = {
+                    "X-API-Key": self.api_key,
+                    "X-Raast-Signature": self._sign_payload(json.dumps(payload).encode()),
+                    "Content-Type": "application/json",
+                }
+                resp = client.post("/mandates/charge", json=payload, headers=headers)
+                resp.raise_for_status()
+                data = resp.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("RAAST_MANDATE_CHARGE_HTTP_ERROR") from exc
+            logger.warning(f"Raast mandate charge failed: {exc}, returning local stub")
+            data = {"gateway_txn_id": f"raast_mnd_{uuid4().hex}", "status": "success"}
+
+        gateway_txn_id = data.get("gateway_txn_id", f"raast_mnd_{uuid4().hex}")
+        status_raw = str(data.get("status", "success")).lower()
         return RaastTransferResult(
             gateway_txn_id=gateway_txn_id,
-            success=True,
-            status="success",
+            success=status_raw in {"success", "pending", "initiated", "queued"},
+            status="success" if status_raw == "success" else "pending",
             reference_no=reference_no,
+            payload=data,
         )
 
     # ── Signature / Webhook Verification ──────────────────────────────────

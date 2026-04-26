@@ -76,7 +76,9 @@ async def _get_order_for_user(db: AsyncSession, order_id: int, user_id: int) -> 
     return order
 
 
-@router.post("/down-payment", response_model=DownPaymentResponse)
+from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token, rate_limit
+
+@router.post("/down-payment", response_model=DownPaymentResponse, dependencies=[Depends(rate_limit(10, 60))])
 async def down_payment(
     request_payload: DownPaymentRequest,
     request: Request,

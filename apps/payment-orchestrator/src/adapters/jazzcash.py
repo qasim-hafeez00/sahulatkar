@@ -16,7 +16,7 @@ class JazzCashAdapter(PaymentAdapter):
         callback_url: str,
         **kwargs
     ) -> Dict[str, Any]:
-        result = self.client.charge(
+        result = await self.client.charge(
             order_id=order_id,
             amount_pkr=amount_pkr
         )

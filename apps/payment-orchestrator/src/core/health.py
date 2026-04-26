@@ -44,9 +44,13 @@ async def check_stripe() -> Dict[str, Any]:
         if not settings.STRIPE_SECRET_KEY:
             return {"status": "unconfigured"}
         import stripe
+        import asyncio
         stripe.api_key = settings.STRIPE_SECRET_KEY
+        
         # Balance retrieve is a lightweight, read-only check
-        stripe.Balance.retrieve()
+        loop = asyncio.get_event_loop()
+        await loop.run_in_executor(None, lambda: stripe.Balance.retrieve())
+        
         return {"status": "ok"}
     except Exception as exc:
         logger.warning("Stripe health check failed", extra={"error": str(exc)})

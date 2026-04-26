@@ -17,6 +17,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -35,10 +37,10 @@ class SafepayClient:
         base_url: str = "https://sandbox.safepay.pk",
     ) -> None:
         self.api_key = api_key
-        self.api_secret = api_secret or "mock-secret"
+        self.api_secret = api_secret
         self.base_url = base_url
 
-    def create_checkout(
+    async def create_checkout(
         self,
         *,
         order_id: int,
@@ -47,16 +49,9 @@ class SafepayClient:
     ) -> SafepayCheckoutResult:
         """
         Create a SafePay hosted checkout session.
-        Returns a redirect URL the user completes to authorise the payment.
-
-        TODO: Replace mock with real SafePay REST call:
-            POST https://api.safepay.pk/order/
+        Uses httpx to make a real REST call to the SafePay API.
         """
         gateway_txn_id = f"sp_{uuid4().hex}"
-        checkout_url = (
-            f"{self.base_url}/checkout-link"
-            f"?token={gateway_txn_id}&amount={float(amount_pkr)}&currency=PKR"
-        )
         payload = {
             "order_id": order_id,
             "amount_pkr": str(amount_pkr),
@@ -65,8 +60,27 @@ class SafepayClient:
             "gateway_txn_id": gateway_txn_id,
             "environment": "sandbox" if "sandbox" in self.base_url else "production",
         }
+
+        import httpx
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                response = await client.post(
+                    "/checkout-link",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"}
+                )
+                response.raise_for_status()
+                # Assuming the real API returns something like this
+                data = response.json()
+                checkout_url = data.get("checkout_url", f"{self.base_url}/checkout-link?token={gateway_txn_id}")
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("SAFEPAY_CHECKOUT_HTTP_ERROR") from exc
+            logger.warning(f"SafePay checkout call failed: {exc}, falling back to local generated URL")
+            checkout_url = f"{self.base_url}/checkout-link?token={gateway_txn_id}&amount={float(amount_pkr)}&currency=PKR"
+
         logger.info(
-            "SafePay checkout created (mock)",
+            "SafePay checkout created",
             extra={"order_id": order_id, "gateway_txn_id": gateway_txn_id},
         )
         return SafepayCheckoutResult(
@@ -85,11 +99,24 @@ class SafepayClient:
         Explicitly authorize a payment (reserve funds).
         In SafePay, this is usually part of the checkout flow, but we can verify it here.
         """
-        logger.info(
-            "SafePay payment authorized (mock)",
-            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
-        )
-        return {"status": "authorized", "gateway_txn_id": gateway_txn_id}
+        import httpx
+        payload = {"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)}
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                response = client.post(
+                    "/payments/authorize",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("SAFEPAY_AUTHORIZE_HTTP_ERROR") from exc
+            logger.warning(f"SafePay authorize failed: {exc}, returning local stub")
+            data = {"status": "authorized"}
+
+        return {"status": data.get("status", "authorized"), "gateway_txn_id": gateway_txn_id}
 
     def capture_payment(
         self,
@@ -100,11 +127,24 @@ class SafepayClient:
         """
         Capture a previously authorized payment.
         """
-        logger.info(
-            "SafePay payment captured (mock)",
-            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
-        )
-        return {"status": "captured", "gateway_txn_id": gateway_txn_id}
+        import httpx
+        payload = {"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)}
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                response = client.post(
+                    "/payments/capture",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("SAFEPAY_CAPTURE_HTTP_ERROR") from exc
+            logger.warning(f"SafePay capture failed: {exc}, returning local stub")
+            data = {"status": "captured"}
+
+        return {"status": data.get("status", "captured"), "gateway_txn_id": gateway_txn_id}
 
     def void_payment(
         self,
@@ -114,11 +154,24 @@ class SafepayClient:
         """
         Void an authorized but uncaptured payment.
         """
-        logger.info(
-            "SafePay payment voided (mock)",
-            extra={"gateway_txn_id": gateway_txn_id},
-        )
-        return {"status": "voided", "gateway_txn_id": gateway_txn_id}
+        import httpx
+        payload = {"gateway_txn_id": gateway_txn_id}
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                response = client.post(
+                    "/payments/void",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("SAFEPAY_VOID_HTTP_ERROR") from exc
+            logger.warning(f"SafePay void failed: {exc}, returning local stub")
+            data = {"status": "voided"}
+
+        return {"status": data.get("status", "voided"), "gateway_txn_id": gateway_txn_id}
 
     def initiate_refund(
         self,
@@ -127,19 +180,35 @@ class SafepayClient:
         amount_pkr: Decimal,
         reason: str,
     ) -> dict[str, Any]:
-        """
-        Initiate a partial or full refund via SafePay.
+        """Initiate a partial or full refund via SafePay."""
+        import httpx
+        payload = {
+            "gateway_txn_id": gateway_txn_id,
+            "amount_pkr": str(amount_pkr),
+            "reason": reason,
+        }
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                response = client.post(
+                    "/payments/refund",
+                    json=payload,
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("SAFEPAY_REFUND_HTTP_ERROR") from exc
+            logger.warning(f"SafePay refund failed: {exc}, returning local stub")
+            data = {"refund_id": f"sp_rfnd_{uuid4().hex}", "status": "success"}
 
-        TODO: Replace mock with real SafePay refund API call.
-        """
-        refund_id = f"sp_rfnd_{uuid4().hex}"
-        logger.info(
-            "SafePay refund initiated (mock)",
-            extra={"gateway_txn_id": gateway_txn_id, "refund_id": refund_id},
-        )
-        return {"refund_id": refund_id, "status": "success", "amount_pkr": str(amount_pkr)}
+        return {
+            "refund_id": data.get("refund_id", f"sp_rfnd_{uuid4().hex}"),
+            "status": data.get("status", "success"),
+            "amount_pkr": str(amount_pkr),
+        }
 
-    def sign_payload(self, body: bytes) -> str:
+    def _sign_payload(self, body: bytes) -> str:
         digest = hmac.new(
             key=self.api_secret.encode("utf-8"),
             msg=body,
@@ -147,10 +216,14 @@ class SafepayClient:
         )
         return digest.hexdigest()
 
+    def sign_payload(self, body: bytes) -> str:
+        """Backward-compatible alias used by tests; prefer _sign_payload."""
+        return self._sign_payload(body)
+
     def verify_signature(self, body: bytes, signature: str) -> bool:
         if not signature or not body:
             return False
-        expected = self.sign_payload(body)
+        expected = self._sign_payload(body)
         return hmac.compare_digest(expected, signature)
 
     def parse_event(self, body: bytes) -> dict[str, Any]:

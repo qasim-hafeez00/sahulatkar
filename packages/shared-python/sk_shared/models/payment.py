@@ -183,6 +183,7 @@ class VirtualCard(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     order_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("orders.id", ondelete="CASCADE"), nullable=False, unique=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     issuer: Mapped[str] = mapped_column(String(20), nullable=False)
+    stripe_cardholder_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     issuer_card_id: Mapped[str] = mapped_column(String(255), unique=True, nullable=False)
     masked_number: Mapped[str] = mapped_column(String(19), nullable=False)
     card_expiry: Mapped[date] = mapped_column(Date, nullable=False)

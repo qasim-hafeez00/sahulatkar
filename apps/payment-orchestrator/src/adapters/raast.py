@@ -16,13 +16,22 @@ class RaastAdapter(PaymentAdapter):
         callback_url: str,
         **kwargs
     ) -> Dict[str, Any]:
-        payer_iban = kwargs.get("payer_iban", "")
-        result = self.client.initiate_ibft(
-            order_id=order_id,
-            amount_pkr=amount_pkr,
-            payer_iban=payer_iban,
-            callback_url=callback_url
-        )
+        mandate_ref = kwargs.get("mandate_reference")
+        
+        if mandate_ref:
+            result = self.client.charge_mandate(
+                mandate_reference=mandate_ref,
+                amount_pkr=amount_pkr,
+                reference_no=f"SK{order_id:012d}"
+            )
+        else:
+            payer_iban = kwargs.get("payer_iban", "")
+            result = await self.client.initiate_ibft(
+                order_id=order_id,
+                amount_pkr=amount_pkr,
+                payer_iban=payer_iban,
+                callback_url=callback_url
+            )
         return {
             "gateway_txn_id": result.gateway_txn_id,
             "raw_response": result.payload

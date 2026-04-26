@@ -4,9 +4,11 @@ from typing import Optional
 from pydantic import BaseModel, Field
 
 
+from decimal import Decimal
+
 class VcnIssueRequest(BaseModel):
     order_id: int = Field(..., gt=0)
-    amount_pkr: float = Field(..., gt=0)
+    amount_pkr: Decimal = Field(..., gt=0, decimal_places=2)
     merchant_domain: Optional[str] = None
 
 

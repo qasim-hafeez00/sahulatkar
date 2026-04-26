@@ -127,10 +127,11 @@ async def require_internal_token(request: Request) -> None:
     """
     token = request.headers.get("X-Internal-Token", "")
     if not settings.INTERNAL_API_TOKEN:
-        # If not configured (local dev), warn but allow
+        if settings.ENVIRONMENT != "local":
+            raise HTTPException(status_code=503, detail="INTERNAL_AUTH_NOT_CONFIGURED")
         import logging
         logging.getLogger(__name__).warning(
-            "INTERNAL_API_TOKEN not configured — internal auth is DISABLED"
+            "INTERNAL_API_TOKEN not configured — internal auth is DISABLED (allowed in local only)"
         )
         return
     if not constant_time_compare(token, settings.INTERNAL_API_TOKEN):
@@ -138,3 +139,15 @@ async def require_internal_token(request: Request) -> None:
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="INVALID_INTERNAL_TOKEN",
         )
+
+# ── Rate Limiting ─────────────────────────────────────────────────────────────
+
+def rate_limit(limit: int, window: int):
+    async def _dep(request: Request, redis: RedisClient = Depends(get_redis)):
+        from src.core.rate_limit import RateLimiter
+        host = request.client.host if request.client else "unknown"
+        key = f"ip:{host}"
+        limiter = RateLimiter(redis)
+        if not await limiter.allow(key=key, limit=limit, window_seconds=window):
+            raise HTTPException(status_code=429, detail="RATE_LIMIT_EXCEEDED")
+    return _dep

@@ -16,7 +16,7 @@ class SafepayAdapter(PaymentAdapter):
         callback_url: str,
         **kwargs
     ) -> Dict[str, Any]:
-        checkout = self.client.create_checkout(
+        checkout = await self.client.create_checkout(
             order_id=order_id,
             amount_pkr=amount_pkr,
             callback_url=callback_url

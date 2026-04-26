@@ -39,6 +39,11 @@ class Settings(BaseSettings):
     JAZZCASH_PASSWORD: str = ""
     JAZZCASH_BASE_URL: str = "https://sandbox.jazzcash.com.pk"
 
+    # ── EasyPaisa ─────────────────────────────────────────────────────────────
+    EASYPAISA_STORE_ID: str = ""
+    EASYPAISA_HASH_KEY: str = ""
+    EASYPAISA_BASE_URL: str = "https://easypaystg.easypaisa.com.pk"
+
     # ── Raast (SBP — Primary Gateway) ─────────────────────────────────────────
     # Raast IBFT is provided through a licensed payment gateway aggregator
     # (e.g. 1LINK / NayaPay / affiliated bank). Endpoint and credentials are
@@ -50,7 +55,7 @@ class Settings(BaseSettings):
     RAAST_WEBHOOK_SECRET: str = ""
 
     # ── VCN Config ────────────────────────────────────────────────────────────
-    VCN_ENCRYPTION_KEY: str = ""           # Fernet key; falls back to STRIPE_SECRET_KEY
+    VCN_ENCRYPTION_KEY: str = ""           # Fernet key dedicated to VCN PAN/CVV encryption
     VCN_EXPIRY_HOURS: int = 24
     VCN_BUFFER_PCT: float = 5.0            # Authorized 5% above product price as buffer
 
@@ -92,7 +97,12 @@ class Settings(BaseSettings):
     OUTBOX_BATCH_SIZE: int = 50                         # Events per poll cycle
 
     # ── CORS ──────────────────────────────────────────────────────────────────
-    CORS_ALLOW_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
+    CORS_ALLOW_ORIGINS: List[str] = Field(
+        default_factory=lambda: [
+            "https://app.sahulatkar.pk",
+            "https://admin.sahulatkar.pk",
+        ]
+    )
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -62,13 +62,19 @@ class OutboxPublisher:
 
     async def process_outbox(self):
         async with SessionLocal() as db:
-            result = await db.execute(
+            stmt = (
                 select(OutboxEvent)
                 .where(OutboxEvent.status.in_(["pending", "failed"]))
                 .where(OutboxEvent.retry_count < 5)
                 .limit(settings.OUTBOX_BATCH_SIZE)
-                .with_for_update(skip_locked=True)  # Advisory lock to prevent double-processing
             )
+
+            bind = db.get_bind()
+            if bind is not None and bind.dialect.name != "sqlite":
+                # Advisory lock to prevent double-processing on Postgres.
+                stmt = stmt.with_for_update(skip_locked=True)
+
+            result = await db.execute(stmt)
             events = result.scalars().all()
 
             for event in events:

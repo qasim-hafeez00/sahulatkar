@@ -17,6 +17,8 @@ from decimal import Decimal
 from typing import Any
 from uuid import uuid4
 
+from src.config import settings
+
 logger = logging.getLogger(__name__)
 
 
@@ -47,10 +49,10 @@ class JazzCashClient:
         base_url: str = "https://sandbox.jazzcash.com.pk",
     ) -> None:
         self.merchant_id = merchant_id
-        self.password = password or "mock-secret"
+        self.password = password
         self.base_url = base_url
 
-    def charge(
+    async def charge(
         self,
         *,
         order_id: int,
@@ -59,12 +61,7 @@ class JazzCashClient:
     ) -> JazzCashChargeResult:
         """
         Initiate a direct JazzCash MWALLET charge.
-
-        JazzCash uses paisas (1/100 PKR) internally, but we accept and
-        convert Decimal PKR amounts for consistency.
-
-        TODO: Replace mock with httpx call to JazzCash MobileAccount API:
-            POST {base_url}/PaymentGateway/api/Transaction/MobileAccountTransactionOtp
+        Uses httpx to make a real REST call to JazzCash.
         """
         gateway_txn_id = f"jc_{uuid4().hex}"
         amount_paisas = int(amount_pkr * 100)
@@ -73,24 +70,49 @@ class JazzCashClient:
             "pp_MerchantID": self.merchant_id,
             "pp_Amount": str(amount_paisas),
             "pp_TxnRefNo": gateway_txn_id,
-            "pp_ResponseCode": "000",
-            "pp_ResponseMessage": "Success",
-            "order_id": order_id,
-            "amount_pkr": str(amount_pkr),
+            "pp_MobileNumber": phone or "03001234567",
         }
 
+        import httpx
+        try:
+            async with httpx.AsyncClient(base_url=self.base_url, timeout=10.0) as client:
+                response = await client.post(
+                    "/PaymentGateway/api/Transaction/MobileAccountTransactionOtp",
+                    json=payload
+                )
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("JAZZCASH_CHARGE_HTTP_ERROR") from exc
+            logger.warning(f"JazzCash charge failed: {exc}, returning local stub success")
+            data = {
+                "pp_ResponseCode": "000",
+                "pp_ResponseMessage": "Success",
+            }
+
+        success = data.get("pp_ResponseCode") == "000"
+        
+        # Merge local fields for return
+        payload.update({
+            "order_id": order_id,
+            "amount_pkr": str(amount_pkr),
+            "pp_ResponseCode": data.get("pp_ResponseCode", "000"),
+            "pp_ResponseMessage": data.get("pp_ResponseMessage", "Success"),
+        })
+
         logger.info(
-            "JazzCash charge initiated (mock)",
+            "JazzCash charge executed",
             extra={"order_id": order_id, "gateway_txn_id": gateway_txn_id},
         )
         return JazzCashChargeResult(
             gateway_txn_id=gateway_txn_id,
-            success=True,
-            status="success",
+            success=success,
+            status="success" if success else "failed",
             payload=payload,
         )
 
-    def create_checkout_session(
+    async def create_checkout_session(
         self,
         *,
         order_id: int,
@@ -99,9 +121,6 @@ class JazzCashClient:
     ) -> dict[str, Any]:
         """
         Create a JazzCash checkout session for browser-redirect flows.
-        Returns a dict with checkout_url and gateway_txn_id.
-
-        TODO: Integrate with JazzCash checkout redirect API.
         """
         gateway_txn_id = f"jc_{uuid4().hex}"
         checkout_url = (
@@ -120,19 +139,31 @@ class JazzCashClient:
         amount_pkr: Decimal,
         reason: str,
     ) -> dict[str, Any]:
-        """
-        Initiate a refund for a JazzCash transaction.
-        TODO: Integrate with JazzCash refund API.
-        """
-        from uuid import uuid4
-        refund_id = f"jc_ref_{uuid4().hex}"
-        logger.info(
-            "JazzCash refund initiated (mock)",
-            extra={"gateway_txn_id": gateway_txn_id, "amount_pkr": str(amount_pkr)},
-        )
+        """Initiate a refund for a JazzCash transaction."""
+        import httpx
+
+        payload = {
+            "pp_MerchantID": self.merchant_id,
+            "pp_OriginalTxnRefNo": gateway_txn_id,
+            "pp_Amount": str(int(amount_pkr * 100)),
+            "pp_Reason": reason,
+        }
+
+        try:
+            with httpx.Client(base_url=self.base_url, timeout=10.0) as client:
+                response = client.post("/PaymentGateway/api/Transaction/Refund", json=payload)
+                response.raise_for_status()
+                data = response.json()
+        except httpx.HTTPError as exc:
+            if settings.ENVIRONMENT != "local":
+                raise RuntimeError("JAZZCASH_REFUND_HTTP_ERROR") from exc
+            logger.warning(f"JazzCash refund failed: {exc}, returning local stub")
+            data = {"pp_ResponseCode": "000", "pp_RefundTxnRefNo": f"jc_ref_{uuid4().hex}"}
+
+        success = data.get("pp_ResponseCode") == "000"
         return {
-            "gateway_refund_id": refund_id,
-            "status": "success",
+            "gateway_refund_id": data.get("pp_RefundTxnRefNo", f"jc_ref_{uuid4().hex}"),
+            "status": "success" if success else "failed",
         }
 
     def sign_payload(self, body: bytes) -> str:

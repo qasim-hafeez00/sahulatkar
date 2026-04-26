@@ -60,4 +60,12 @@ class GatewayAdapterFactory:
                 fx_buffer_pct=settings.FX_BUFFER_PCT,
             )
 
-        raise ValueError(f"Unknown gateway: '{gateway}'. Expected one of: safepay, jazzcash, raast, stripe.")
+        if gateway == "easypaisa":
+            from src.adapters.easypaisa import EasypaisaAdapter
+            return EasypaisaAdapter(
+                store_id=settings.EASYPAISA_STORE_ID,
+                hash_key=settings.EASYPAISA_HASH_KEY,
+                base_url=settings.EASYPAISA_BASE_URL,
+            )
+
+        raise ValueError(f"Unknown gateway: '{gateway}'. Expected one of: safepay, jazzcash, raast, stripe, easypaisa.")

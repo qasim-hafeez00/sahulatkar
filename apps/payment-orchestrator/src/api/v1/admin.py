@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -249,24 +249,31 @@ async def create_adjustment(
     if not loan:
         raise HTTPException(status_code=404, detail="LOAN_NOT_FOUND_FOR_ORDER")
 
-    # Create a manual PaymentTransaction
-    txn = PaymentTransaction(
-        loan_id=loan.id,
-        user_id=loan.user_id,
-        amount=amount_pkr,
-        currency="PKR",
-        gateway="system",
-        gateway_txn_id=f"adj_{order_id}_{int(datetime.now().timestamp())}",
-        status="success",
-        transaction_type="adjustment",
-        failure_message=reason,
-        reconciled_at=datetime.now(timezone.utc),
+    # Emit outbox event instead of creating PaymentTransaction directly
+    from sk_shared.events import build_event_envelope
+    from src.models.outbox import OutboxEvent
+    from dataclasses import asdict
+
+    envelope = build_event_envelope(
+        event="payment.adjustment_requested",
+        source_service="payment-orchestrator",
+        payload={
+            "order_id": order_id,
+            "loan_id": loan.id,
+            "amount_pkr": str(amount_pkr),
+            "reason": reason,
+        }
     )
-    db.add(txn)
+    outbox = OutboxEvent(
+        event_name="payment.adjustment_requested",
+        payload=asdict(envelope),
+        status="pending"
+    )
+    db.add(outbox)
     await db.commit()
     
-    logger.info(f"Admin issued adjustment of {amount_pkr} for order {order_id}")
-    return {"status": "ok", "adjustment_id": txn.id}
+    logger.info(f"Admin queued adjustment of {amount_pkr} for order {order_id}")
+    return {"status": "queued", "event": "payment.adjustment_requested"}
 
 
 @router.get(
@@ -281,10 +288,12 @@ async def get_audit_trail(
     """
     Download a consolidated audit trail for an order's payments.
     """
-    from sk_shared.models.payment import PaymentTransaction, VirtualCard
+    from sk_shared.models.payment import PaymentTransaction, VirtualCard, Loan
     
     txns = await db.execute(
-        select(PaymentTransaction).where(PaymentTransaction.order_id == order_id)
+        select(PaymentTransaction)
+        .join(Loan, PaymentTransaction.loan_id == Loan.id)
+        .where(Loan.order_id == order_id)
     )
     cards = await db.execute(
         select(VirtualCard).where(VirtualCard.order_id == order_id)

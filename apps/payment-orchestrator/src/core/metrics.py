@@ -2,7 +2,7 @@
 Prometheus metrics registry for payment orchestrator.
 All counters and histograms are module-level singletons.
 """
-from prometheus_client import Counter, Histogram
+from prometheus_client import REGISTRY, Counter, Gauge, Histogram
 
 # ── Payment Counters ────────────────────────────────────────────────────────
 
@@ -98,10 +98,27 @@ WORKFLOW_STATE_TRANSITIONS_TOTAL = Counter(
 
 # ── Outbox Publisher ─────────────────────────────────────────────────────────
 
-from prometheus_client import Gauge
 
-OUTBOX_QUEUE_DEPTH = Gauge(
+def _get_or_create_gauge(name: str, documentation: str) -> Gauge:
+    """Return an existing Gauge if already registered, otherwise register it."""
+    existing = REGISTRY._names_to_collectors.get(name)  # type: ignore[attr-defined]
+    if existing is not None:
+        return existing  # type: ignore[return-value]
+    return Gauge(name, documentation)
+
+
+OUTBOX_QUEUE_DEPTH = _get_or_create_gauge(
     "payment_outbox_queue_depth",
     "Number of pending/failed outbox events awaiting publication",
+)
+
+VCN_AUTH_REJECTED_TOTAL = Counter(
+    "vcn_auth_rejected_total",
+    "Total rejected Stripe issuing authorization requests",
+)
+
+EVENT_LISTENER_UP = _get_or_create_gauge(
+    "payment_event_listener_up",
+    "Redis order-cancel listener connectivity status (1=up, 0=down)",
 )
 

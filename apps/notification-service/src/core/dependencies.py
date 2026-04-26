@@ -41,3 +41,16 @@ def require_internal_key(x_internal_key: str | None = Header(default=None)) -> N
 def require_operations_manager(x_admin_role: str | None = Header(default=None)) -> None:
     if x_admin_role != "operations_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN")
+
+def require_permissions(required_permissions: list[str]):
+    def _check(x_admin_permissions: str | None = Header(default=None)):
+        if not x_admin_permissions:
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_NO_PERMISSIONS")
+        
+        perms = [p.strip() for p in x_admin_permissions.split(",")]
+        for rp in required_permissions:
+            if rp in perms or "all_actions" in perms:
+                return True
+        
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_INSUFFICIENT_PERMISSIONS")
+    return _check

@@ -53,6 +53,7 @@ from src.config import settings
 from src.models.outbox import OutboxEvent
 
 logger = logging.getLogger(__name__)
+_fernet_instance: Fernet | None = None
 
 
 class VcnService:
@@ -80,99 +81,139 @@ class VcnService:
         INR-04 fix: No PaymentTransaction record is created. VCN issuance is not a
         payment transaction. Structured log + vcn.issued event via outbox.
         """
-        order = await self._get_order(order_id)
-        if order.status != OrderState.CONTRACTS_SIGNED:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="MURABAHA_NOT_SIGNED",
-            )
+        import time
+        start = time.perf_counter()
+        try:
+            order = await self._get_order(order_id)
+            if order.status != OrderState.CONTRACTS_SIGNED:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="MURABAHA_NOT_SIGNED",
+                )
 
-        contract = await self._get_signed_contract(order_id)
-        if contract is None:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="MURABAHA_NOT_SIGNED",
-            )
+            contract = await self._get_signed_contract(order_id)
+            if contract is None:
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN,
+                    detail="MURABAHA_NOT_SIGNED",
+                )
 
-        # Idempotency: return existing VCN if present
-        existing = await self.db.scalar(
-            select(VirtualCard).where(
-                VirtualCard.order_id == order_id,
-                VirtualCard.deleted_at.is_(None),
-            )
-        )
-        if existing is not None:
-            logger.info(
-                "VCN already exists for order — returning existing",
-                extra={"order_id": order_id, "vcn_id": existing.id},
-            )
-            return existing
+            # Price drift check (NEW)
+            stored_total = Decimal(str(order.total_amount))
+            drift = abs(amount_pkr - stored_total) / stored_total if stored_total > 0 else Decimal("1")
+            if drift > Decimal("0.05"):
+                raise HTTPException(
+                    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                    detail=f"PRICE_DRIFT_EXCEEDED: requested {amount_pkr}, stored {stored_total}",
+                )
 
-        pan = self._generate_pan()
-        cvv = f"{randbelow(1000):03d}"
-        now = datetime.now(timezone.utc)
+            # Idempotency: return existing VCN if present
+            existing = await self.db.scalar(
+                select(VirtualCard).where(
+                    VirtualCard.order_id == order_id,
+                    VirtualCard.deleted_at.is_(None),
+                )
+            )
+            if existing is not None:
+                logger.info(
+                    "VCN already exists for order — returning existing",
+                    extra={"order_id": order_id, "vcn_id": existing.id},
+                )
+                return existing
 
-        # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer + FX buffer
-        buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100") + Decimal(str(settings.FX_BUFFER_PCT)) / Decimal("100")
-        authorized_amount = (amount_pkr * buffer_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            now = datetime.now(timezone.utc)
+
+            # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer + FX buffer
+            buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100") + Decimal(str(settings.FX_BUFFER_PCT)) / Decimal("100")
+            authorized_amount = (amount_pkr * buffer_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
         
-        # Calculate USD limit for Stripe
-        fx_rate = Decimal(str(settings.FX_PKR_TO_USD_RATE))
-        authorized_amount_usd = (authorized_amount * fx_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+            # Calculate USD limit for Stripe
+            fx_rate = Decimal(str(settings.FX_PKR_TO_USD_RATE))
+            authorized_amount_usd = (authorized_amount * fx_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
-        card = VirtualCard(
-            order_id=order_id,
-            user_id=order.user_id,
-            issuer="stripe",
-            issuer_card_id=f"card_{hashlib.sha256(f'{order_id}:{pan}'.encode()).hexdigest()[:24]}",
-            masked_number=self._mask_pan(pan),
-            card_expiry=(now + timedelta(days=365 * 3)).date(),
-            authorized_amount=authorized_amount,
-            loaded_amount=amount_pkr,
-            mcc_lock="retail",
-            merchant_lock=merchant_domain,
-            charged_amount=Decimal("0.00"),
-            is_used=False,
-            status="active",
-            issued_at=now,
-            expires_at=now + timedelta(hours=settings.VCN_EXPIRY_HOURS),
-            encrypted_pan=self._encrypt_value(pan),
-            encrypted_cvv=self._encrypt_value(cvv),
-        )
-        self.db.add(card)
+            # Stripe Cardholder
+            from src.services.stripe_cardholder import StripeCardholderService
+            cardholder_svc = StripeCardholderService(self.redis)
+            stripe_cardholder_id = await cardholder_svc.get_or_create(user_id=order.user_id)
+        
+            # Real Stripe card creation
+            from src.adapters.stripe_issuing import StripeIssuingAdapter
+            stripe_adapter = StripeIssuingAdapter(
+                secret_key=settings.STRIPE_SECRET_KEY,
+                fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+                fx_buffer_pct=settings.FX_BUFFER_PCT,
+            )
+            amount_usd_cents = stripe_adapter._pkr_to_usd_cents(authorized_amount)
+        
+            # Resolve MCC (simplified for this context)
+            mcc = "5999"
+        
+            stripe_card = stripe_adapter.create_card(
+                cardholder_id=stripe_cardholder_id,
+                authorized_amount_cents=amount_usd_cents,
+                merchant_category=mcc,
+            )
+        
+            pan = stripe_card["pan"]
+            cvv = stripe_card["cvv"]
 
-        await self.db.flush()
-        await self.db.refresh(card)
+            card = VirtualCard(
+                order_id=order_id,
+                user_id=order.user_id,
+                issuer="stripe",
+                issuer_card_id=stripe_card["issuer_card_id"],
+                stripe_cardholder_id=stripe_cardholder_id,
+                masked_number=self._mask_pan(pan),
+                card_expiry=datetime(int(stripe_card["expiry_year"]), int(stripe_card["expiry_month"]), 1).date(),
+                authorized_amount=authorized_amount,
+                loaded_amount=amount_pkr,
+                mcc_lock="retail",
+                merchant_lock=merchant_domain,
+                charged_amount=Decimal("0.00"),
+                is_used=False,
+                status="active",
+                issued_at=now,
+                expires_at=now + timedelta(hours=settings.VCN_EXPIRY_HOURS),
+                encrypted_pan=self._encrypt_value(pan),
+                encrypted_cvv=self._encrypt_value(cvv),
+            )
+            self.db.add(card)
 
-        # Publish VCN issued event via transactional outbox
-        envelope = build_event_envelope(
-            event=EVENT_VCN_ISSUED,
-            source_service="payment-orchestrator",
-            payload={
-                "order_id": order_id,
-                "vcn_id": card.id,
-                "status": card.status,
-                "merchant_domain": merchant_domain,
-                "authorized_amount": str(authorized_amount),
-                "authorized_amount_usd": str(authorized_amount_usd),
-            },
-        )
-        await self._queue_outbox_event(EVENT_VCN_ISSUED, asdict(envelope))
+            await self.db.flush()
+            await self.db.refresh(card)
 
-        from src.core.metrics import VCN_ISSUED_TOTAL
-        VCN_ISSUED_TOTAL.labels(issuer="stripe").inc()
+            # Publish VCN issued event via transactional outbox
+            envelope = build_event_envelope(
+                event=EVENT_VCN_ISSUED,
+                source_service="payment-orchestrator",
+                payload={
+                    "order_id": order_id,
+                    "vcn_id": card.id,
+                    "status": card.status,
+                    "merchant_domain": merchant_domain,
+                    "authorized_amount": str(authorized_amount),
+                    "authorized_amount_usd": str(authorized_amount_usd),
+                },
+            )
+            await self._queue_outbox_event(EVENT_VCN_ISSUED, asdict(envelope))
 
-        logger.info(
-            "VCN issued",
-            extra={
-                "order_id": order_id,
-                "vcn_id": card.id,
-                "masked_number": card.masked_number,
-                "authorized_amount": str(authorized_amount),
-                "authorized_amount_usd": str(authorized_amount_usd),
-            },
-        )
-        return card
+            from src.core.metrics import VCN_ISSUED_TOTAL
+            VCN_ISSUED_TOTAL.labels(issuer="stripe").inc()
+
+            logger.info(
+                "VCN issued",
+                extra={
+                    "order_id": order_id,
+                    "vcn_id": card.id,
+                    "masked_number": card.masked_number,
+                    "authorized_amount": str(authorized_amount),
+                    "authorized_amount_usd": str(authorized_amount_usd),
+                },
+            )
+            return card
+        finally:
+            from src.core.metrics import VCN_ISSUE_LATENCY
+            VCN_ISSUE_LATENCY.observe(time.perf_counter() - start)
 
     # ── VCN Decrypt (Internal Only) ──────────────────────────────────────────
 
@@ -347,9 +388,20 @@ class VcnService:
         return f"**** **** **** {pan[-4:]}"
 
     def _get_fernet(self) -> Fernet:
-        secret = settings.VCN_ENCRYPTION_KEY or settings.STRIPE_SECRET_KEY or "mock-vcn-key-do-not-use-in-prod"
+        global _fernet_instance
+        if _fernet_instance is not None:
+            return _fernet_instance
+
+        secret = settings.VCN_ENCRYPTION_KEY
+        if not secret:
+            if settings.ENVIRONMENT == "local":
+                secret = "local-dev-vcn-key"
+            else:
+                raise RuntimeError("VCN_ENCRYPTION_KEY is required outside local environment")
+
         key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
-        return Fernet(key)
+        _fernet_instance = Fernet(key)
+        return _fernet_instance
 
     def _encrypt_value(self, value: str) -> bytes:
         return self._get_fernet().encrypt(value.encode("utf-8"))

@@ -16,7 +16,7 @@ from sk_shared.redis_client import get_redis_client
 from src.api.routes import api_router
 from src.config import settings
 from src.core.logging import setup_logging
-from src.core.metrics import REQUEST_LATENCY
+from src.core.metrics import EVENT_LISTENER_UP, REQUEST_LATENCY
 
 logger = logging.getLogger(__name__)
 
@@ -37,6 +37,14 @@ async def lifespan(app: FastAPI):
     # Redis connection
     app.state.redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
     logger.info("Redis connection established", extra={"db": settings.REDIS_DB})
+    EVENT_LISTENER_UP.set(0)
+
+    # ── P0-01: Start event listener background task ──────────────────────────
+    from src.events.listeners import start_listeners
+    app.state.event_listener_task = asyncio.create_task(
+        start_listeners(app.state.redis.redis)
+    )
+    logger.info("Order event listener started")
 
     # ── P0-03: Start OutboxPublisher background task ──────────────────────────
     from src.workers.outbox_publisher import OutboxPublisher
@@ -86,6 +94,7 @@ async def lifespan(app: FastAPI):
 
     # Cancel tasks and wait for graceful completion (5s budget)
     tasks = [
+        app.state.event_listener_task,
         app.state.outbox_task, 
         app.state.expiry_task, 
         app.state.vcn_expiry_task,
@@ -108,7 +117,7 @@ app = FastAPI(
     version="0.1.0",
     description="SahulatKar Payment Orchestrator — VCN Lifecycle, Gateway Integrations, Reconciliation",
     lifespan=lifespan,
-    docs_url="/docs" if True else None,  # disable in production via env flag
+    docs_url="/docs" if settings.ENVIRONMENT != "production" else None,
 )
 
 app.add_middleware(

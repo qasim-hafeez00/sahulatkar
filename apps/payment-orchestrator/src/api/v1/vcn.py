@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import VirtualCard
 
-from src.core.dependencies import get_db, get_redis, require_internal_token
+from src.core.dependencies import get_db, get_redis, require_internal_token, rate_limit
 from src.core.metrics import VCN_VOID_TOTAL
 from src.schemas.vcn import VcnDecryptResponse, VcnIssueRequest, VcnIssueResponse, VcnStatusResponse
 from src.services.vcn import VcnService
@@ -26,7 +26,7 @@ from decimal import Decimal
 router = APIRouter(prefix="/payments", tags=["vcn"])
 
 
-@router.post("/vcn/issue", response_model=VcnIssueResponse)
+@router.post("/vcn/issue", response_model=VcnIssueResponse, dependencies=[Depends(rate_limit(5, 60))])
 async def issue_vcn(
     request_payload: VcnIssueRequest,
     request: Request,
