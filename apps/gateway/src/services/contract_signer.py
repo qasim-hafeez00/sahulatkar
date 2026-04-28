@@ -197,8 +197,13 @@ class ContractSignerService:
         from sk_shared.models.credit import CreditLimitHistory
         from datetime import timedelta
         import uuid
-        
-        principal_amt = float(contract.cost_price) - float(order.down_payment_amount or 0)
+
+        down_payment = float(order.down_payment_amount or 0)
+        total_sale = float(contract.total_sale_price)
+        total_repayable = round(total_sale - down_payment, 2)
+        principal_amt = float(contract.cost_price) - down_payment
+        installment_amt = round(total_repayable / contract.installment_count, 2)
+
         loan = Loan(
             order_id=order.id,
             user_id=user_id,
@@ -206,24 +211,24 @@ class ContractSignerService:
             loan_number=f"L-{datetime.now(timezone.utc).year}-{uuid.uuid4().hex[:8].upper()}",
             principal_amount=principal_amt,
             profit_amount=float(contract.profit_amount),
-            total_repayable=float(contract.total_sale_price) - float(order.down_payment_amount or 0),
-            down_payment_amount=float(order.down_payment_amount or 0),
+            total_repayable=total_repayable,
+            down_payment_amount=down_payment,
             balance_financed=principal_amt,
             profit_rate_pct=float(contract.profit_rate_pct),
             plan_type="murabaha",
             installment_count=contract.installment_count,
-            installment_amount=(float(contract.total_sale_price) - float(order.down_payment_amount or 0)) / contract.installment_count,
+            installment_amount=installment_amt,
             total_paid=0.0,
-            total_outstanding=float(contract.total_sale_price) - float(order.down_payment_amount or 0),
+            total_outstanding=total_repayable,
             late_fee_total=0.0,
-            status="active"
+            status="active",
         )
         db.add(loan)
         await db.flush()  # to get loan.id
-        
+
         # Credit is already reserved at extraction (internal callback).
         # Loan creation consumes that reservation; no further decrement needed here.
-        
+
         for sched in contract.installment_schedule:
             inst = Installment(
                 loan_id=loan.id,
@@ -232,7 +237,7 @@ class ContractSignerService:
                 is_down_payment=False,
                 principal_portion=principal_amt / contract.installment_count,
                 profit_portion=float(contract.profit_amount) / contract.installment_count,
-                total_amount=float(sched["amount"]),
+                total_amount=float(sched["amount"]),  # already corrected in generator
                 due_date=(datetime.now(timezone.utc) + timedelta(days=30 * sched["installment_no"])).date(),
                 status="pending",
                 paid_amount=0.0,

@@ -8,7 +8,7 @@ from fastapi.responses import JSONResponse
 from sqlalchemy import text
 from src.core.rate_limit import rate_limit_middleware
 from src.api.routes import api_router
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from sk_shared.database import SessionLocal
 from src.core.dependencies import get_db
 from sk_shared.events import EVENT_DELIVERY_CONFIRMED, EVENT_DELIVERY_STATUS_CHANGED, event_channel
@@ -18,6 +18,7 @@ from src.core.http_client import InternalServiceClient
 from src.core.middleware import RequestIDMiddleware, SecurityHeadersMiddleware
 from src.core.logging import setup_logging, logger
 from src.core.metrics import setup_metrics
+
 
 async def delivery_event_listener(app: FastAPI) -> None:
     channels = [event_channel(EVENT_DELIVERY_STATUS_CHANGED), event_channel(EVENT_DELIVERY_CONFIRMED)]
@@ -44,11 +45,16 @@ async def delivery_event_listener(app: FastAPI) -> None:
                 continue
 
             event_name = envelope.get("event")
-            async with SessionLocal() as session:
-                if event_name == EVENT_DELIVERY_STATUS_CHANGED:
-                    await apply_delivery_status_envelope(session, envelope)
-                elif event_name == EVENT_DELIVERY_CONFIRMED:
-                    await apply_delivery_confirmed_envelope(session, envelope)
+            # BUG-08 FIX: Wrap DB session block in try/except to prevent listener death on DB errors
+            try:
+                async with SessionLocal() as session:
+                    if event_name == EVENT_DELIVERY_STATUS_CHANGED:
+                        await apply_delivery_status_envelope(session, envelope)
+                    elif event_name == EVENT_DELIVERY_CONFIRMED:
+                        await apply_delivery_confirmed_envelope(session, envelope)
+            except Exception as exc:
+                logger.error("Delivery event processing failed event=%s error=%s", event_name, exc, exc_info=True)
+                # Continue the loop — do not propagate; individual message errors must not kill the listener
     finally:
         with contextlib.suppress(Exception):
             await pubsub.unsubscribe(*channels)
@@ -60,7 +66,8 @@ async def listener_watchdog(app: FastAPI) -> None:
         await asyncio.sleep(10)
         task = getattr(app.state, "delivery_listener_task", None)
         if task and task.done():
-            logger.error("Delivery listener died, restarting...")
+            exc = task.exception() if not task.cancelled() else None
+            logger.error("Delivery listener died (exc=%s), restarting...", exc)
             app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
 
 
@@ -72,19 +79,27 @@ async def verify_critical_tables():
             try:
                 await db.execute(text(f"SELECT 1 FROM {table} LIMIT 1"))
             except Exception:
-                logger.warning(f"CRITICAL_TABLE_MISSING: Table '{table}' not found in database. Admin modules may be degraded.")
+                logger.warning("CRITICAL_TABLE_MISSING: Table '%s' not found in database. Admin modules may be degraded.", table)
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     setup_logging()
     logger.info("Initializing Gateway Lifespan...")
+
+    # Validate production configuration before accepting traffic
+    try:
+        validate_critical_settings()
+    except RuntimeError as exc:
+        logger.critical("STARTUP_ABORTED: %s", exc)
+        raise
+
     app.state.redis = get_redis_client(settings.REDIS_URL)
     app.state.delivery_listener_task = asyncio.create_task(delivery_event_listener(app))
     app.state.delivery_watchdog_task = asyncio.create_task(listener_watchdog(app))
-    
-    # Verify core admin infrastructure
+
     await verify_critical_tables()
-    
+
     InternalServiceClient.start()
     yield
     logger.info("Shutting down Gateway Lifespan...")
@@ -118,9 +133,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 @app.middleware("http")
 async def apply_rate_limit(request, call_next):
     return await rate_limit_middleware(request, call_next)
+
 
 @app.exception_handler(Exception)
 async def global_exception_handler(request, exc):
@@ -130,20 +147,20 @@ async def global_exception_handler(request, exc):
         content={"detail": "INTERNAL_SERVER_ERROR"}
     )
 
+
 app.include_router(api_router, prefix="/api")
 setup_metrics(app)
 
+
 @app.get("/health", tags=["system"])
-async def health_check(db = Depends(get_db)):
+async def health_check(db=Depends(get_db)):
     try:
         await db.execute(text("SELECT 1"))
-        
-        # M-03 FIX: Check background delivery listener task health
+
         listener_healthy = True
         if hasattr(app.state, "delivery_listener_task"):
             if app.state.delivery_listener_task.done():
                 listener_healthy = False
-                # Log the failure if possible
                 try:
                     app.state.delivery_listener_task.result()
                 except Exception as e:
@@ -154,10 +171,10 @@ async def health_check(db = Depends(get_db)):
                 await app.state.redis.redis.ping()
         except Exception:
             return {"status": "degraded", "service": "gateway", "redis": "unreachable"}
-            
+
         if not listener_healthy:
             return {"status": "degraded", "service": "gateway", "listener": "down"}
-            
+
         return {"status": "ok", "service": "gateway"}
     except Exception:
         return JSONResponse(status_code=503, content={"status": "degraded", "service": "gateway", "db": "unreachable"})

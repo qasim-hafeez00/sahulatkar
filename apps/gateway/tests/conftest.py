@@ -230,8 +230,20 @@ async def test_admin(redis_mock: RedisClient):
         f"{admin.id}:super_admin",
         3600,
     )
-    if hasattr(redis_mock, "redis"):
-        await redis_mock.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
-        await redis_mock.redis.expire(f"sk:auth:admin_sessions:{admin.id}", 3600)
+    # Store admin sessions set as JSON for FakeRedis compatibility
+    try:
+        if hasattr(redis_mock.redis, "sadd"):
+            await redis_mock.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
+            await redis_mock.redis.expire(f"sk:auth:admin_sessions:{admin.id}", 3600)
+    except Exception:
+        # Fallback: store as JSON if sadd not available
+        import json
+        sessions = await redis_mock.get(f"sk:auth:admin_sessions:{admin.id}")
+        if sessions:
+            session_set = json.loads(sessions)
+        else:
+            session_set = []
+        session_set.append(token_hash)
+        await redis_mock.set(f"sk:auth:admin_sessions:{admin.id}", json.dumps(session_set), 3600)
     
     return admin, token

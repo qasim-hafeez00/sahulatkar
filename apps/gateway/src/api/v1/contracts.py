@@ -39,10 +39,18 @@ async def generate_wakalah(
     redis: RedisClient = Depends(get_redis),
 ):
     contract = await ContractGeneratorService(db).generate_wakalah(current_user.id, req, redis)
+    # SEC-10: Prefer decrypted principal_name from encrypted field; fall back to cleartext
+    principal_name = contract.principal_name
+    if getattr(contract, "principal_name_encrypted", None):
+        try:
+            from src.core.kms import KMSProvider
+            principal_name = KMSProvider().decrypt(contract.principal_name_encrypted)
+        except Exception:
+            pass
     return WakalahGenerateResponse(
         contract_id=contract.id,
         contract_number=contract.contract_number,
-        principal_name=contract.principal_name,
+        principal_name=principal_name,
         agent_name=contract.agent_name,
         authorized_amount=float(contract.authorized_amount),
         valid_until=contract.valid_until,
@@ -251,6 +259,45 @@ async def get_contract_pdf(
         "download_url": download_url,
         "expires_in": 900,
     }
+
+
+@router.get("/{contract_type}/{contract_id}/download")
+async def download_contract_pdf(
+    contract_type: str,
+    contract_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """MISS-05: Customer-facing contract PDF download via pre-signed URL."""
+    if contract_type not in ("wakalah", "murabaha"):
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_CONTRACT_TYPE")
+
+    model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
+    contract = await db.scalar(
+        select(model).where(
+            model.id == contract_id,
+            model.user_id == current_user.id,
+            model.deleted_at.is_(None),
+        )
+    )
+    if not contract:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CONTRACT_NOT_FOUND")
+    if not contract.signed_at:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="CONTRACT_NOT_YET_SIGNED")
+
+    storage = get_storage_client(settings)
+    raw_path = str(contract.contract_pdf_path)
+    key = raw_path
+    if raw_path.startswith("s3://"):
+        parts = raw_path.split("/", 3)
+        key = parts[3] if len(parts) > 3 else ""
+
+    if hasattr(storage, "base_dir") and Path(raw_path).exists():
+        download_url = f"file://{Path(raw_path).absolute()}"
+    else:
+        download_url = await storage.get_download_url(key, expires_in=900)
+
+    return {"contract_id": contract_id, "contract_type": contract_type, "download_url": download_url, "expires_in": 900}
 
 
 @router.get("/{order_id}", response_model=ContractStatusResponse)

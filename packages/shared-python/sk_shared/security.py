@@ -25,7 +25,10 @@ def get_password_hash(password: str) -> str:
 def create_access_token(data: dict, private_key: str, expires_delta: Optional[timedelta] = None) -> str:
     to_encode = data.copy()
     expire = datetime.now(timezone.utc) + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire, "token_type": _TOKEN_TYPE_ACCESS})
+    # Only set token_type to "access" if not already explicitly set (e.g., by admin token creation)
+    if "token_type" not in to_encode:
+        to_encode["token_type"] = _TOKEN_TYPE_ACCESS
+    to_encode.update({"exp": expire})
     return jose.jwt.encode(to_encode, private_key, algorithm="RS256")
 
 def create_refresh_token(data: dict, private_key: str, expires_delta: Optional[timedelta] = None) -> str:
@@ -36,12 +39,13 @@ def create_refresh_token(data: dict, private_key: str, expires_delta: Optional[t
     return jose.jwt.encode(to_encode, private_key, algorithm="RS256")
 
 def decode_access_token(token: str, public_key: str) -> Dict[str, Any]:
-    """Decode and validate an access token. Rejects refresh tokens."""
+    """Decode and validate an access token. Rejects refresh tokens. Accepts user and admin tokens."""
     payload = jose.jwt.decode(token, public_key, algorithms=["RS256"])
     token_type = payload.get("token_type")
     # Only enforce if the token carries a type claim (tokens issued before this
     # change may not have it; once all tokens expire, this can be made strict).
-    if token_type is not None and token_type != _TOKEN_TYPE_ACCESS:
+    # Accept "access" tokens (user tokens), "admin" tokens and short-lived "temp" tokens
+    if token_type is not None and token_type not in (_TOKEN_TYPE_ACCESS, "admin", "temp"):
         raise jose.jwt.JWTError("Invalid token type: refresh token presented as access token")
     return payload
 

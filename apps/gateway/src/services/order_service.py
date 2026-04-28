@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 
 from fastapi import HTTPException, status
 from sqlalchemy import select, func, update
@@ -12,6 +13,13 @@ from sk_shared.models.product import Product
 from sk_shared.redis_client import RedisClient
 from src.core.http_client import InternalServiceClient
 from src.core.logging import logger
+
+
+def _ensure_utc(dt: datetime) -> datetime:
+    """Return a timezone-aware UTC datetime regardless of whether dt is naive or aware."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=timezone.utc)
+    return dt.astimezone(timezone.utc)
 
 PROHIBITED_KEYWORDS = [
     "tobacco",
@@ -122,8 +130,7 @@ class OrderService:
 
         product = await self.db.scalar(select(Product).where(Product.id == order.product_id)) if order.product_id else None
         if not product:
-            import datetime
-            time_since_creation = (datetime.datetime.now(datetime.timezone.utc) - order.created_at.replace(tzinfo=datetime.timezone.utc)).total_seconds()
+            time_since_creation = (datetime.now(timezone.utc) - _ensure_utc(order.created_at)).total_seconds()
             if order.status == "url_received" and time_since_creation > 600:
                 order.status = "extraction_failed"
                 await self.db.commit()

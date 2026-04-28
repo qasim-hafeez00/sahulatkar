@@ -321,6 +321,22 @@ async def get_user_activity(
     }
 
 
+async def _revoke_all_user_sessions(user_id: int, redis: RedisClient) -> int:
+    """Revoke all active Redis session keys for a user. Returns count revoked."""
+    from sk_shared.models.auth import UserSession
+    if not hasattr(redis, "redis"):
+        return 0
+    sessions_key = f"sk:auth:user_sessions:{user_id}"
+    hashes = await redis.redis.smembers(sessions_key)
+    count = 0
+    for h in hashes:
+        token_hash = h.decode() if isinstance(h, bytes) else str(h)
+        await redis.delete(f"sk:auth:session:{token_hash}")
+        count += 1
+    await redis.delete(sessions_key)
+    return count
+
+
 @router.put("/{user_id}/status")
 async def update_user_status(
     user_id: int,
@@ -353,6 +369,20 @@ async def update_user_status(
         changes={"status": payload.status},
     )
 
+    # SEC-05: Immediately revoke all active sessions when suspending or blocking
+    sessions_revoked = 0
+    if payload.status in ("suspended", "blocked"):
+        sessions_revoked = await _revoke_all_user_sessions(user_id, redis)
+        # Also mark all UserSession rows as revoked in DB
+        from datetime import datetime, timezone
+        from sqlalchemy import update as sql_update
+        from sk_shared.models.auth import UserSession
+        await db.execute(
+            sql_update(UserSession)
+            .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+
     if hasattr(redis, "redis"):
         notification_event = json.dumps(
             {
@@ -365,7 +395,7 @@ async def update_user_status(
         await redis.redis.lpush(QueueName.NOTIFICATION_SMS, notification_event)
 
     await db.commit()
-    return {"user_id": row["id"], "status": row["status"]}
+    return {"user_id": row["id"], "status": row["status"], "sessions_revoked": sessions_revoked}
 
 
 @router.put("/{user_id}/credit-limit")
@@ -376,26 +406,19 @@ async def update_user_credit_limit(
     current_admin: AdminUser = Depends(RequirePermission("update_user")),
     db: AsyncSession = Depends(get_db),
 ):
-    # Compatible with environments where credit columns may not exist yet.
+    # BUG-04 FIX: Use ORM update + re-fetch pattern instead of raw RETURNING (not portable to SQLite)
+    from sk_shared.models.auth import User as UserModel
     try:
-        row = (
-            await db.execute(
-                text(
-                    """
-                    UPDATE users
-                    SET credit_limit = :new_limit, available_credit = :new_limit
-                    WHERE id = :user_id AND deleted_at IS NULL
-                    RETURNING id
-                    """
-                ),
-                {"new_limit": payload.new_limit, "user_id": user_id},
-            )
-        ).mappings().one_or_none()
+        user_obj = await db.scalar(select(UserModel).where(UserModel.id == user_id, UserModel.deleted_at.is_(None)))
+        if user_obj is None:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+        user_obj.credit_limit = payload.new_limit
+        user_obj.available_credit = payload.new_limit
+        row = {"id": user_obj.id}
+    except HTTPException:
+        raise
     except Exception as exc:
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail=f"CREDIT_LIMIT_COLUMNS_MISSING: {exc}")
-
-    if row is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
 
     await record_audit_event(
         db=db,
@@ -741,6 +764,42 @@ async def get_user_devices(
             for r in rows
         ]
     }
+
+@router.post("/{user_id}/force-logout")
+async def force_logout_user(
+    user_id: int,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    from datetime import datetime, timezone
+    from sqlalchemy import update as sql_update
+    from sk_shared.models.auth import User as UserModel, UserSession
+
+    user_obj = await db.scalar(select(UserModel).where(UserModel.id == user_id, UserModel.deleted_at.is_(None)))
+    if not user_obj:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    sessions_revoked = await _revoke_all_user_sessions(user_id, redis)
+    await db.execute(
+        sql_update(UserSession)
+        .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
+        .values(revoked_at=datetime.now(timezone.utc))
+    )
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="force_logout",
+        target_id=user_id,
+        changes={"sessions_revoked": sessions_revoked},
+    )
+    await db.commit()
+    return {"user_id": user_id, "sessions_revoked": sessions_revoked}
+
 
 @router.post("/{user_id}/reset-failed-attempts")
 async def reset_user_failed_attempts(

@@ -166,9 +166,9 @@ class ContractGeneratorService:
             f"Contract Number: {contract_number}",
             f"Principal: {principal_info['name']} (CNIC: {principal_info['cnic']})",
             (
-                f"Agent: SahulatKar (Pvt) Ltd. (License: {settings.SECP_LICENSE_NUMBER})"
+                f"Agent: {settings.COMPANY_LEGAL_NAME} (License: {settings.SECP_LICENSE_NUMBER})"
                 if settings.SECP_LICENSE_NUMBER
-                else "Agent: SahulatKar (Pvt) Ltd."
+                else f"Agent: {settings.COMPANY_LEGAL_NAME}"
             ),
             f"Merchant: {product.merchant.name if product and product.merchant else 'Direct Merchant'}",
             f"Authorized Amount: PKR {order.total_amount:,.2f}",
@@ -187,6 +187,13 @@ class ContractGeneratorService:
         pdf_hash = hashlib.sha256(pdf).hexdigest()
         pdf_path = await self._persist_pdf(contract_number, pdf)
 
+        kms = KMSProvider()
+        # SEC-10: Store principal_name at-rest encrypted alongside CNIC
+        try:
+            encrypted_name = kms.encrypt(principal_info["name"]) if principal_info["name"] else None
+        except Exception:
+            encrypted_name = None
+
         contract = WakalahAgreement(
             order_id=order.id,
             user_id=user_id,
@@ -196,8 +203,9 @@ class ContractGeneratorService:
             contract_hash=pdf_hash,
             otp_reference=str(uuid.uuid4()),
             principal_name=principal_info["name"],
-            agent_name="SahulatKar (Pvt) Ltd.",
-            principal_cnic=KMSProvider().encrypt(principal_info["cnic"]),
+            principal_name_encrypted=encrypted_name,
+            agent_name=settings.COMPANY_LEGAL_NAME,
+            principal_cnic=kms.encrypt(principal_info["cnic"]),
             principal_phone=principal_info["phone"],
             product_description=product.name if product else "Product",
             merchant_name=product.merchant.name if product and product.merchant else "Merchant",
@@ -276,7 +284,9 @@ class ContractGeneratorService:
         pdf_hash = hashlib.sha256(pdf).hexdigest()
         pdf_path = await self._persist_pdf(contract_number, pdf)
 
-        installment_amount = round(total_sale_price / req.installment_count, 2)
+        down_payment = float(order.down_payment_amount or 0)
+        repayable_amount = round(total_sale_price - down_payment, 2)
+        installment_amount = round(repayable_amount / req.installment_count, 2)
         schedule = [
             {"installment_no": n + 1, "amount": installment_amount, "status": "pending"}
             for n in range(req.installment_count)
@@ -297,7 +307,8 @@ class ContractGeneratorService:
             contract_hash=pdf_hash,
             otp_reference=str(uuid.uuid4()),
             template_version="1.0",
-            validated_by_shariah_board=True
+            validated_by_shariah_board=True,
+            valid_until=datetime.now(timezone.utc) + timedelta(days=settings.MURABAHA_VALIDITY_DAYS),
         )
         self.db.add(contract)
         await self.db.commit()

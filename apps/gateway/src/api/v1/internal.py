@@ -20,10 +20,18 @@ router = APIRouter(prefix="/internal", tags=["internal"])
 
 
 def _require_internal(request: Request):
-    """BUG-05 FIX: Use constant-time comparison to prevent timing attacks"""
+    """Validate internal token (constant-time) and enforce JSON Content-Type (SEC-02 / SEC-03)."""
     token = request.headers.get("X-Internal-Token", "")
     if not secrets.compare_digest(token or "", settings.INTERNAL_SERVICE_TOKEN or ""):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_INTERNAL_TOKEN")
+    # SEC-03: Reject non-JSON bodies to prevent MIME-type confusion attacks on internal routes
+    if request.method in ("POST", "PUT", "PATCH"):
+        ct = request.headers.get("Content-Type", "")
+        if "application/json" not in ct.lower():
+            raise HTTPException(
+                status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE,
+                detail="UNSUPPORTED_CONTENT_TYPE: application/json required",
+            )
 
 
 from pydantic import Field
@@ -77,7 +85,7 @@ async def product_extracted_callback(
     order.down_payment_amount = round(payload.sale_price * payload.down_payment_pct / 100.0, 2)
     order.status = OrderState.OFFER_PRESENTED
 
-    # GW-BL-01: Reserve credit at extraction
+    # GW-BL-01: Reserve credit at extraction — guard against insufficient credit first
     from sk_shared.models.auth import User as UserModel
     from sk_shared.models.credit import CreditLimitHistory
     user = await db.scalar(
@@ -85,7 +93,21 @@ async def product_extracted_callback(
     )
     if user and user.available_credit is not None:
         prev_available = float(user.available_credit)
-        user.available_credit = max(prev_available - float(payload.sale_price), 0.0)
+        if prev_available < float(payload.sale_price):
+            old_status = order.status
+            order.status = "extraction_failed"
+            db.add(OrderStatusHistory(
+                order_id=order.id,
+                from_status=old_status,
+                to_status="extraction_failed",
+                reason="INSUFFICIENT_CREDIT",
+            ))
+            await db.commit()
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="INSUFFICIENT_CREDIT",
+            )
+        user.available_credit = round(prev_available - float(payload.sale_price), 2)
         
         if settings.ENVIRONMENT != "test":
             history_kwargs = {"user_id": user.id}

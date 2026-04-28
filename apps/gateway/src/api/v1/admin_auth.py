@@ -14,7 +14,7 @@ from src.schemas.auth import (
 )
 from src.services.auth import AuthService
 from src.services.rbac import RBACService
-from src.core.dependencies import get_db, get_redis, get_current_admin, get_current_admin_token_payload, RequirePermission
+from src.core.dependencies import get_db, get_redis, get_current_admin, get_current_admin_token_payload, get_admin_for_password_change, RequirePermission
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import get_password_hash
 from src.schemas.admin_auth import AdminLoginRequest, AdminLoginResponse, AssignRoleRequest, CreateAdminRequest
@@ -217,6 +217,48 @@ async def assign_admin_role(
         "permissions": permissions,
         "note": "Role applied to DB. Existing sessions invalidated successfully.",
     }
+
+
+# ── MISS-02 / MISS-16: Admin Password Change ─────────────────────────────────
+
+class ChangePasswordRequest(BaseModel):
+    current_password: str = Field(..., min_length=1)
+    new_password: str = Field(..., min_length=10, max_length=128)
+
+
+@router.post("/change-password")
+async def admin_change_password(
+    payload: ChangePasswordRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(get_admin_for_password_change),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """MISS-16: Admin self-service password change.
+    Also used to fulfil the FORCE_PASSWORD_CHANGE flow when a temp token is presented."""
+    from sk_shared.security import verify_password
+    from src.core.audit import record_audit_event
+
+    admin = await db.scalar(select(AdminUser).where(AdminUser.id == current_admin.id, AdminUser.deleted_at.is_(None)))
+    if not admin:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ADMIN_NOT_FOUND")
+
+    if not verify_password(payload.current_password, admin.password_hash):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_CURRENT_PASSWORD")
+
+    admin.password_hash = get_password_hash(payload.new_password)
+    admin.force_password_change = False
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=admin.id,
+        module="admin_auth",
+        action="password_changed",
+        target_id=admin.id,
+        changes={},
+    )
+    await db.commit()
+    return {"success": True, "message": "Password updated successfully."}
 
 
 # No local class definitions here; using src.schemas.admin_auth imports.

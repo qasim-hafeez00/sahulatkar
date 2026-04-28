@@ -25,6 +25,9 @@ class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     risk_band: Mapped[Optional[str]] = mapped_column(String(10), nullable=True)
     next_review_date: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
+    # Referral tracking
+    referred_by: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+
     sessions: Mapped[list["UserSession"]] = relationship("UserSession", back_populates="user", cascade="all, delete-orphan")
     devices: Mapped[list["UserDevice"]] = relationship("UserDevice", back_populates="user", cascade="all, delete-orphan")
 
@@ -72,7 +75,7 @@ class RolePermission(Base, TimestampMixin):
     permission_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("permissions.id"), primary_key=True)
 
 
-class UserDevice(Base, TimestampMixin):
+class UserDevice(Base, TimestampMixin, SoftDeleteMixin):
     __tablename__ = "user_devices"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)

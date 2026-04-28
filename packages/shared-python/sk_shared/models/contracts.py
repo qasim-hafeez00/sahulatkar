@@ -20,7 +20,9 @@ class WakalahAgreement(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     otp_reference: Mapped[str] = mapped_column(String(64), nullable=False)
     
     # Principal (Customer) Details for Legal Validity
-    principal_name: Mapped[str] = mapped_column(String(200), nullable=True) # Legal name from KYC
+    principal_name: Mapped[str] = mapped_column(String(200), nullable=True)  # Cleartext fallback / display
+    # SEC-10: AES-256 encrypted full name (KMSProvider) — preferred over cleartext principal_name
+    principal_name_encrypted: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     principal_cnic: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     principal_phone: Mapped[str] = mapped_column(String(20), nullable=True)
     
@@ -77,6 +79,7 @@ class MurabahaContract(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     validated_by_shariah_board: Mapped[bool] = mapped_column(default=False, nullable=False)
     
     signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     signatures: Mapped[list["ContractDigitalSignature"]] = relationship(
         "ContractDigitalSignature",

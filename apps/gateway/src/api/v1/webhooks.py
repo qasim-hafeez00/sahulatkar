@@ -103,3 +103,65 @@ async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_red
         idempotency_key,
     )
     return {"received": True, "gateway": "safepay"}
+
+
+# ── MISS-03: Stripe Webhook (VCN Confirmation) ────────────────────────────────
+
+def _verify_stripe_signature(secret: str, raw_body: bytes, stripe_sig_header: str) -> None:
+    """Verify Stripe webhook signature using HMAC-SHA256 without importing the stripe library."""
+    if not secret:
+        logger.error("STRIPE_WEBHOOK_SECRET_MISSING: refusing webhook because secret is not configured")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="STRIPE_WEBHOOK_SECRET_NOT_CONFIGURED")
+    # Stripe-Signature header format: t=<timestamp>,v1=<hash>[,v0=<hash>]
+    parts = {kv.split("=", 1)[0]: kv.split("=", 1)[1] for kv in stripe_sig_header.split(",") if "=" in kv}
+    timestamp = parts.get("t", "")
+    v1 = parts.get("v1", "")
+    if not timestamp or not v1:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_STRIPE_SIGNATURE_FORMAT")
+    signed_payload = f"{timestamp}.".encode() + raw_body
+    expected = hmac.new(secret.encode(), signed_payload, digestmod=hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected, v1):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_STRIPE_SIGNATURE")
+
+
+_STRIPE_ROUTABLE_EVENTS = {
+    "issuing_authorization.request",
+    "issuing_transaction.created",
+    "issuing_card.updated",
+    "payment_intent.succeeded",
+    "payment_intent.payment_failed",
+}
+
+
+@router.post("/payment/stripe")
+async def stripe_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
+    _enforce_json_content_type(request)
+    raw_body = await request.body()
+    _enforce_payload_size(raw_body)
+    sig_header = request.headers.get("Stripe-Signature", "")
+    _verify_stripe_signature(settings.STRIPE_WEBHOOK_SECRET, raw_body, sig_header)
+
+    try:
+        payload = json.loads(raw_body)
+    except json.JSONDecodeError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_JSON")
+
+    event_type = payload.get("type", "unknown")
+    event_id = payload.get("id")
+    idempotency_key = f"stripe:{event_id}" if event_id else None
+
+    if event_type not in _STRIPE_ROUTABLE_EVENTS:
+        logger.info("Stripe event type=%s not routed — acknowledged but ignored", event_type)
+        return {"received": True, "gateway": "stripe", "routed": False}
+
+    await _enqueue_webhook(
+        redis,
+        {
+            "event": f"stripe.{event_type}",
+            "gateway": "stripe",
+            "raw": payload,
+            "triggered_at": datetime.now(timezone.utc).isoformat(),
+        },
+        idempotency_key,
+    )
+    return {"received": True, "gateway": "stripe", "routed": True}

@@ -1,9 +1,15 @@
+import json
+import logging
 from typing import Any
 
 from fastapi import Request
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.audit import AuditTrail
+
+_logger = logging.getLogger(__name__)
+
+_DLQ_KEY = "sk:audit:dlq"
 
 
 async def record_audit_event(
@@ -32,8 +38,31 @@ async def record_audit_event(
             request_id=request_id,
         )
         db.add(audit_record)
-        # Caller must run db.commit() explicitly
+        # Caller must call db.commit() explicitly.
     except Exception as exc:
-        import logging
-        logger = logging.getLogger(__name__)
-        logger.error("Failed to record audit event: %s", exc, exc_info=True)
+        _logger.error("Failed to record audit event module=%s action=%s: %s", module, action, exc, exc_info=True)
+        # Write to Redis dead-letter queue for async retry so compliance records are never silently dropped.
+        try:
+            from sk_shared.database import SessionLocal
+            from sk_shared.redis_client import get_redis_client
+            from src.config import settings
+            _dlq_payload = json.dumps({
+                "admin_user_id": admin_user_id,
+                "customer_user_id": customer_user_id,
+                "module": module,
+                "action": action,
+                "target_id": target_id,
+                "changes": changes or {},
+                "ip_address": ip_address,
+                "request_id": request_id,
+                "error": str(exc),
+            })
+            _redis = get_redis_client(settings.REDIS_URL)
+            if hasattr(_redis, "redis"):
+                await _redis.redis.rpush(_DLQ_KEY, _dlq_payload)
+            await _redis.close()
+        except Exception as dlq_exc:
+            _logger.critical(
+                "AUDIT_DLQ_WRITE_FAILED module=%s action=%s dlq_error=%s",
+                module, action, dlq_exc,
+            )

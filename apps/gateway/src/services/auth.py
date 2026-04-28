@@ -198,12 +198,25 @@ class AuthService:
             await redis.delete(totp_fail_key)
 
                 
+        # MISS-02: Enforce force_password_change — return temp token, not a real session
+        if getattr(admin, "force_password_change", False):
+            temp_token = create_access_token(
+                {"admin_id": admin.id, "scope": "change_password", "token_type": "temp"},
+                settings.JWT_PRIVATE_KEY,
+                timedelta(minutes=15),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="FORCE_PASSWORD_CHANGE",
+                headers={"X-Temp-Token": temp_token, "X-Admin-Id": str(admin.id)},
+            )
+
         # Fetch actual role and permissions
         from src.services.rbac import RBACService
         role_name = "admin"  # Default
         if admin.role:
             role_name = admin.role.name
-            
+
         permissions = RBACService.get_role_permissions(role_name)
         
         acc_token = create_access_token(
@@ -326,6 +339,74 @@ class AuthService:
         await redis.set(f"sk:auth:session:{new_acc_hash}", f"{user_id}", settings.JWT_ACCESS_TTL)
         
         return TokenRefreshResponse(access_token=new_acc_token)
+
+    @staticmethod
+    async def forgot_password(phone: str, db: AsyncSession, redis: RedisClient) -> dict:
+        import json as _json
+        result = await db.execute(select(User).where(User.phone == phone, User.deleted_at.is_(None)))
+        user = result.scalar_one_or_none()
+        masked = phone[:5] + "******" + phone[-2:] if len(phone) >= 11 else "******"
+        if not user:
+            # Return success-looking response to prevent user enumeration
+            return {"masked_phone": masked, "reset_token": str(uuid.uuid4())}
+
+        otp = generate_otp()
+        reset_token = str(uuid.uuid4())
+        hashed_otp = hash_otp(otp)
+
+        await redis.set(f"sk:auth:otp:{phone}:reset", hashed_otp, settings.OTP_TTL)
+        await redis.set(f"sk:auth:token:{reset_token}:reset", _json.dumps({"phone": phone, "user_id": user.id}), settings.OTP_TTL)
+
+        if settings.NOTIFICATION_SMS_ENABLED:
+            from sk_shared.notifications import NotificationClient
+            notify_backend = redis.redis if hasattr(redis, "redis") else redis
+            client = NotificationClient(notify_backend)
+            try:
+                await client.push_otp(phone, otp)
+            except Exception:
+                pass
+
+        return {"masked_phone": masked, "reset_token": reset_token}
+
+    @staticmethod
+    async def reset_password(reset_token: str, otp_code: str, new_password: str, db: AsyncSession, redis: RedisClient) -> dict:
+        import json as _json
+        raw = await redis.get(f"sk:auth:token:{reset_token}:reset")
+        if not raw:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="RESET_TOKEN_EXPIRED")
+
+        try:
+            data = _json.loads(raw)
+            phone = data["phone"]
+            user_id = data["user_id"]
+        except Exception:
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="RESET_TOKEN_INVALID")
+
+        stored_hash = await redis.get(f"sk:auth:otp:{phone}:reset")
+        if not stored_hash or stored_hash != hash_otp(otp_code):
+            raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_OTP")
+
+        result = await db.execute(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+        user = result.scalar_one_or_none()
+        if not user:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+        user.password_hash = get_password_hash(new_password)
+        user.failed_login_attempts = 0
+        user.locked_until = None
+
+        # Revoke all existing sessions
+        from sqlalchemy import update
+        await db.execute(
+            update(UserSession)
+            .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
+            .values(revoked_at=datetime.now(timezone.utc))
+        )
+
+        await redis.delete(f"sk:auth:otp:{phone}:reset")
+        await redis.delete(f"sk:auth:token:{reset_token}:reset")
+        await db.commit()
+        return {"success": True}
 
     @staticmethod
     async def logout(user_id: int, access_token: str, db: AsyncSession, redis: RedisClient):

@@ -16,10 +16,20 @@ router = APIRouter(prefix="/admin/risk", tags=["Admin Risk"])
 
 
 class BlacklistCreateRequest(BaseModel):
-    entry_type: Literal["user", "device", "ip"]
+    entry_type: Literal["user", "device", "ip", "phone"]
     value: str = Field(..., min_length=1, max_length=255)
     reason: str = Field(..., min_length=3, max_length=500)
     user_id: Optional[int] = None
+
+    @property
+    def _validated(self):
+        return self
+
+    def model_post_init(self, __context) -> None:
+        if self.entry_type == "phone":
+            import re
+            if not re.match(r"^\+[0-9]{7,15}$", self.value):
+                raise ValueError("phone blacklist value must be a valid E.164 phone number")
 
 
 @router.get("/blacklist")

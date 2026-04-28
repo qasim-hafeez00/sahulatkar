@@ -26,6 +26,16 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
 
 class SecurityHeadersMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
+        # SEC-02: IP allowlisting for admin login endpoint.
+        if request.url.path.endswith("/admin/auth/login") and request.method == "POST":
+            allowlist_raw = settings.ADMIN_IP_ALLOWLIST.strip()
+            if allowlist_raw:
+                allowed = {ip.strip() for ip in allowlist_raw.split(",") if ip.strip()}
+                client_ip = request.client.host if request.client else ""
+                if client_ip not in allowed:
+                    logger.warning("Admin login blocked for IP %s — not in allowlist", client_ip)
+                    return JSONResponse(status_code=403, content={"detail": "ADMIN_LOGIN_IP_BLOCKED"})
+
         # SEC-07: Defense-in-depth origin check for admin state-changing calls.
         if (
             settings.ENVIRONMENT in {"production", "staging"}

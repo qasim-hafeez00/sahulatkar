@@ -26,6 +26,12 @@ async def test_product_extracted_callback_success(client: AsyncClient, db_sessio
     db_session.add(product)
     await db_session.commit()
 
+    # Set user's credit limit and available credit for the test
+    user.credit_limit = 500000.0
+    user.available_credit = 500000.0
+    db_session.add(user)
+    await db_session.flush()
+
     # 1. Create a dummy order in 'url_received' state
     order = Order(
         user_id=user.id,

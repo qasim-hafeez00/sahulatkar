@@ -133,6 +133,43 @@ class RequirePermission:
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Missing required permission")
         return admin
 
+async def get_admin_for_password_change(
+    request: Request,
+    credentials: HTTPAuthorizationCredentials = Depends(security_scheme),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> AdminUser:
+    """Accepts both regular admin tokens and one-time temp tokens (FORCE_PASSWORD_CHANGE flow)."""
+    try:
+        payload = decode_access_token(credentials.credentials, settings.JWT_PUBLIC_KEY)
+        if "admin_id" not in payload:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token payload")
+    except Exception:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Could not validate credentials")
+
+    token_type = payload.get("token_type")
+    admin_id = payload.get("admin_id")
+
+    if token_type == "temp":
+        if payload.get("scope") != "change_password":
+            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token scope insufficient")
+        # Temp tokens are not stored in Redis — validate by JWT signature alone
+    elif token_type == "admin":
+        token = credentials.credentials
+        token_hash = hashlib.sha256(token.encode()).hexdigest()
+        session_data = await redis.get(f"sk:auth:admin_session:{token_hash}")
+        if not session_data:
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session revoked or expired")
+    else:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid token type")
+
+    result = await db.execute(select(AdminUser).where(AdminUser.id == admin_id, AdminUser.deleted_at.is_(None)))
+    admin = result.scalar_one_or_none()
+    if admin is None:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin not found")
+    return admin
+
+
 async def rate_limit_auth(request: Request, redis: RedisClient = Depends(get_redis)):
     import time
     ip = request.client.host if request and request.client else "unknown"

@@ -226,3 +226,66 @@ async def manual_pay_installment(
         await redis.redis.lpush(QueueName.PAYMENT_WEBHOOK, event)
 
     return {"status": "ok", "installment_id": installment_id, "transaction_id": txn.gateway_txn_id}
+
+
+# ── MISS-04: Admin Late Fee Waiver ────────────────────────────────────────────
+
+class LateFeeWaiverRequest(BaseModel):
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+@router.post("/installments/{installment_id}/waive-late-fee")
+async def waive_late_fee(
+    installment_id: int,
+    payload: LateFeeWaiverRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    from sk_shared.models.payment import Installment
+    from datetime import datetime, timezone
+    import json
+
+    installment = await db.scalar(
+        select(Installment).where(Installment.id == installment_id, Installment.deleted_at.is_(None))
+    )
+    if not installment:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="INSTALLMENT_NOT_FOUND")
+    if installment.late_fee_waived:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="LATE_FEE_ALREADY_WAIVED")
+
+    waived_amount = float(installment.late_fee_amount or 0)
+    installment.late_fee_waived = True
+    installment.late_fee_amount = 0.0
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_payments",
+        action="late_fee_waived",
+        target_id=installment_id,
+        changes={"reason": payload.reason, "waived_amount": waived_amount},
+    )
+
+    # Publish to ledger service queue for GL adjustment
+    if hasattr(redis, "redis"):
+        from sk_shared.constants import QueueName
+        event = json.dumps({
+            "event": "payment.late_fee_waived",
+            "installment_id": installment_id,
+            "waived_amount": waived_amount,
+            "reason": payload.reason,
+            "admin_id": current_admin.id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        await redis.redis.lpush(QueueName.PAYMENT_WEBHOOK, event)
+
+    await db.commit()
+    return {
+        "installment_id": installment_id,
+        "status": "waiver_applied",
+        "waived_amount": waived_amount,
+        "late_fee_waived": True,
+    }

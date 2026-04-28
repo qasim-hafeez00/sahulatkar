@@ -66,5 +66,24 @@ class CurrentUserResponse(BaseModel):
     credit_limit: Optional[float]
     available_credit: float
     status: str
-    
+
     model_config = ConfigDict(from_attributes=True)
+
+
+class ForgotPasswordRequest(BaseModel):
+    phone: str = Field(..., pattern=r"^\+92[0-9]{10}$", description="E.164 Pakistan phone number")
+
+
+class ResetPasswordRequest(BaseModel):
+    reset_token: str
+    otp_code: str = Field(..., min_length=6, max_length=6)
+    new_password: str = Field(..., min_length=8, max_length=128)
+
+
+class DeviceRegisterRequest(BaseModel):
+    device_token: str = Field(..., min_length=10, max_length=512)
+    platform: str = Field(..., pattern="^(ios|android)$")
+
+
+class AccountDeleteRequest(BaseModel):
+    password: str = Field(..., min_length=1)

@@ -1,4 +1,5 @@
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.audit import record_audit_event
@@ -91,3 +92,61 @@ async def submit_decision(
         return kyc
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=str(exc))
+
+
+# ── MISS-13: Admin-triggered KYC Re-verification ─────────────────────────────
+
+@router.post("/{user_id}/trigger-reverification")
+async def trigger_kyc_reverification(
+    user_id: int,
+    http_request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_kyc_queue")),
+    db: AsyncSession = Depends(get_db),
+    redis_client: RedisClient = Depends(get_redis),
+) -> dict:
+    """Reset a user's KYC to PENDING and notify them to re-submit documents."""
+    import json
+    from datetime import datetime, timezone
+    from sk_shared.models.auth import User
+    from sk_shared.models.kyc import UserKycVerification
+    from sk_shared.constants import QueueName
+
+    user = await db.scalar(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    old_status = user.status
+    user.status = "pending_kyc"
+
+    try:
+        existing = await db.scalar(
+            select(UserKycVerification).where(
+                UserKycVerification.user_id == user_id,
+                UserKycVerification.deleted_at.is_(None),
+            ).order_by(UserKycVerification.created_at.desc())
+        )
+        if existing:
+            existing.deleted_at = datetime.now(timezone.utc)
+    except Exception:
+        pass
+
+    await record_audit_event(
+        db=db,
+        request=http_request,
+        admin_user_id=current_admin.id,
+        module="admin_kyc",
+        action="trigger_reverification",
+        target_id=user_id,
+        changes={"old_status": old_status, "new_status": "pending_kyc"},
+    )
+
+    if hasattr(redis_client, "redis"):
+        notification = json.dumps({
+            "event": "kyc.reverification_required",
+            "user_id": user_id,
+            "timestamp": datetime.now(timezone.utc).isoformat(),
+        })
+        await redis_client.redis.lpush(QueueName.NOTIFICATION_SMS, notification)
+
+    await db.commit()
+    return {"user_id": user_id, "status": "pending_kyc", "reverification_triggered": True}
