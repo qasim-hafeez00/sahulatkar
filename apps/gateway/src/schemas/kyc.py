@@ -52,9 +52,11 @@ class KycQueueItemResponse(BaseModel):
     assigned_admin_id: Optional[int] = None
     claimed_at: Optional[datetime] = None
     created_at: datetime
+    sla_breached: bool = False
 
     class Config:
         from_attributes = True
+
 
 
 class AdminKycDecisionRequest(BaseModel):

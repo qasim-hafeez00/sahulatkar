@@ -56,6 +56,10 @@ class CheckoutConsumer:
                         await self._send_to_dlq({"raw_data": job[1].decode("utf-8")}, str(e), redis)
                         
                 except Exception as e:
+                    import redis
+                    if isinstance(e, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)):
+                        await asyncio.sleep(5)
+                        continue
                     logger.error(f"Error in CheckoutConsumer loop: {e}", exc_info=True)
                     await asyncio.sleep(1)
         finally:
@@ -91,7 +95,22 @@ class CheckoutConsumer:
                         status_label = "processed"
                 except Exception as e:
                     logger.exception("Checkout worker task failed")
-                    await self._send_to_dlq(payload, str(e), redis)
+                    from playwright.async_api import TimeoutError as PlaywrightTimeoutError
+                    execution_id = payload.get("execution_id")
+                    if isinstance(e, PlaywrightTimeoutError) and execution_id:
+                        logger.info("Playwright timeout, requeuing job")
+                        await redis.lpush(QueueName.CHECKOUT, json.dumps(payload))
+                    else:
+                        await self._send_to_dlq(payload, str(e), redis)
+                        # Ensure execution is marked failed if it goes to DLQ
+                        if execution_id:
+                            try:
+                                async with SessionLocal() as db:
+                                    from sqlalchemy import text
+                                    await db.execute(text("UPDATE purchase_executions SET status = 'failed' WHERE uuid = :uuid"), {"uuid": execution_id})
+                                    await db.commit()
+                            except Exception:
+                                pass
                 finally:
                     execution_id = payload.get("execution_id")
                     if execution_id:

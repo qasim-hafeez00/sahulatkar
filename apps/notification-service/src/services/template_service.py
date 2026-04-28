@@ -129,6 +129,87 @@ DEFAULT_TEMPLATES: dict[str, dict[str, dict[str, str]]] = {
             "body": "Assalamu Alaikum,\n\nAlhamdulillah! You have successfully completed your Murabaha financing.\n\nTotal Amount Paid: PKR {{ total_paid }}\nProduct: {{ product_description }}\n\nJazakAllah Khair for trusting SahulatKar with your financing needs. We look forward to serving you again.\n\nWas-Salamu Alaikum,\nSahulatKar Team"
         },
     },
+    # ── Overdue installment escalation notifications (NS-BL-05) ─────────────
+    "billing.installment_overdue_d1": {
+        "sms": {
+            "body": "SahulatKar: URGENT — Your installment of PKR {{ installment_amount }} for {{ order_description }} was due {{ due_date }} (1 day ago). Please pay now to avoid additional fees."
+        },
+        "whatsapp": {
+            "body": "⚠️ *Overdue Payment — Action Required*\n\nYour installment of PKR *{{ installment_amount }}* for {{ order_description }} was due *{{ due_date }}* (1 day overdue).\n\nPlease log in and pay immediately to avoid late fees. JazakAllah Khair."
+        },
+        "push": {
+            "title": "Overdue Payment ⚠️",
+            "body": "PKR {{ installment_amount }} was due {{ due_date }}. Pay now to avoid late fees."
+        },
+    },
+    "billing.installment_overdue_d7": {
+        "sms": {
+            "body": "SahulatKar: Your installment of PKR {{ installment_amount }} for {{ order_description }} is now 7 days overdue. A late fee has been applied. Please pay immediately."
+        },
+        "whatsapp": {
+            "body": "🔴 *7-Day Overdue Notice*\n\nYour installment of PKR *{{ installment_amount }}* for {{ order_description }} is 7 days overdue.\n\nA Shariah-compliant late administrative fee has been applied. Please settle immediately to stop further charges."
+        },
+    },
+    "billing.installment_overdue_d14": {
+        "sms": {
+            "body": "SahulatKar: FINAL NOTICE — Your installment of PKR {{ installment_amount }} is 14 days overdue. Please contact us immediately to avoid account suspension."
+        },
+        "whatsapp": {
+            "body": "🚨 *FINAL NOTICE — 14-Day Overdue*\n\nYour installment of PKR *{{ installment_amount }}* for {{ order_description }} is 14 days overdue.\n\nPlease contact SahulatKar support immediately or log in to arrange payment. Continued non-payment may affect your credit."
+        },
+    },
+    # ── New integration events (Section 6.4 gaps) ────────────────────────────
+    "order.cancelled": {
+        "sms": {
+            "body": "SahulatKar: Your order #{{ order_id }} for {{ product_description }} has been cancelled{% if reason %} ({{ reason }}){% endif %}. Contact support if this was unexpected."
+        },
+        "whatsapp": {
+            "body": "❌ *Order Cancelled*\n\nYour order #{{ order_id }} for {{ product_description }} has been cancelled.{% if reason %}\n\n*Reason:* {{ reason }}{% endif %}\n\nIf you did not request this, please contact SahulatKar support immediately."
+        },
+        "push": {
+            "title": "Order Cancelled",
+            "body": "Order #{{ order_id }} has been cancelled. Tap to view details."
+        },
+    },
+    "vcn.expired": {
+        "sms": {
+            "body": "SahulatKar: Your virtual card ending in {{ vcn_last4 }} has expired. Please contact support if you need a replacement for order #{{ order_id }}."
+        },
+        "push": {
+            "title": "Virtual Card Expired",
+            "body": "Your VCN ending {{ vcn_last4 }} for order #{{ order_id }} has expired."
+        },
+    },
+    "payment.failed": {
+        "sms": {
+            "body": "SahulatKar: Your payment of PKR {{ amount }} for order #{{ order_id }} could not be processed ({{ failure_reason }}). Please update your payment method."
+        },
+        "whatsapp": {
+            "body": "❌ *Payment Failed*\n\nYour payment of PKR *{{ amount }}* for order #{{ order_id }} could not be processed.\n\n*Reason:* {{ failure_reason }}\n\nPlease log in to update your payment method or try again."
+        },
+        "push": {
+            "title": "Payment Failed ❌",
+            "body": "PKR {{ amount }} payment failed for order #{{ order_id }}. Tap to retry."
+        },
+    },
+    "kyc.documents_needed": {
+        "whatsapp": {
+            "body": "📋 *Documents Required — Action Needed*\n\nAssalamu Alaikum {{ user_name }},\n\nTo complete your KYC verification, we need the following documents:\n*{{ required_docs }}*\n\nPlease upload them via the SahulatKar app. JazakAllah Khair."
+        },
+        "push": {
+            "title": "Documents Required 📋",
+            "body": "Please upload your {{ required_docs }} to complete KYC verification."
+        },
+    },
+    "credit.limit_changed": {
+        "whatsapp": {
+            "body": "💳 *Credit Limit {{ change_direction|title }}*\n\nYour SahulatKar credit limit has been {{ change_direction }}.\n\n*New Limit:* PKR {{ new_limit }}\n*Previous Limit:* PKR {{ old_limit }}\n\nJazakAllah Khair for being a valued SahulatKar customer."
+        },
+        "push": {
+            "title": "Credit Limit Updated",
+            "body": "Your credit limit has been {{ change_direction }} to PKR {{ new_limit }}."
+        },
+    },
 }
 
 

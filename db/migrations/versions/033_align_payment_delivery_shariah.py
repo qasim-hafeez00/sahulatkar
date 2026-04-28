@@ -146,4 +146,11 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    op.drop_table("prohibited_items_log")
+    op.execute("DROP TABLE IF EXISTS te_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS tracking_events CASCADE")
+    op.execute("DROP TABLE IF EXISTS ptxn_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS ptxn_2025_q1 CASCADE")
+    op.execute("DROP TABLE IF EXISTS payment_transactions CASCADE")
+    op.drop_table("installments")
+    op.drop_table("loans")

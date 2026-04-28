@@ -1,8 +1,8 @@
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, func, JSON
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, func, JSON
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -215,3 +215,18 @@ class ScheduledNotification(Base):
     __table_args__ = (
         Index("ix_scheduled_fire_at_fired", "fire_at", "fired_at"),
     )
+
+
+@event.listens_for(ScheduledNotification, "before_insert")
+@event.listens_for(ScheduledNotification, "before_update")
+def _validate_scheduled_notification_fire_at(mapper, connection, target: ScheduledNotification) -> None:  # type: ignore[misc]
+    """Reject scheduling notifications in the past."""
+    if target.fire_at is None:
+        return
+    fire_at = target.fire_at
+    if fire_at.tzinfo is None:
+        fire_at = fire_at.replace(tzinfo=timezone.utc)
+    if fire_at < datetime.now(timezone.utc):
+        raise ValueError(
+            f"ScheduledNotification.fire_at must be in the future; got {target.fire_at!r}"
+        )

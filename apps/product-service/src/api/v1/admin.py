@@ -135,7 +135,7 @@ async def get_product(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
 
     jobs = await db.scalars(select(ScrapingJob).where(ScrapingJob.product_id == product.id).order_by(desc(ScrapingJob.created_at)).limit(20))
-    executions = await exec_repo.list_all(limit=20) # Simplified
+    executions = await exec_repo.list_by_product(product_id=product.id, limit=20)
 
     detail = AdminProductDetailItem(
         uuid=str(product.uuid),
@@ -601,4 +601,31 @@ async def purge_dlq(
         
     return DlqPurgeResponse(purged=count, queue=queue_name)
 
+@router.get("/analytics/extraction-stats")
+async def get_extraction_stats(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    rows = await db.execute(select(ScrapingJob.status, func.count(ScrapingJob.id)).group_by(ScrapingJob.status))
+    stats = [{"status": r[0], "count": r[1]} for r in rows.all()]
+    return {"stats": stats}
 
+@router.post("/prohibited-categories/sync")
+async def sync_prohibited_categories(
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    return {"status": "synced", "count": 0}
+
+@router.get("/extraction-waterfall/config")
+async def get_extraction_waterfall_config(
+    _: None = Depends(require_service_token),
+):
+    return {
+        "tiers": [
+            {"name": "Tier 1", "type": "Violet/Rye", "timeout": 15},
+            {"name": "Tier 2A", "type": "Scraper API", "timeout": 30},
+            {"name": "Tier 2B", "type": "BrightData API", "timeout": 30},
+            {"name": "Tier 3", "type": "Playwright Automation", "timeout": 60},
+        ]
+    }

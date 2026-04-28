@@ -3,18 +3,21 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
+import logging
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.ledger import CharityOrganization, LateFeeCharityAllocation
+from src.config import settings
 from src.services.accounting_service import AccountingService
 from src.accounting.accounts import ACCOUNT_CODES
 from src.core.period_utils import get_period_bounds
 from src.core.readonly_guard import readonly_guard
-
-
 from sk_shared.redis_client import RedisClient
+
+
+logger = logging.getLogger(__name__)
 
 
 class CharityService:
@@ -23,8 +26,10 @@ class CharityService:
         self.redis = redis
 
     @readonly_guard
-    async def get_pending_disbursements(self, min_age_days: int = 7) -> list[LateFeeCharityAllocation]:
-        cutoff = datetime.now(timezone.utc) - timedelta(days=min_age_days)
+    async def get_pending_disbursements(self, min_age_days: int | None = None) -> list[LateFeeCharityAllocation]:
+        # LS-BL-04: Use config-driven min_age_days instead of hardcoded value
+        effective_min_age = min_age_days if min_age_days is not None else settings.charity_disbursement_min_age_days
+        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_min_age)
         stmt = (
             select(LateFeeCharityAllocation)
             .where(LateFeeCharityAllocation.deleted_at.is_(None))
@@ -147,4 +152,79 @@ class CharityService:
     def _stable_source_id(self, payment_reference: str) -> int:
         digest = sha256(payment_reference.encode("utf-8")).hexdigest()[:15]
         return int(digest, 16)
+
+    async def process_charity_allocation(self, payment_reference: str | None = None, receipt_s3: str | None = None) -> dict[str, object]:
+        """
+        LS-CRIT-03: Full auto-disbursement pipeline for charity allocations.
+
+        1. Fetches all undisbursed LateFeeCharityAllocation records older than
+           settings.charity_disbursement_min_age_days.
+        2. Checks Shariah nisab threshold — only disburse if total >= nisab.
+        3. Verifies charity_payable GL balance covers the total.
+        4. Records the charity disbursement GL entry.
+        5. Marks all allocations as disbursed.
+        """
+        pending = await self.get_pending_disbursements()
+        if not pending:
+            return {
+                "status": "no_pending",
+                "disbursed_count": 0,
+                "total_amount": 0.0,
+                "message": "No pending charity allocations meeting minimum age threshold.",
+            }
+
+        total_amount = sum((Decimal(str(a.late_fee_amount)) for a in pending), Decimal("0.00"))
+
+        # LS-BL-04: Shariah nisab check — configurable via settings
+        nisab = Decimal(str(settings.shariah_nisab_pkr))
+        if total_amount < nisab:
+            logger.info(
+                "Charity allocation below nisab threshold; skipping disbursement",
+                extra={"total_amount": float(total_amount), "nisab": float(nisab)},
+            )
+            return {
+                "status": "below_nisab",
+                "disbursed_count": 0,
+                "total_amount": float(total_amount),
+                "nisab_threshold": float(nisab),
+                "message": "Total pending charity is below the Shariah nisab threshold.",
+            }
+
+        # Balance pre-check
+        accounting = AccountingService(self.db, redis=self.redis)
+        charity_balance = await accounting.get_account_balance(ACCOUNT_CODES["charity_payable"])
+        if Decimal(str(charity_balance["balance"])) < total_amount:
+            raise ValueError(
+                f"Insufficient funds in charity_payable: "
+                f"{charity_balance['balance']} < {total_amount}"
+            )
+
+        # Build a stable reference for idempotency
+        ref = payment_reference or f"AUTO-{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        source_id = self._stable_source_id(ref)
+        await accounting.record_charity_disbursement(
+            source_id=source_id,
+            amount=total_amount,
+            reference=ref,
+        )
+
+        # Mark allocations as disbursed
+        now = datetime.now(timezone.utc)
+        for allocation in pending:
+            allocation.disbursed_at = now
+            if receipt_s3:
+                allocation.receipt_s3 = receipt_s3
+
+        await self.db.commit()
+
+        logger.info(
+            "Charity auto-disbursement completed",
+            extra={"total_amount": float(total_amount), "count": len(pending), "reference": ref},
+        )
+        return {
+            "status": "disbursed",
+            "disbursed_count": len(pending),
+            "total_amount": float(total_amount),
+            "reference": ref,
+        }
 

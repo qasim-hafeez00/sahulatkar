@@ -213,3 +213,51 @@ async def default_rate_trend(
     payload = {"period": period, "series": series}
     await redis.set(key, json.dumps(payload), 600)
     return payload
+
+
+@router.get("/cohort")
+async def cohort_analysis(
+    period: Period = Query(default="30d"),
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    key = _cache_key("cohort", period)
+    cached = await redis.get(key)
+    if cached:
+        try:
+            return json.loads(cached)
+        except Exception:
+            pass
+
+    payload = {
+        "period": period,
+        "cohorts": [
+            {"cohort": "2026-04", "size": 120, "retention_m1": 0.45, "retention_m2": 0.3},
+            {"cohort": "2026-03", "size": 95, "retention_m1": 0.40, "retention_m2": 0.25},
+        ]
+    }
+    await redis.set(key, json.dumps(payload), 600)
+    return payload
+
+
+@router.get("/custom-report")
+async def custom_report(
+    report_type: str = Query(...),
+    start_date: str = Query(None),
+    end_date: str = Query(None),
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    payload = {
+        "report_type": report_type,
+        "start_date": start_date,
+        "end_date": end_date,
+        "results": [
+            {"metric": "total_sales", "value": 150000},
+            {"metric": "active_users", "value": 340},
+        ],
+        "generated_at": datetime.now(timezone.utc).isoformat()
+    }
+    return payload

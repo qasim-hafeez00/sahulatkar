@@ -323,3 +323,78 @@ async def get_audit_trail(
     }
     
     return trail
+
+
+# ── PO-EP-04: Admin-triggerable reconciliation ──────────────────────────────
+@router.post(
+    "/reconciliation/trigger",
+    dependencies=[Depends(RequireRole(_FINANCE_ROLES))],
+)
+async def trigger_reconciliation(
+    gateway: str,
+    settlement_date: str,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(get_current_admin),
+):
+    """
+    PO-EP-04: Manually trigger settlement reconciliation for a specific gateway
+    and date without needing to run the CLI worker.
+    """
+    from datetime import date as _date
+    from src.workers.reconciliation_worker import run_reconciliation
+    import asyncio
+
+    try:
+        parsed_date = _date.fromisoformat(settlement_date)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="INVALID_DATE_FORMAT: use YYYY-MM-DD")
+
+    if gateway not in ["jazzcash", "safepay", "raast", "stripe", "easypaisa"]:
+        raise HTTPException(status_code=400, detail="UNSUPPORTED_GATEWAY")
+
+    # Run async reconciliation as a background task
+    asyncio.create_task(run_reconciliation(gateway, parsed_date))
+    logger.info("Admin triggered reconciliation", extra={"gateway": gateway, "date": settlement_date})
+    return {"status": "triggered", "gateway": gateway, "settlement_date": settlement_date}
+
+
+# ── PO-EP-05: Admin view of user's Raast mandates ───────────────────────
+@router.get(
+    "/mandates/{user_id}",
+    dependencies=[Depends(RequireRole(_READ_ROLES))],
+)
+async def get_user_mandates(
+    user_id: int,
+    db: AsyncSession = Depends(get_db),
+    _admin=Depends(get_current_admin),
+):
+    """
+    PO-EP-05: View all active payment mandates for a specific user.
+    Used to verify Raast auto-debit setup for installment collection.
+    PO-BL-07: Implements full mandate management (replaces empty STUB).
+    """
+    from src.models.payment_mandate import PaymentMandate
+
+    result = await db.execute(
+        select(PaymentMandate).where(PaymentMandate.user_id == user_id)
+        .order_by(PaymentMandate.id.desc())
+    )
+    mandates = result.scalars().all()
+
+    return {
+        "user_id": user_id,
+        "mandates": [
+            {
+                "id": m.id,
+                "gateway": m.gateway,
+                "mandate_reference": m.mandate_reference,
+                "status": m.status,
+                "payer_identifier": m.payer_identifier,
+                "max_amount_per_txn": str(m.max_amount_per_txn) if m.max_amount_per_txn else None,
+                "expires_at": m.expires_at.isoformat() if m.expires_at else None,
+                "last_used_at": m.last_used_at.isoformat() if m.last_used_at else None,
+                "created_at": m.created_at.isoformat() if m.created_at else None,
+            }
+            for m in mandates
+        ],
+    }

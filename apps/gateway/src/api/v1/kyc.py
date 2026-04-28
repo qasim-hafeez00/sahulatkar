@@ -117,8 +117,20 @@ async def resubmit_kyc(
     if hasattr(kyc, "shufti_verification_data"):
         kyc.shufti_verification_data = None
     
-    from sqlalchemy import delete
+    from sqlalchemy import delete, select
     from sk_shared.models.kyc import KycVerificationQueue
+    
+    active_queue = await db.scalar(
+        select(KycVerificationQueue).where(
+            KycVerificationQueue.kyc_verification_id == kyc.id,
+            KycVerificationQueue.assigned_admin_id.is_not(None)
+        )
+    )
+    if active_queue:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="PREVIOUS_ATTEMPT_STILL_CLAIMED"
+        )
     
     await db.execute(
         delete(KycVerificationQueue).where(

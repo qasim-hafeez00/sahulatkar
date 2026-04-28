@@ -1,7 +1,7 @@
 from typing import AsyncGenerator
 import hmac
 
-from fastapi import Request, HTTPException, status, Header
+from fastapi import Depends, Request, HTTPException, status, Header
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.database import SessionLocal

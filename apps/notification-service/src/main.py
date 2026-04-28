@@ -14,6 +14,7 @@ from src.core.event_listeners import start_event_listener
 from src.core.logging import setup_logging
 from src.core.middleware import RequestIDMiddleware, PrometheusMiddleware
 from src.services.aftership_client import AfterShipClient
+from src.workers.scheduled_worker import run_scheduled_worker
 
 setup_logging()
 
@@ -32,11 +33,18 @@ async def lifespan(app: FastAPI):
     listener_task = await start_event_listener(app)
     app.state.listener_task = listener_task
 
+    # NS-BL-09: Start scheduled notification worker (fires ScheduledNotification records)
+    import asyncio
+    scheduled_task = asyncio.create_task(run_scheduled_worker(interval_seconds=60))
+    app.state.scheduled_task = scheduled_task
+
     yield
 
     # Graceful shutdown
     if listener_task and not listener_task.done():
         listener_task.cancel()
+    if hasattr(app.state, "scheduled_task") and not app.state.scheduled_task.done():
+        app.state.scheduled_task.cancel()
     await app.state.aftership_client.aclose()
     await app.state.redis.close()
 

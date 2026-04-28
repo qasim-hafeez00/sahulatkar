@@ -46,8 +46,14 @@ def _enforce_payload_size(raw_body: bytes) -> None:
         )
 
 
-async def _enqueue_webhook(redis: RedisClient, payload: dict) -> None:
+async def _enqueue_webhook(redis: RedisClient, payload: dict, idempotency_key: str | None = None) -> None:
     if hasattr(redis, "redis"):
+        if idempotency_key:
+            cache_key = f"sk:webhook:processed:{idempotency_key}"
+            if await redis.redis.get(cache_key):
+                logger.info("Webhook duplicate skipped: %s", idempotency_key)
+                return
+            await redis.redis.set(cache_key, "1", ex=86400)
         await redis.redis.lpush(QueueName.PAYMENT_WEBHOOK, json.dumps(payload)) # GAP-09
 
 
@@ -59,6 +65,9 @@ async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_re
     _verify_signature(settings.JAZZCASH_WEBHOOK_SECRET, raw_body, request.headers.get("X-JazzCash-Signature", ""))
     payload = await request.json()
     status_value = "confirmed" if str(payload.get("pp_ResponseCode")) == "000" else "failed"
+    txn_ref = payload.get("pp_TxnRefNo")
+    idempotency_key = f"jazzcash:{txn_ref}" if txn_ref else None
+
     await _enqueue_webhook(
         redis,
         {
@@ -68,6 +77,7 @@ async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_re
             "raw": payload,
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         },
+        idempotency_key,
     )
     return {"received": True, "gateway": "jazzcash"}
 
@@ -79,6 +89,9 @@ async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_red
     _enforce_payload_size(raw_body)
     _verify_signature(settings.SAFEPAY_WEBHOOK_SECRET, raw_body, request.headers.get("X-SafePay-Signature", ""))
     payload = await request.json()
+    tracker = payload.get("tracker")
+    idempotency_key = f"safepay:{tracker}" if tracker else None
+
     await _enqueue_webhook(
         redis,
         {
@@ -87,5 +100,6 @@ async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_red
             "raw": payload,
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         },
+        idempotency_key,
     )
     return {"received": True, "gateway": "safepay"}

@@ -1,0 +1,103 @@
+name: Build & Push to GHCR
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ghcr.io/${{ github.repository_owner }}/sahulatkar
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  detect-changes:
+    runs-on: ubuntu-latest
+    outputs:
+      gateway: ${{ steps.filter.outputs.gateway }}
+      product-service: ${{ steps.filter.outputs.product-service }}
+      credit-engine: ${{ steps.filter.outputs.credit-engine }}
+      payment-orchestrator: ${{ steps.filter.outputs.payment-orchestrator }}
+      ledger-service: ${{ steps.filter.outputs.ledger-service }}
+      notification-service: ${{ steps.filter.outputs.notification-service }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            gateway:
+              - 'apps/gateway/**'
+              - 'packages/shared-python/**'
+            product-service:
+              - 'apps/product-service/**'
+              - 'packages/shared-python/**'
+            credit-engine:
+              - 'apps/credit-engine/**'
+              - 'packages/shared-python/**'
+            payment-orchestrator:
+              - 'apps/payment-orchestrator/**'
+              - 'packages/shared-python/**'
+            ledger-service:
+              - 'apps/ledger-service/**'
+              - 'packages/shared-python/**'
+            notification-service:
+              - 'apps/notification-service/**'
+              - 'packages/shared-python/**'
+
+  build-push:
+    needs: detect-changes
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - service: gateway
+            changed: ${{ needs.detect-changes.outputs.gateway }}
+          - service: product-service
+            changed: ${{ needs.detect-changes.outputs['product-service'] }}
+          - service: credit-engine
+            changed: ${{ needs.detect-changes.outputs['credit-engine'] }}
+          - service: payment-orchestrator
+            changed: ${{ needs.detect-changes.outputs['payment-orchestrator'] }}
+          - service: ledger-service
+            changed: ${{ needs.detect-changes.outputs['ledger-service'] }}
+          - service: notification-service
+            changed: ${{ needs.detect-changes.outputs['notification-service'] }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=sha,prefix=,format=short
+            type=raw,value=latest,enable=${{ github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master' }}
+
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: apps/${{ matrix.service }}/Dockerfile
+          push: ${{ matrix.changed == 'true' || github.event_name == 'workflow_dispatch' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha,scope=${{ matrix.service }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.service }}

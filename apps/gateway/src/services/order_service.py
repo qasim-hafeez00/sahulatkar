@@ -193,39 +193,8 @@ class OrderService:
             select(Order).where(Order.id == order_id, Order.user_id == user.id, Order.deleted_at.is_(None))
         )
         
-        # TASK-11: Reserve credit - decrement user's available_credit
-        from sk_shared.models.auth import User as UserModel
-        from sk_shared.models.credit import CreditLimitHistory
-        user_record = await self.db.scalar(
-            select(UserModel).where(UserModel.id == user.id, UserModel.deleted_at.is_(None))
-        )
-        if user_record and user_record.available_credit is not None:
-            prev_available = float(user_record.available_credit)
-            user_record.available_credit = max(prev_available - float(order.total_amount or 0), 0.0)
-            from src.config import settings
-            if settings.ENVIRONMENT != "test":
-                history_kwargs = {"user_id": user.id}
-                if hasattr(CreditLimitHistory, "previous_limit"):
-                    history_kwargs["previous_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "old_limit"):
-                    history_kwargs["old_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "new_limit"):
-                    history_kwargs["new_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "available_before"):
-                    history_kwargs["available_before"] = prev_available
-                if hasattr(CreditLimitHistory, "available_after"):
-                    history_kwargs["available_after"] = user_record.available_credit
-                if hasattr(CreditLimitHistory, "reason"):
-                    history_kwargs["reason"] = f"order_offer_accepted:{order_id}"
-                if hasattr(CreditLimitHistory, "reason_code"):
-                    history_kwargs["reason_code"] = "order_offer_accepted"
-                if hasattr(CreditLimitHistory, "changed_by"):
-                    history_kwargs["changed_by"] = "system"
-                if hasattr(CreditLimitHistory, "changed_by_type"):
-                    history_kwargs["changed_by_type"] = "system"
-                if hasattr(CreditLimitHistory, "changed_by_id"):
-                    history_kwargs["changed_by_id"] = str(user.id)
-                self.db.add(CreditLimitHistory(**history_kwargs))
+        # Credit is already reserved at extraction (internal callback)
+        # We only need to record the status change history here.
         
         self.db.add(
             OrderStatusHistory(

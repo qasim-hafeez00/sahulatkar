@@ -43,7 +43,7 @@ async def test_update_parameters_validation(client: AsyncClient, test_admin):
 
 async def test_get_parameters_cached(client: AsyncClient, test_admin, redis_mock):
     _, admin_token = test_admin
-    key = "sk:admin:system:parameters"
+    key = "sk:admin:system:parameters:v1"
     
     fake_params = {"maintenance_mode": True, "custom": "value"}
     await redis_mock.set(key, json.dumps(fake_params), 300)

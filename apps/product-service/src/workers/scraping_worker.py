@@ -57,7 +57,14 @@ class ScrapingWorker:
 
         while self.running:
             # GAP-01: FIFO - brpop pops from RIGHT. Producer lpush to LEFT. Correct.
-            job = await self.redis.redis.brpop(QueueName.SCRAPING, timeout=5)
+            try:
+                job = await self.redis.redis.brpop(QueueName.SCRAPING, timeout=5)
+            except Exception as e:
+                import redis
+                if isinstance(e, (redis.exceptions.ConnectionError, redis.exceptions.TimeoutError)):
+                    await asyncio.sleep(5)
+                    continue
+                raise
             if job is None:
                 continue
 
@@ -114,7 +121,7 @@ class ScrapingWorker:
         if scraping_job.status in {"completed", "failed"}:
             return
 
-        async with DistributedLock(self.redis, f"scraping:{normalized_url}", timeout=120):
+        async with DistributedLock(self.redis, f"scraping:{payload['canonical_url']}", timeout=120):
             scraping_job.status = "running"
             scraping_job.started_at = datetime.now(timezone.utc)
             await db.flush()
@@ -149,6 +156,7 @@ class ScrapingWorker:
             if settings.FEATURE_HITL_ESCALATION and scraping_job.order_id:
                 hitl = HitlQueue(
                     order_id=scraping_job.order_id,
+                    task_type="product_extraction",
                     priority=3,
                     status="pending",
                     failure_reason=f"Scraping failed after {scraping_job.max_attempts} attempts: {result.error_message}",
@@ -191,6 +199,17 @@ class ScrapingWorker:
         merchant, _ = await merchant_repo.get_or_create(domain, payload.get("platform", "CUSTOM"))
 
         primary_image_s3, secondary_images = _extract_image_fields(result)
+        from src.services.prohibited_checker import ProhibitedCheckerService
+        checker = ProhibitedCheckerService()
+        prohibited_check = await checker.check_text(
+            db=db,
+            text=result.title,
+            raw_url=payload["input_url"],
+            canonical_url=payload["canonical_url"],
+            description=getattr(result, "description", None),
+            brand=getattr(result, "brand", None),
+        )
+
         product_payload = {
             "merchant_id": merchant.id,
             "name": result.title,

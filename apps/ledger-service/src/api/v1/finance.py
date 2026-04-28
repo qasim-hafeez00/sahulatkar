@@ -18,12 +18,15 @@ from src.schemas.finance import (
     CharityDisbursementRequest,
     CharityDisbursementResponse,
     CharityReportResponse,
+    CharityAutoAllocationResponse,
     DLQListResponse,
     DLQMessageResponse,
     DLQRetryResponse,
     JournalEntryListResponse,
     JournalEntryResponse,
     LedgerAccountsListResponse,
+    OverdueReportResponse,
+    PeriodCloseAlertResponse,
     ProfitLossResponse,
     PeriodManagementResponse,
     ReconciliationImportRequest,
@@ -32,6 +35,7 @@ from src.schemas.finance import (
     ReconciliationOverrideRequest,
     ReconciliationOverrideResponse,
     ShariahAuditResponse,
+    TasdeeqReportResponse,
     TrialBalanceResponse,
     FiscalYearSeedRequest,
 )
@@ -39,6 +43,7 @@ from src.services.accounting_service import AccountingService
 from src.services.charity_service import CharityService
 from src.services.reconciliation_service import ReconciliationService
 from src.services.period_service import PeriodService
+from src.services.tasdeeq_service import TasdeeqService
 from src.billing.billing_sweep import BillingSweepService
 from sk_shared.events import build_event_envelope, event_channel
 from sk_shared.redis_client import RedisClient
@@ -494,6 +499,94 @@ async def trigger_billing_sweep(
 ) -> dict[str, object]:
     """Trigger the billing sweep manually for a specific date."""
     sweep_date = date.fromisoformat(as_of) if as_of else None
+    service = BillingSweepService(db, redis=redis)
+    result = await service.execute_sweep(as_of=sweep_date)
+    await db.commit()
+    return result
+
+
+# LS-EP-02: Overdue installment report
+@router.get("/admin/finance/overdue-report", response_model=OverdueReportResponse)
+async def get_overdue_report(
+    as_of: str | None = Query(default=None),
+    min_days_overdue: int = Query(default=0, ge=0),
+    limit: int = Query(default=200, ge=1, le=5000),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
+) -> dict[str, object]:
+    """LS-EP-02: Overdue installment report with outstanding amounts."""
+    service = AccountingService(db, redis=redis)
+    try:
+        details = await service.get_ar_aging_details(as_of=as_of, min_days_overdue=min_days_overdue, limit=limit)
+        total_outstanding = sum(d["outstanding_amount"] for d in details)
+        from datetime import date as _date
+        return {
+            "as_of": as_of or _date.today().isoformat(),
+            "total_count": len(details),
+            "total_outstanding": total_outstanding,
+            "items": details,
+        }
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+# LS-EP-05: Tasdeeq / charity allocation report
+@router.get("/admin/finance/tasdeeq-report", response_model=TasdeeqReportResponse)
+async def get_tasdeeq_report(
+    as_of: str | None = Query(default=None, description="Report date (YYYY-MM-DD). Defaults to today."),
+    db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
+) -> dict[str, object]:
+    """LS-EP-05: Generate TASDEEQ credit bureau report and return submission result."""
+    from datetime import date as _date
+    report_date = _date.fromisoformat(as_of) if as_of else None
+    service = TasdeeqService(db)
+    try:
+        return await service.run_reporting_cycle(as_of_date=report_date)
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+# LS-CRIT-03: Charity auto-allocation disbursement
+@router.post("/admin/finance/charity/process-allocation", response_model=CharityAutoAllocationResponse)
+async def process_charity_allocation(
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(["super_admin"])),
+    __: bool = Depends(rate_limit_admin_writes),
+) -> dict[str, object]:
+    """LS-CRIT-03: Process pending charity allocations and auto-disburse if above nisab threshold."""
+    service = CharityService(db, redis=redis)
+    try:
+        return await service.process_charity_allocation()
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# LS-BL-07: Period close alerts
+@router.get("/admin/finance/periods/upcoming-closes", response_model=list[PeriodCloseAlertResponse])
+async def get_upcoming_period_closes(
+    within_days: int = Query(default=7, ge=1, le=60),
+    db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(["finance_analyst", "super_admin"])),
+) -> list[dict[str, object]]:
+    """LS-BL-07: Returns open periods whose end_date is within `within_days` days — for alerting."""
+    service = PeriodService(db)
+    return await service.get_upcoming_period_closes(within_days=within_days)
+
+
+# LS-EP-03: Internal billing sweep trigger (for Gateway)
+@router.post("/internal/billing/trigger-sweep")
+async def internal_trigger_billing_sweep(
+    as_of: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_internal_request),
+) -> dict[str, object]:
+    """LS-EP-03: Internal endpoint allowing Gateway to trigger billing sweep manually."""
+    from datetime import date as _date
+    sweep_date = _date.fromisoformat(as_of) if as_of else None
     service = BillingSweepService(db, redis=redis)
     result = await service.execute_sweep(as_of=sweep_date)
     await db.commit()

@@ -127,9 +127,7 @@ class JazzSMSDispatcher(BaseDispatcher):
             return DispatchResult(success=False, failure_reason="JAZZ_UNREACHABLE", provider_name="jazz_sms")
 
     async def health_check(self) -> bool:
-        try:
-            async with httpx.AsyncClient(timeout=3.0) as client:
-                response = await client.get(settings.JAZZ_SMS_API_URL + "/health")
-                return response.status_code < 500
-        except Exception:
-            return False
+        # NS-BL-02: Do NOT probe JAZZ_SMS_API_URL + "/health" — Jazz SMS is a
+        # third-party carrier API with no guaranteed /health route.
+        # Credential presence is the best available signal.
+        return bool(settings.JAZZ_SMS_USERNAME and settings.JAZZ_SMS_PASSWORD)

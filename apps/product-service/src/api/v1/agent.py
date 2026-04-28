@@ -81,3 +81,20 @@ async def cancel_checkout_job(
     service = CheckoutAgentService(db, redis)
     await service.cancel_job(job_id)
     return {"status": "cancelled", "job_id": job_id}
+
+@router.get("/job/{job_id}/screenshot")
+async def get_checkout_screenshot(
+    job_id: UUID,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    from fastapi.responses import RedirectResponse
+    row = await db.scalar(select(PurchaseExecution).where(PurchaseExecution.uuid == job_id))
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
+
+    url = row.receipt_screenshot_s3 or row.screenshot_s3
+    if not url:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SCREENSHOT_NOT_FOUND")
+    
+    return RedirectResponse(url=url)

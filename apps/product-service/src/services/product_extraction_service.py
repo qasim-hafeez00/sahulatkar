@@ -256,13 +256,21 @@ class ProductExtractionService:
             await self.db.refresh(product)
 
             if product.primary_image_s3 and product.primary_image_s3.startswith("http") and settings.IMAGE_CACHE_ENABLED:
-                try:
-                    cached_key = await self.s3_service.cache_product_image(product.primary_image_s3, str(product.uuid))
-                    if cached_key:
-                        product.primary_image_s3 = cached_key
-                        await self.db.commit()
-                except Exception:
-                    pass
+                import asyncio
+                import logging
+                logger = logging.getLogger(__name__)
+                for attempt in range(3):
+                    try:
+                        cached_key = await self.s3_service.cache_product_image(product.primary_image_s3, str(product.uuid))
+                        if cached_key:
+                            product.primary_image_s3 = cached_key
+                            await self.db.commit()
+                        break
+                    except Exception as e:
+                        if attempt == 2:
+                            logger.error(f"ALERT: S3 Image Caching failed after 3 attempts for product {product.uuid}: {e}", exc_info=True)
+                        else:
+                            await asyncio.sleep(2)
 
             if settings.DATABASE_DIALECT == "postgresql":
                 await self.db.execute(

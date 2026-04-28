@@ -84,6 +84,26 @@ async def apply_delivery_confirmed_envelope(session: AsyncSession, envelope: dic
         wakalah.is_executed = True
         wakalah.executed_at = datetime.now(timezone.utc)
 
+    # GW-BL-15: Trigger installment activation on DELIVERED status
+    from sk_shared.models.payment import Loan, Installment
+    from datetime import timedelta
+    loan = await session.scalar(
+        select(Loan).where(Loan.order_id == order_id, Loan.status == "active")
+    )
+    if loan:
+        # Update due dates to start from today + 30 days
+        result = await session.execute(
+            select(Installment)
+            .where(Installment.loan_id == loan.id)
+            .order_by(Installment.installment_number)
+        )
+        installments = result.scalars().all()
+        
+        for inst in installments:
+            if inst.status == "pending":
+                # Reschedule based on delivery date
+                inst.due_date = (datetime.now(timezone.utc) + timedelta(days=30 * inst.installment_number)).date()
+
     await session.commit()
     logger.info(f"Order {order_id} transitioned from {from_status} to {target_state}")
     return True

@@ -74,6 +74,16 @@ class EventListenerWorker:
                     except Exception as exc:
                         logger.error("EventListenerWorker: error processing message: %s", exc)
                         logger.error(traceback.format_exc())
+                        from datetime import datetime, timezone
+                        import socket
+                        raw_data = message.get("data", b"").decode("utf-8") if isinstance(message.get("data"), bytes) else str(message.get("data", ""))
+                        dlq_entry = {
+                            "raw_data": raw_data,
+                            "dlq_error": str(exc),
+                            "dlq_at": datetime.now(timezone.utc).isoformat(),
+                            "worker": socket.gethostname(),
+                        }
+                        await redis.redis.lpush("sk:queue:dlq:events", json.dumps(dlq_entry))
             except Exception as exc:
                 logger.error("Event listener disconnected: %s", exc)
             finally:
@@ -85,6 +95,12 @@ class EventListenerWorker:
 
     async def _handle_vcn_issued(self, payload: dict, redis) -> None:
         async with SessionLocal() as db:
+            from sk_shared.models.order import Order
+            order = await db.scalar(select(Order).where(Order.id == payload["order_id"]))
+            if order and order.status in ("cancelled", "refunded"):
+                logger.warning("Order %s is cancelled, skipping checkout", payload["order_id"])
+                return
+
             service = CheckoutAgentService(db, redis)
             await service.queue_job(
                 order_id=payload["order_id"],

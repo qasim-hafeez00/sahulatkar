@@ -5,11 +5,14 @@ import contextlib
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from decimal import Decimal
 
 from fastapi import FastAPI
+from sqlalchemy import select
 from sqlalchemy.exc import DBAPIError
 
-from sk_shared.events import EVENT_DELIVERY_STATUS_CHANGED, EVENT_ORDER_PURCHASE_CONFIRMED, EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED, EVENT_PAYMENT_INSTALLMENT_PAID, event_channel
+from sk_shared.events import EVENT_DELIVERY_STATUS_CHANGED, EVENT_LOAN_CREATED, EVENT_ORDER_PURCHASE_CONFIRMED, EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED, EVENT_PAYMENT_INSTALLMENT_PAID, event_channel
+from sk_shared.models.payment import Installment
 from sk_shared.redis_client import RedisClient
 
 from src.core.database import SessionLocal
@@ -60,9 +63,37 @@ async def _process_event_once(event_name: str | None, payload: dict[str, object]
         if event_name == EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED:
             await service.record_down_payment(order_id=int(payload["order_id"]), amount=payload["amount_pkr"])
         elif event_name == EVENT_PAYMENT_INSTALLMENT_PAID:
+            installment_id = int(payload["installment_id"])
+            event_amount = Decimal(str(payload["amount_pkr"]))
+
+            # LS-BL-05: Validate event amount vs. actual installment expected amount
+            async with SessionLocal() as validation_session:
+                stmt = select(Installment).where(Installment.id == installment_id)
+                installment = (await validation_session.execute(stmt)).scalar_one_or_none()
+
+            if installment is not None:
+                expected_amount = Decimal(str(installment.total_amount))
+                tolerance = Decimal("0.01")
+                if abs(event_amount - expected_amount) > tolerance:
+                    logger.warning(
+                        "Payment amount mismatch detected on installment.paid event",
+                        extra={
+                            "installment_id": installment_id,
+                            "event_amount_pkr": float(event_amount),
+                            "expected_amount": float(expected_amount),
+                            "discrepancy": float(event_amount - expected_amount),
+                        },
+                    )
+                    # Use event amount but flag in description for audit trail
+                    description_note = (
+                        f" [AMOUNT_MISMATCH: event={event_amount}, expected={expected_amount}]"
+                    )
+                    payload = dict(payload)
+                    payload["_amount_mismatch_note"] = description_note
+
             await service.record_installment_paid(
-                installment_id=int(payload["installment_id"]),
-                amount=payload["amount_pkr"],
+                installment_id=installment_id,
+                amount=event_amount,
             )
         elif event_name == EVENT_ORDER_PURCHASE_CONFIRMED:
             vcn_id = payload.get("vcn_id")
@@ -90,6 +121,22 @@ async def _process_event_once(event_name: str | None, payload: dict[str, object]
                 total_amount=total_amount,
                 vcn_id=int(vcn_id),
             )
+        elif event_name == EVENT_LOAN_CREATED:
+            loan_id = payload.get("loan_id")
+            order_id = payload.get("order_id")
+            if loan_id is None or order_id is None:
+                logger.warning(
+                    "Skipping loan.created event: missing loan_id or order_id",
+                    extra={"event": event_name, "payload": payload},
+                )
+                return
+            await service.record_loan_created(
+                loan_id=int(loan_id),
+                order_id=int(order_id),
+                principal_amount=payload.get("principal_amount"),
+                profit_amount=payload.get("profit_amount"),
+                total_repayable=payload.get("total_repayable"),
+            )
         elif event_name == EVENT_DELIVERY_STATUS_CHANGED:
             # P2: Trigger Wakalah execution/finalization on delivery
             if payload.get("status") == "delivered":
@@ -110,6 +157,7 @@ async def run_ledger_event_listener(app: FastAPI) -> None:
         event_channel(EVENT_PAYMENT_INSTALLMENT_PAID),
         event_channel(EVENT_ORDER_PURCHASE_CONFIRMED),
         event_channel(EVENT_DELIVERY_STATUS_CHANGED),
+        event_channel(EVENT_LOAN_CREATED),
     ]
     dlq = EventDeadLetterQueue()
     pubsub = app.state.redis.redis.pubsub()

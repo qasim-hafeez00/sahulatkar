@@ -73,6 +73,12 @@ EVENT_CHANNEL_MATRIX: dict[str, dict] = {
     "billing.late_fee_applied":          {"channels": ["sms", "whatsapp", "push", "email"], "priority": "high", "is_compliance": True},
     "billing.late_fee_charity_allocated":{"channels": ["whatsapp", "push"], "priority": "normal", "is_compliance": True},
     "billing.loan_fully_repaid":         {"channels": ["whatsapp", "push", "email"], "priority": "high"},
+    # ── Missing integration events (NS-BL-05 / Section 6.4) ─────────────────
+    "order.cancelled":                   {"channels": ["sms", "whatsapp", "push"], "priority": "high"},
+    "vcn.expired":                       {"channels": ["push", "sms"], "priority": "high"},
+    "payment.failed":                    {"channels": ["sms", "whatsapp", "push"], "priority": "high"},
+    "kyc.documents_needed":              {"channels": ["whatsapp", "push"], "priority": "high"},
+    "credit.limit_changed":              {"channels": ["whatsapp", "push"], "priority": "normal"},
 }
 
 EVENT_CATEGORY_MAP: dict[str, str] = {
@@ -102,6 +108,12 @@ EVENT_CATEGORY_MAP: dict[str, str] = {
     "billing.late_fee_applied": "compliance",
     "billing.late_fee_charity_allocated": "compliance",
     "billing.loan_fully_repaid": "billing",
+    # Missing integration events
+    "order.cancelled": "order",
+    "vcn.expired": "order",
+    "payment.failed": "payment",
+    "kyc.documents_needed": "kyc",
+    "credit.limit_changed": "credit",
 }
 
 class NotificationService:
@@ -216,7 +228,11 @@ class NotificationService:
         # 2. Find User (Optional - OTPs might be for registration)
         from sk_shared.models.auth import User
         user = await self.db.scalar(select(User).where(User.phone == phone))
-        user_id = user.id if user else 1 # Fallback to system/admin user if not found
+        # Use 0 as a sentinel for unregistered-phone OTPs.
+        # NEVER fall back to user_id=1 (super admin) — that pollutes the audit trail.
+        # Dispatch destination is resolved via template_vars["destination_phone"],
+        # so the real DB user record is not needed for delivery.
+        user_id = user.id if user else 0
 
         # 3. Create Notification Record
         event_type = f"auth.otp_{purpose}"

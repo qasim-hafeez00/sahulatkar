@@ -174,6 +174,7 @@ async def cancel_order(
     request: Request,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ) -> dict:
     """TASK-12: Cancel an order and restore reserved credit if applicable"""
     from datetime import datetime, timezone
@@ -181,8 +182,16 @@ async def cancel_order(
     from sk_shared.models.auth import User as UserModel
     from sk_shared.models.credit import CreditLimitHistory
     
-    # Only these states allow cancellation
-    CANCELLABLE_STATES = {"url_received", "offer_presented", "offer_accepted", "extraction_failed"}
+    # GW-BL-04: Allow cancellation in CONTRACTS_SIGNED state
+    CANCELLABLE_STATES = {
+        OrderState.URL_RECEIVED, 
+        OrderState.OFFER_PRESENTED, 
+        OrderState.OFFER_ACCEPTED, 
+        OrderState.CONTRACTS_PENDING,
+        OrderState.CONTRACTS_SIGNED,
+        "processing",
+        OrderState.EXTRACTION_FAILED
+    }
     
     order = await db.scalar(
         select(Order).where(
@@ -201,11 +210,17 @@ async def cancel_order(
         )
 
     old_status = order.status
-    order.status = "cancelled"
+    order.status = OrderState.CANCELLED
     order.deleted_at = datetime.now(timezone.utc)  # Soft delete
 
-    # Restore reserved credit if offer was accepted
-    if old_status == "offer_accepted":
+    # Restore reserved credit if it was reserved (any state after URL_RECEIVED/EXTRACTION_FAILED/processing)
+    STATES_WITH_RESERVATION = {
+        OrderState.OFFER_PRESENTED,
+        OrderState.OFFER_ACCEPTED,
+        OrderState.CONTRACTS_PENDING,
+        OrderState.CONTRACTS_SIGNED
+    }
+    if old_status in STATES_WITH_RESERVATION:
         from src.config import settings
 
         user_record = await db.scalar(
@@ -247,6 +262,28 @@ async def cancel_order(
         )
     )
 
+    from sk_shared.constants import QueueName
+    from sk_shared.events import EVENT_ORDER_CANCELLED, build_event_envelope, event_channel
+
+    # Push SMS notification job to the notification queue.
+    import json
+    sms_job = {
+        "event": "order.cancelled",
+        "order_id": order.id,
+        "user_id": current_user.id,
+        "trigger_sms": True,
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+    }
+    await redis.rpush(QueueName.NOTIFICATION_SMS, json.dumps(sms_job))
+
+    # Publish to pub/sub channel so Payment Orchestrator can void the active VCN.
+    envelope = build_event_envelope(
+        event=EVENT_ORDER_CANCELLED,
+        source_service="gateway",
+        payload={"order_id": order.id, "user_id": current_user.id},
+    )
+    await redis.publish(event_channel(EVENT_ORDER_CANCELLED), envelope.to_json())
+
     await record_audit_event(
         db=db,
         request=request,
@@ -262,3 +299,25 @@ async def cancel_order(
 
     await db.commit()
     return {"order_id": order_id, "status": "cancelled"}
+
+
+@router.get("/{order_id}/receipt")
+async def get_order_receipt(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """GW-GAP-18: Order receipt download endpoint"""
+    from datetime import datetime, timezone
+    order = await db.scalar(
+        select(Order).where(Order.id == order_id, Order.user_id == current_user.id, Order.deleted_at.is_(None))
+    )
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    return {
+        "order_id": order.id,
+        "receipt_url": f"https://api.sahulatkar.com/v1/orders/{order.id}/receipt/download",
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "status": "ready"
+    }

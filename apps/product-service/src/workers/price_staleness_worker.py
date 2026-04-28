@@ -40,6 +40,7 @@ class PriceStalenessWorker:
             if acquired:
                 try:
                     await self._run_once()
+                    await self._expire_old_products()
                 finally:
                     await self.redis.redis.delete(LOCK_KEY)
             await asyncio.sleep(settings.PRODUCT_STALENESS_CHECK_INTERVAL_SECONDS)
@@ -96,6 +97,35 @@ class PriceStalenessWorker:
                     ),
                 )
 
+            await db.commit()
+
+    async def _expire_old_products(self) -> None:
+        expiration_threshold = datetime.now(timezone.utc) - timedelta(days=30)
+        async with SessionLocal() as db:
+            from sk_shared.models.checkout import PurchaseExecution
+            # Find products older than 30 days with no recent purchase execution
+            result = await db.execute(
+                select(Product)
+                .where(
+                    Product.deleted_at.is_(None),
+                    Product.created_at < expiration_threshold,
+                    ~Product.id.in_(
+                        select(ScrapingJob.product_id)
+                        .join(PurchaseExecution, PurchaseExecution.order_id == ScrapingJob.order_id)
+                        .where(PurchaseExecution.created_at >= expiration_threshold)
+                    )
+                )
+                .limit(settings.PRODUCT_STALENESS_BATCH_SIZE)
+            )
+            products = list(result.scalars())
+            if not products:
+                return
+
+            now = datetime.now(timezone.utc)
+            for product in products:
+                product.deleted_at = now
+                product.status = "archived"
+            
             await db.commit()
 
 

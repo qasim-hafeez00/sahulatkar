@@ -4,6 +4,7 @@ from urllib.parse import urlparse
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from starlette.middleware.base import BaseHTTPMiddleware
+from sk_shared.correlation import set_correlation_id
 from src.config import settings
 from .logging import logger
 
@@ -11,11 +12,14 @@ class RequestIDMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request: Request, call_next):
         request_id = request.headers.get("X-Request-ID", str(uuid.uuid4()))
         request.state.request_id = request_id
-        
+        # Populate ContextVar so any outbound httpx/aiohttp call in this coroutine
+        # can forward the correlation ID via get_propagation_headers().
+        set_correlation_id(request_id)
+
         start_time = time.time()
         response = await call_next(request)
         process_time = time.time() - start_time
-        
+
         response.headers["X-Request-ID"] = request_id
         response.headers["X-Process-Time"] = str(process_time)
         return response
@@ -38,6 +42,11 @@ class SecurityHeadersMiddleware(BaseHTTPMiddleware):
                 return JSONResponse(status_code=403, content={"detail": "ADMIN_ORIGIN_FORBIDDEN"})
 
         response = await call_next(request)
+        
+        # Don't apply restrictive headers to documentation routes
+        if request.url.path in ["/docs", "/openapi.json", "/redoc"]:
+            return response
+
         response.headers["X-Content-Type-Options"] = "nosniff"
         response.headers["X-Frame-Options"] = "DENY"
         response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"

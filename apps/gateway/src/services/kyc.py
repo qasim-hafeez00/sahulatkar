@@ -69,10 +69,18 @@ class KycService:
         await self.db.commit()
 
         # --- Automated checks (mock) ---
-        ocr_result = await self.shufti_client.verify_document(
-            kyc.cnic_front_image_url, kyc.cnic_back_image_url
-        )
-        liveness_result = await self.shufti_client.verify_liveness(kyc.liveness_video_url)
+        try:
+            ocr_result = await self.shufti_client.verify_document(
+                kyc.cnic_front_image_url, kyc.cnic_back_image_url
+            )
+            liveness_result = await self.shufti_client.verify_liveness(kyc.liveness_video_url)
+        except Exception as exc:
+            logger.error("Shufti API error: %s", exc)
+            kyc.status = KycStatus.REJECTED
+            kyc.rejection_reason = "Automated verification service unavailable."
+            await self.db.commit()
+            await self.db.refresh(kyc)
+            return kyc
 
         kyc.shufti_verification_data = {
             "ocr": ocr_result,
@@ -95,7 +103,16 @@ class KycService:
         extracted_cnic = (
             (ocr_result.get("extracted_data") or {}).get("cnic") or "12345-1234567-1"
         )
-        nadra_ok = await self.nadra_client.verify_cnic(extracted_cnic)
+        try:
+            nadra_ok = await self.nadra_client.verify_cnic(extracted_cnic)
+        except Exception as exc:
+            logger.error("NADRA API error: %s", exc)
+            kyc.status = KycStatus.REJECTED
+            kyc.rejection_reason = "NADRA verification service unavailable."
+            await self.db.commit()
+            await self.db.refresh(kyc)
+            return kyc
+
         kyc.nadra_verification_data = {"success": nadra_ok, "verified_cnic": extracted_cnic}
 
         if not nadra_ok:

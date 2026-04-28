@@ -109,4 +109,12 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    op.drop_table("shard_routing")
+    op.execute("DROP TABLE IF EXISTS shm_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS system_health_metrics CASCADE")
+    op.execute("DROP TABLE IF EXISTS errlogs_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS error_logs CASCADE")
+    op.execute("DROP TABLE IF EXISTS intlogs_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS integration_logs CASCADE")
+    op.execute("DROP TABLE IF EXISTS audit_trails_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS audit_trails CASCADE")

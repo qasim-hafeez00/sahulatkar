@@ -55,6 +55,49 @@ class AccountingService:
             await self.db.refresh(result.journal_entry)
         return result
 
+    async def record_loan_created(
+        self,
+        loan_id: int,
+        order_id: int,
+        principal_amount: Decimal | float | int | None,
+        profit_amount: Decimal | float | int | None,
+        total_repayable: Decimal | float | int | None,
+    ) -> JournalEntryResult:
+        """Post the initial Murabaha financing recognition entry on loan creation.
+
+        Islamic finance treatment:
+          Dr  Murabaha Financing Receivable  = total_repayable  (what customer will owe)
+          Cr  Murabaha Cost Payable          = principal_amount  (obligation to merchant)
+          Cr  Deferred Murabaha Profit       = profit_amount     (unearned profit)
+        """
+        if total_repayable is None or principal_amount is None or profit_amount is None:
+            raise ValueError(
+                f"record_loan_created: missing required amounts for loan {loan_id}"
+            )
+        total = self._money(total_repayable)
+        cost = self._money(principal_amount)
+        profit = self._money(profit_amount)
+        if total != cost + profit:
+            raise ValueError(
+                f"Loan amounts do not balance: total_repayable={total} != "
+                f"principal={cost} + profit={profit}"
+            )
+        result = await self._create_balanced_entry(
+            entry_type="loan_created",
+            source_type="loan.created",
+            source_id=loan_id,
+            description=f"Murabaha financing recognised for loan {loan_id} (order {order_id})",
+            lines=[
+                PostingLine(ACCOUNT_CODES["murabaha_financing_receivable"], debit_amount=total),
+                PostingLine(ACCOUNT_CODES["murabaha_cost_payable"], credit_amount=cost),
+                PostingLine(ACCOUNT_CODES["deferred_murabaha_profit"], credit_amount=profit),
+            ],
+        )
+        if result.created:
+            await self.db.commit()
+            await self.db.refresh(result.journal_entry)
+        return result
+
     async def record_purchase(self, order_id: int, cost_amount: Decimal | float | int, total_amount: Decimal | float | int, vcn_id: int) -> JournalEntryResult:
         """
         Record the Murabaha Sale transaction.
@@ -627,6 +670,58 @@ class AccountingService:
     async def get_account_balance(self, account_code: str, as_of: str | None = None) -> dict[str, object]:
         as_of_date = date.fromisoformat(as_of) if as_of else date.today()
         return await self.balance_service.get_account_balance(account_code, as_of=as_of_date)
+
+    async def get_account_ledger(self, account_code: str, from_date: str | None = None, to_date: str | None = None, cursor: str | None = None, limit: int = 50) -> dict[str, object]:
+        parsed_from_date = date.fromisoformat(from_date) if from_date else None
+        parsed_to_date = date.fromisoformat(to_date) if to_date else None
+
+        stmt = (
+            select(JournalEntryLine)
+            .options(selectinload(JournalEntryLine.journal))
+            .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
+            .join(LedgerAccount, LedgerAccount.id == JournalEntryLine.account_id)
+            .where(LedgerAccount.account_code == account_code)
+            .order_by(JournalEntry.entry_number.desc(), JournalEntryLine.id.desc())
+        )
+        if parsed_from_date is not None:
+            stmt = stmt.where(JournalEntry.entry_date >= parsed_from_date)
+        if parsed_to_date is not None:
+            stmt = stmt.where(JournalEntry.entry_date <= parsed_to_date)
+        if cursor is not None:
+            stmt = stmt.where(JournalEntry.entry_number < cursor)
+
+        rows = (await self.db.execute(stmt.limit(limit + 1))).scalars().all()
+        has_more = len(rows) > limit
+        lines = rows[:limit]
+        next_cursor = lines[-1].journal.entry_number if has_more and lines else None
+
+        items: list[dict[str, object]] = []
+        for line in lines:
+            items.append(
+                {
+                    "entry_number": line.journal.entry_number,
+                    "entry_date": line.journal.entry_date.isoformat(),
+                    "debit_amount": float(self._money(line.debit_amount)),
+                    "credit_amount": float(self._money(line.credit_amount)),
+                    "description": line.description or line.journal.description,
+                    "source_type": line.journal.source_type,
+                    "source_id": line.journal.source_id,
+                }
+            )
+
+        return {
+            "account_code": account_code,
+            "filters": {
+                "from_date": from_date,
+                "to_date": to_date,
+            },
+            "pagination": {
+                "limit": limit,
+                "next_cursor": next_cursor,
+                "has_more": has_more,
+            },
+            "items": items,
+        }
 
     async def list_journal_entries(
         self,

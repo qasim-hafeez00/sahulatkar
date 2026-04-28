@@ -65,3 +65,6 @@ test_all_final.txt
 # Local Env
 .env
 .env.local
+
+# Claude Code local session state
+.claude/

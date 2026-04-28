@@ -118,4 +118,13 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    op.execute("DROP TABLE IF EXISTS pe_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS pe_2025_q1 CASCADE")
+    op.execute("DROP TABLE IF EXISTS purchase_executions CASCADE")
+    op.execute("DROP TABLE IF EXISTS order_state_history CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders_2025_q4 CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders_2025_q3 CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders_2025_q2 CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders_2025_q1 CASCADE")
+    op.execute("DROP TABLE IF EXISTS orders CASCADE")

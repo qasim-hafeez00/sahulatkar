@@ -21,7 +21,7 @@ async def test_listen_to_redis_events():
     async def mock_listen():
         yield {
             "type": "message",
-            "channel": b"sahulatkar:events:kyc.approved",
+            "channel": b"sk:events:kyc.approved",
             "data": json.dumps({"user_id": 1, "payload": {"user_id": 1, "credit_limit": "50000"}})
         }
         # Cancel after one message to exit loop

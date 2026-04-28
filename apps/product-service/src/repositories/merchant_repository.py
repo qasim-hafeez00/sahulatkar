@@ -75,3 +75,43 @@ class MerchantRepository:
             setattr(merchant, key, value)
         await self.db.flush()
         return merchant
+
+    async def recalculate_success_rate(self, merchant_id: int) -> None:
+        from sqlalchemy import text
+        stmt = text("""
+            WITH stats AS (
+                SELECT 
+                    COUNT(*) as total,
+                    SUM(CASE WHEN e.status = 'succeeded' THEN 1 ELSE 0 END) as successes
+                FROM sk_shared.purchase_executions e
+                JOIN sk_shared.orders o ON o.id = e.order_id
+                JOIN sk_shared.products p ON p.id = o.product_id
+                WHERE p.merchant_id = :merchant_id
+            )
+            UPDATE sk_shared.merchants 
+            SET checkout_success_rate = CASE 
+                WHEN stats.total > 0 THEN (CAST(stats.successes AS FLOAT) / stats.total) * 100 
+                ELSE 0 
+            END
+            FROM stats
+            WHERE sk_shared.merchants.id = :merchant_id
+        """)
+        
+        from src.config import settings
+        if settings.DATABASE_DIALECT == "sqlite":
+            # SQLite compat
+            stmt = text("""
+                UPDATE merchants
+                SET checkout_success_rate = COALESCE(
+                    (SELECT (CAST(SUM(CASE WHEN e.status = 'succeeded' THEN 1 ELSE 0 END) AS FLOAT) / COUNT(*)) * 100
+                     FROM purchase_executions e
+                     JOIN orders o ON o.id = e.order_id
+                     JOIN products p ON p.id = o.product_id
+                     WHERE p.merchant_id = :merchant_id),
+                    0
+                )
+                WHERE id = :merchant_id
+            """)
+        
+        await self.db.execute(stmt, {"merchant_id": merchant_id})
+        await self.db.flush()

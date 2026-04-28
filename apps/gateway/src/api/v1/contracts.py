@@ -89,6 +89,21 @@ async def generate_murabaha(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
+    # GW-BL-03: Enforce Wakalah signed before Murabaha generation
+    wakalah = await db.scalar(
+        select(WakalahAgreement).where(
+            WakalahAgreement.order_id == req.order_id,
+            WakalahAgreement.user_id == current_user.id,
+            WakalahAgreement.signed_at.is_not(None),
+            WakalahAgreement.deleted_at.is_(None),
+        )
+    )
+    if not wakalah:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="WAKALAH_NOT_SIGNED"
+        )
+
     contract = await ContractGeneratorService(db).generate_murabaha(current_user.id, req, redis)
     return MurabahaGenerateResponse(
         contract_id=contract.id,

@@ -114,4 +114,25 @@ class FCMPushDispatcher(BaseDispatcher):
         )
 
     async def health_check(self) -> bool:
-        return bool(settings.FCM_SERVICE_ACCOUNT_JSON and settings.FCM_PROJECT_ID)
+        # NS-BL-08: Validate FCM credentials at health-check time, not silently at dispatch time.
+        # An invalid/missing service account key would cause every push to fail with no alert.
+        if not settings.FCM_SERVICE_ACCOUNT_JSON or not settings.FCM_PROJECT_ID:
+            return False
+        try:
+            import base64
+            sa_json = json.loads(base64.b64decode(settings.FCM_SERVICE_ACCOUNT_JSON))
+            required_fields = ("project_id", "private_key", "client_email")
+            if not all(sa_json.get(f) for f in required_fields):
+                import logging
+                logging.getLogger("fcm_dispatcher").warning(
+                    "FCM service account JSON is missing required fields: %s",
+                    [f for f in required_fields if not sa_json.get(f)],
+                )
+                return False
+            return True
+        except Exception as exc:
+            import logging
+            logging.getLogger("fcm_dispatcher").warning(
+                "FCM service account JSON failed to decode: %s", str(exc)
+            )
+            return False

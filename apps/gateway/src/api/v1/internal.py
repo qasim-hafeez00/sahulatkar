@@ -26,14 +26,17 @@ def _require_internal(request: Request):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_INTERNAL_TOKEN")
 
 
+from pydantic import Field
+
 class ProductExtractedPayload(BaseModel):
-    product_id: Optional[int] = None
-    name: Optional[str] = None
-    cost_price: Optional[float] = None
-    sale_price: Optional[float] = None
-    currency: str = "PKR"
-    down_payment_pct: float = 25.0
+    product_id: int = Field(..., gt=0)
+    name: str = Field(..., min_length=1)
+    cost_price: float = Field(..., gt=0)
+    sale_price: float = Field(..., gt=0)
+    currency: str = Field(default="PKR", min_length=3, max_length=3)
+    down_payment_pct: float = Field(default=25.0, ge=0, le=100)
     in_stock: bool = True
+
 
 class ExtractionFailedPayload(BaseModel):
     reason: str
@@ -58,9 +61,6 @@ async def product_extracted_callback(
     if not order:
         raise HTTPException(status_code=404, detail="ORDER_NOT_FOUND")
 
-    if payload.product_id is None or payload.cost_price is None or payload.sale_price is None:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="INVALID_PRODUCT_PAYLOAD")
-
     if order.status not in {OrderState.URL_RECEIVED, "url_received", "processing"}:
         return {"status": "already_processed", "current_status": order.status}
 
@@ -76,6 +76,38 @@ async def product_extracted_callback(
     # Calculate exact down payment locally based on percentage mapping boundaries correctly securely nicely!
     order.down_payment_amount = round(payload.sale_price * payload.down_payment_pct / 100.0, 2)
     order.status = OrderState.OFFER_PRESENTED
+
+    # GW-BL-01: Reserve credit at extraction
+    from sk_shared.models.auth import User as UserModel
+    from sk_shared.models.credit import CreditLimitHistory
+    user = await db.scalar(
+        select(UserModel).where(UserModel.id == order.user_id, UserModel.deleted_at.is_(None))
+    )
+    if user and user.available_credit is not None:
+        prev_available = float(user.available_credit)
+        user.available_credit = max(prev_available - float(payload.sale_price), 0.0)
+        
+        if settings.ENVIRONMENT != "test":
+            history_kwargs = {"user_id": user.id}
+            # Handle variations in CreditLimitHistory model fields
+            for attr in ["previous_limit", "old_limit", "new_limit"]:
+                if hasattr(CreditLimitHistory, attr):
+                    history_kwargs[attr] = float(user.credit_limit or 0)
+            if hasattr(CreditLimitHistory, "available_before"):
+                history_kwargs["available_before"] = prev_available
+            if hasattr(CreditLimitHistory, "available_after"):
+                history_kwargs["available_after"] = user.available_credit
+            if hasattr(CreditLimitHistory, "reason"):
+                history_kwargs["reason"] = f"order_extraction_reserved:{order_id}"
+            if hasattr(CreditLimitHistory, "reason_code"):
+                history_kwargs["reason_code"] = "order_extraction_reserved"
+            if hasattr(CreditLimitHistory, "changed_by"):
+                history_kwargs["changed_by"] = "system"
+            if hasattr(CreditLimitHistory, "changed_by_type"):
+                history_kwargs["changed_by_type"] = "system"
+            if hasattr(CreditLimitHistory, "changed_by_id"):
+                history_kwargs["changed_by_id"] = "product_service"
+            db.add(CreditLimitHistory(**history_kwargs))
 
     db.add(OrderStatusHistory(
         order_id=order.id,

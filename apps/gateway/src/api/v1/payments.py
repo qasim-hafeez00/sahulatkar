@@ -466,3 +466,85 @@ async def vcn_status(
         "expiry_year": getattr(vcn, "expiry_year", None),
         "order_status": order.status,
     }
+
+
+class RefundRequest(BaseModel):
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+@router.post("/installment/retry", response_model=DownPaymentResponse)
+async def retry_failed_installment(
+    payload: InstallmentPayRequest,
+    request: Request,
+    idempotency_key: str | None = Header(default=None, alias="X-Idempotency-Key"),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    return await _submit_installment_payment(
+        installment_id=payload.installment_id,
+        method=payload.method,
+        amount_pkr=payload.amount_pkr,
+        request=request,
+        current_user=current_user,
+        db=db,
+        redis=redis,
+        idempotency_key=idempotency_key,
+    )
+
+
+@router.post("/refund/{order_id}")
+async def request_customer_refund(
+    order_id: int,
+    payload: RefundRequest,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    order = await db.scalar(
+        select(Order).where(
+            Order.id == order_id, 
+            Order.user_id == current_user.id,
+            Order.deleted_at.is_(None)
+        )
+    )
+    if not order:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    refundable_statuses = {
+        "purchase_confirmed",
+        "delivery_pending",
+        "completed",
+    }
+    if str(order.status) not in refundable_statuses:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="ORDER_NOT_REFUNDABLE_BY_CUSTOMER",
+        )
+
+    if hasattr(redis, "redis"):
+        event = {
+            "event": "payment.refund_requested",
+            "order_id": order.id,
+            "user_id": current_user.id,
+            "amount": float(order.total_amount or 0),
+            "reason": f"customer_requested: {payload.reason}",
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis.redis.lpush(QueueName.PAYMENT_INITIATE, json.dumps(event))
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        customer_user_id=current_user.id,
+        module="payments",
+        action="customer_refund_requested",
+        target_id=order.id,
+        changes={
+            "reason": payload.reason,
+            "amount": float(order.total_amount or 0),
+        },
+    )
+    await db.commit()
+    return {"order_id": order.id, "status": "refund_requested", "queued": True}

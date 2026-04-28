@@ -39,6 +39,8 @@ class CheckoutFormFiller:
         order: Order,
         pan: str,
         cvv: str,
+        exp_month: str,
+        exp_year: str,
         attempt_number: int,
         execution_uuid: str,
     ) -> Dict[str, Any]:
@@ -151,9 +153,11 @@ class CheckoutFormFiller:
                         payment_frame = await self._get_payment_frame(page)
                         if payment_frame:
                             await self._human_type(payment_frame, "input[name*='cardnumber'], input[id*='card'], input[placeholder*='Card number']", pan)
+                            await self._human_type(payment_frame, "input[name*='exp'], input[id*='exp'], input[placeholder*='MM/YY']", f"{exp_month}/{exp_year[-2:]}")
                             await self._human_type(payment_frame, "input[name*='cvv'], input[id*='cvv'], input[placeholder*='CVV']", cvv)
                         else:
                             await self._human_type(page, "input[name*='cardnumber'], input[id*='card']", pan)
+                            await self._human_type(page, "input[name*='exp'], input[id*='exp']", f"{exp_month}/{exp_year[-2:]}")
                             await self._human_type(page, "input[name*='cvv'], input[id*='cvv']", cvv)
 
                         # Step 5b: Review Order Page
@@ -187,8 +191,22 @@ class CheckoutFormFiller:
 
                 # Success Extraction
                 page_text = await page.content()
-                order_id_match = re.search(r"(?:Order|Reference|Confirmation).?\s?#?\s?([A-Z0-9-]{5,20})", page_text, re.IGNORECASE)
-                merchant_order_id = order_id_match.group(1) if order_id_match else f"SK-EXT-{execution_uuid}"
+                merchant_order_id = None
+                selectors = [".order-number", "#order-reference", ".confirmation-number", "[data-order-id]"]
+                for selector in selectors:
+                    try:
+                        if await page.locator(selector).count():
+                            text = await page.locator(selector).first.inner_text()
+                            match = re.search(r"([A-Z0-9-]{5,20})", text)
+                            if match:
+                                merchant_order_id = match.group(1)
+                                break
+                    except Exception:
+                        pass
+                
+                if not merchant_order_id:
+                    order_id_match = re.search(r"(?:Order|Reference|Confirmation).?\s?#?\s?([A-Z0-9-]{5,20})", page_text, re.IGNORECASE)
+                    merchant_order_id = order_id_match.group(1) if order_id_match else f"SK-EXT-{execution_uuid}"
 
                 receipt_screenshot: Optional[bytes] = None
                 try:

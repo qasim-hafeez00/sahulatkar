@@ -92,6 +92,15 @@ class VcnVerificationWorker:
                     execution.status = "succeeded"
                     execution.step_reached = "order_confirmed"
                     execution.completed_at = datetime.now(timezone.utc)
+                    
+                    # Update merchant success rate
+                    from sk_shared.models.order import Order
+                    from sk_shared.models.product import Product
+                    merchant_id = await db.scalar(select(Product.merchant_id).join(Order, Order.product_id == Product.id).where(Order.id == execution.order_id))
+                    if merchant_id:
+                        from src.repositories.merchant_repository import MerchantRepository
+                        await MerchantRepository(db).recalculate_success_rate(merchant_id)
+
                     await db.commit()
 
                     # Publish Success Event
@@ -128,7 +137,29 @@ class VcnVerificationWorker:
                         execution.failure_type = "verification_timeout"
                         execution.error_detail = f"VCN verification timed out for VCN {vcn_id}"
                         execution.completed_at = datetime.now(timezone.utc)
+                        
+                        # Update merchant success rate
+                        from sk_shared.models.order import Order
+                        from sk_shared.models.product import Product
+                        merchant_id = await db.scalar(select(Product.merchant_id).join(Order, Order.product_id == Product.id).where(Order.id == execution.order_id))
+                        if merchant_id:
+                            from src.repositories.merchant_repository import MerchantRepository
+                            await MerchantRepository(db).recalculate_success_rate(merchant_id)
+
                         await db.commit()
+
+                        # Publish Failure Event for Rollback
+                        envelope = build_event_envelope(
+                            event="order.purchase_failed",
+                            source_service="product-service",
+                            correlation_id=correlation_id,
+                            payload={
+                                "order_id": execution.order_id,
+                                "vcn_id": execution.vcn_id,
+                                "reason": "vcn_verification_timeout",
+                            },
+                        )
+                        await self.redis.publish("sk:events:order.purchase_failed", envelope.to_json())
 
 async def _amain() -> None:
     logging.basicConfig(

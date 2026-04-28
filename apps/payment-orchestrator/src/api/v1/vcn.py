@@ -69,8 +69,9 @@ async def void_vcn(
     if card.status == "voided":
         return {"status": "already_voided", "vcn_id": vcn_id}
 
-    # GAP-04 fix: Cancel the card on Stripe so it stops being spendable immediately.
-    # A local-only status update leaves the card active on Stripe for up to 24h.
+    # GAP-04 + PO-BL-05: Cancel card on Stripe with 3 retries to prevent card staying active.
+    import asyncio as _asyncio
+    import logging as _log
     from src.adapters.stripe_issuing import StripeIssuingAdapter
     from src.config import settings
     stripe_adapter = StripeIssuingAdapter(
@@ -78,12 +79,17 @@ async def void_vcn(
         fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
         fx_buffer_pct=settings.FX_BUFFER_PCT,
     )
-    stripe_cancel_ok = stripe_adapter.cancel_card(card.issuer_card_id)
+    stripe_cancel_ok = False
+    for _attempt in range(3):
+        stripe_cancel_ok = stripe_adapter.cancel_card(card.issuer_card_id)
+        if stripe_cancel_ok:
+            break
+        if _attempt < 2:
+            await _asyncio.sleep(1)
+
     if not stripe_cancel_ok:
-        # Log the failure but still mark locally as voided to prevent re-use
-        import logging
-        logging.getLogger(__name__).error(
-            "Stripe card cancellation failed — voiding locally only",
+        _log.getLogger(__name__).error(
+            "Stripe card cancellation failed after 3 attempts \u2014 voiding locally only",
             extra={"vcn_id": vcn_id, "issuer_card_id": card.issuer_card_id},
         )
 
@@ -115,7 +121,7 @@ async def vcn_status(order_id: int, db: AsyncSession = Depends(get_db)):
     )
 
 
-@router.get("/internal/vcn/{order_id}/decrypt", response_model=VcnDecryptResponse)
+@router.get("/internal/vcn/{order_id}/decrypt", response_model=VcnDecryptResponse, dependencies=[Depends(rate_limit(30, 60))])
 async def internal_decrypt_vcn(
     order_id: int,
     request: Request,
@@ -125,6 +131,8 @@ async def internal_decrypt_vcn(
     """
     INTERNAL ONLY — Decrypt and return plaintext PAN/CVV for the checkout agent.
 
+    PO-BL-01: Rate-limited to 30 req/min to prevent mass PAN exfiltration
+    if internal token is compromised.
     This endpoint is NEVER called by the customer frontend.
     Only the Product Service (checkout agent) calls this with X-Internal-Token.
     The response must NOT be logged in full at INFO level.

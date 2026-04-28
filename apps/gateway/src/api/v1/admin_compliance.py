@@ -96,7 +96,7 @@ async def shariah_audit_summary(
     current_admin: AdminUser = Depends(RequirePermission("read_compliance")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    q = text(
+    charity_q = text(
         """
         SELECT
             COUNT(*) AS allocations_count,
@@ -106,15 +106,70 @@ async def shariah_audit_summary(
         WHERE deleted_at IS NULL
         """
     )
-    row = (await db.execute(q)).mappings().one_or_none() or {
+    violations_q = text(
+        """
+        SELECT COUNT(*) AS violations_count
+        FROM murabaha_contracts m
+        JOIN wakalah_agreements w ON m.order_id = w.order_id
+        WHERE m.signed_at < w.signed_at
+        AND m.deleted_at IS NULL AND w.deleted_at IS NULL
+        """
+    )
+    row = (await db.execute(charity_q)).mappings().one_or_none() or {
         "allocations_count": 0,
         "total_late_fee_allocated": 0,
         "total_disbursed": 0,
     }
+    violations = (await db.execute(violations_q)).scalar() or 0
     return {
         "allocations_count": int(row["allocations_count"] or 0),
         "total_late_fee_allocated": float(row["total_late_fee_allocated"] or 0),
         "total_disbursed": float(row["total_disbursed"] or 0),
+        "contract_sequence_violations": int(violations),
+        "compliance_status": "compliant" if violations == 0 else "violations_found"
+    }
+
+
+@router.get("/charity-audit")
+async def charity_audit_trail(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_admin: AdminUser = Depends(RequirePermission("read_compliance")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    offset = (page - 1) * limit
+    q = text("""
+        SELECT a.id, a.loan_id, a.installment_id, a.late_fee_amount, a.allocated_at,
+               a.disbursed_at, a.disbursement_ref, c.name as charity_name
+        FROM late_fee_charity_allocations a
+        LEFT JOIN charity_organizations c ON a.charity_org_id = c.id
+        WHERE a.deleted_at IS NULL
+        ORDER BY a.allocated_at DESC
+        LIMIT :limit OFFSET :offset
+    """)
+    count_q = text("SELECT COUNT(*) FROM late_fee_charity_allocations WHERE deleted_at IS NULL")
+    
+    try:
+        rows = (await db.execute(q, {"limit": limit, "offset": offset})).mappings().all()
+        total = int((await db.execute(count_q)).scalar_one())
+    except Exception:
+        rows, total = [], 0
+        
+    return {
+        "items": [
+            {
+                "id": dict(r)["id"],
+                "loan_id": dict(r)["loan_id"],
+                "installment_id": dict(r)["installment_id"],
+                "late_fee_amount": float(dict(r)["late_fee_amount"] or 0),
+                "allocated_at": _iso(dict(r)["allocated_at"]),
+                "disbursed_at": _iso(dict(r)["disbursed_at"]) if dict(r)["disbursed_at"] else None,
+                "disbursement_ref": dict(r)["disbursement_ref"],
+                "charity_name": dict(r)["charity_name"],
+            }
+            for r in rows
+        ],
+        "pagination": {"page": page, "limit": limit, "total": total},
     }
 
 

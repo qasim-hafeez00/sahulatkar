@@ -68,9 +68,10 @@ async def test_select_gateway_never_raises_even_if_all_degraded(redis_mock):
         for _ in range(settings.GATEWAY_FAILURE_THRESHOLD + 2):
             await engine.record_failure(gw)
 
-    # Should return a gateway (least-failed fallback)
+    # Only the three original gateways are degraded; easypaisa is still healthy.
+    # Fallback should now pick easypaisa as the least-failed healthy gateway.
     result = await engine.select_gateway()
-    assert result in ("raast", "jazzcash", "safepay")
+    assert result in ("raast", "jazzcash", "safepay", "easypaisa")
 
 
 async def test_get_health_summary_returns_all_gateways(redis_mock):
@@ -80,6 +81,7 @@ async def test_get_health_summary_returns_all_gateways(redis_mock):
     assert "raast" in gateway_names
     assert "jazzcash" in gateway_names
     assert "safepay" in gateway_names
+    assert "easypaisa" in gateway_names
 
 
 async def test_health_summary_reflects_degraded_state(redis_mock):

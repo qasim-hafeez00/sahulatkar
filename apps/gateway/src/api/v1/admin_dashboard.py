@@ -12,6 +12,7 @@ from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
 from src.core.logging import logger
+from src.config import settings
 
 router = APIRouter(prefix="/admin/dashboard", tags=["Admin Dashboard"])
 

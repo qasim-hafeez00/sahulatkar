@@ -98,15 +98,30 @@ async def verify_mfa(
     payload: AdminMfaVerifyRequest,
     current_admin: AdminUser = Depends(get_current_admin),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
     admin = await db.scalar(select(AdminUser).where(AdminUser.id == current_admin.id, AdminUser.deleted_at.is_(None)))
     if not admin or not admin.mfa_secret_encrypted:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="MFA_NOT_SETUP")
 
+    # TASK-16: Implement TOTP lockout (max 5 failed attempts)
+    totp_fail_key = f"sk:auth:admin_totp_setup_fail:{admin.id}"
+    fail_count_str = await redis.get(totp_fail_key)
+    fail_count = int(fail_count_str) if fail_count_str else 0
+    
+    if fail_count >= 5:
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="TOTP_LOCKED_TOO_MANY_ATTEMPTS",
+        )
+
     secret = KMSProvider().decrypt(admin.mfa_secret_encrypted)
     if not pyotp.TOTP(secret).verify(payload.totp_code):
+        await redis.incr(totp_fail_key)
+        await redis.expire(totp_fail_key, 900)  # 15 minutes
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_TOTP")
 
+    await redis.delete(totp_fail_key)
     admin.mfa_enabled = True
     await db.commit()
     return {"enabled": True}

@@ -5,7 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.models.payment import Installment
+from sk_shared.models.payment import Installment, Loan
 from sk_shared.redis_client import RedisClient
 from src.events.publisher import EventPublisher
 from src.services.accounting_service import AccountingService
@@ -31,6 +31,15 @@ class LateFeeService:
                 "amount": float(Decimal(str(installment.late_fee_amount))),
                 "installment_id": installment_id,
             }
+
+        # LS-BL-08: Shariah compliance — late fee cannot exceed principal of the loan.
+        loan = await self._get_loan(installment.loan_id)
+        principal = Decimal(str(loan.principal_amount))
+        if fee_amount > principal:
+            raise ValueError(
+                f"LATE_FEE_EXCEEDS_PRINCIPAL: late_fee={fee_amount} > principal={principal} "
+                f"for installment {installment_id}. Islamic finance forbids this."
+            )
 
         accounting = AccountingService(self.db)
         await accounting.record_late_fee(installment_id=installment_id, amount=fee_amount)
@@ -81,3 +90,13 @@ class LateFeeService:
         if installment is None:
             raise LookupError(f"Installment {installment_id} not found")
         return installment
+
+    async def _get_loan(self, loan_id: int) -> Loan:
+        loan = (
+            await self.db.execute(
+                select(Loan).where(Loan.id == loan_id, Loan.deleted_at.is_(None))
+            )
+        ).scalar_one_or_none()
+        if loan is None:
+            raise LookupError(f"Loan {loan_id} not found for Shariah principal cap check")
+        return loan

@@ -22,7 +22,21 @@ async def get_queue(
     """Return all pending, unclaimed KYC review items with pagination."""
     offset = (page - 1) * limit
     service = KycQueueService(db, redis_client)
-    return await service.get_queue(offset=offset, limit=limit)
+    items = await service.get_queue(offset=offset, limit=limit)
+    
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    res = []
+    for item in items:
+        # Assuming created_at is naive UTC from DB, make it aware
+        created_aware = item.created_at.replace(tzinfo=timezone.utc) if item.created_at.tzinfo is None else item.created_at
+        breached = (now - created_aware).total_seconds() > 48 * 3600
+        # Create response dict/model manually or use model_copy
+        model = KycQueueItemResponse.model_validate(item)
+        model.sla_breached = breached
+        res.append(model)
+        
+    return res
 
 
 @router.post("/{queue_id}/claim", status_code=status.HTTP_200_OK)

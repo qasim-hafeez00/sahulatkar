@@ -79,7 +79,6 @@ class ProhibitedCheckerService:
         parsed = urlparse(canonical_url)
         domain = (parsed.netloc or "").lower().replace("www.", "")
 
-        # Preferred path: query dedicated table if present in the shared schema.
         try:
             row = await db.execute(
                 text("SELECT domain FROM prohibited_merchant_domains WHERE lower(domain) = :domain LIMIT 1"),
@@ -89,12 +88,19 @@ class ProhibitedCheckerService:
             if match:
                 return ProhibitedDecision(is_prohibited=True, category="ProhibitedMerchant", keyword=domain, confidence=0.8)
         except Exception:
-            # Table may not exist yet in older environments.
             pass
 
-        # Compatibility fallback when the dedicated table is unavailable.
         if domain in settings.SHARIAH_DOMAIN_DENYLIST:
             return ProhibitedDecision(is_prohibited=True, category="ProhibitedMerchant", keyword=domain, confidence=0.8)
+
+        # Check full URL against ProhibitedCategory keywords
+        categories = await db.scalars(select(ProhibitedCategory))
+        canonical_url_lower = canonical_url.lower()
+        for category in categories:
+            for keyword in category.keywords:
+                if keyword.lower() in canonical_url_lower:
+                    return ProhibitedDecision(is_prohibited=True, category=category.category_name, keyword=keyword, confidence=0.9)
+
         return ProhibitedDecision(is_prohibited=False, confidence=0.0)
 
     def _negative_cache_key(self, canonical_url: str) -> str:

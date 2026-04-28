@@ -702,3 +702,77 @@ async def get_user_contracts(
             for row in murabaha_rows
         ],
     }
+
+
+# ============================================================================
+# GAP-06, GAP-08: Admin User Devices & Lockout Reset
+# ============================================================================
+
+@router.get("/{user_id}/devices")
+async def get_user_devices(
+    user_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("read_user")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from sk_shared.models.auth import UserDevice
+    
+    q = text("""
+        SELECT id, device_token, platform, is_active, last_used_at, created_at
+        FROM user_devices
+        WHERE user_id = :user_id
+        ORDER BY last_used_at DESC NULLS LAST, created_at DESC
+    """)
+    try:
+        rows = (await db.execute(q, {"user_id": user_id})).mappings().all()
+    except Exception:
+        rows = []
+    
+    return {
+        "user_id": user_id,
+        "items": [
+            {
+                "id": dict(r)["id"],
+                "device_token": dict(r)["device_token"],
+                "platform": dict(r)["platform"],
+                "is_active": dict(r)["is_active"],
+                "last_used_at": dict(r)["last_used_at"].isoformat() if dict(r)["last_used_at"] else None,
+                "created_at": dict(r)["created_at"].isoformat() if dict(r)["created_at"] else None,
+            }
+            for r in rows
+        ]
+    }
+
+@router.post("/{user_id}/reset-failed-attempts")
+async def reset_user_failed_attempts(
+    user_id: int,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("update_user")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from sk_shared.models.auth import User
+    
+    user = await db.scalar(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
+    if not user:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+        
+    old_attempts = user.failed_login_attempts
+    old_locked_until = user.locked_until
+    
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="reset_failed_attempts",
+        target_id=user.id,
+        changes={
+            "old_failed_attempts": old_attempts,
+            "old_locked_until": old_locked_until.isoformat() if old_locked_until else None,
+        },
+    )
+    
+    await db.commit()
+    return {"user_id": user.id, "status": "reset_successful"}

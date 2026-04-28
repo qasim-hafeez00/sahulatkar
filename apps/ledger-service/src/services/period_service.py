@@ -46,9 +46,15 @@ class PeriodService:
         """
         Ensure the period for a given date is open.
         Returns the period_key.
+        Raises ValueError if the period is CLOSED (LS-BL-02: no backdated entries into closed periods).
         """
         period_key = get_period_key(target_date)
         period = await self.get_or_create_period(period_key)
+        if period.status == PeriodStatus.CLOSED:
+            raise ValueError(
+                f"PERIOD_CLOSED_BACKDATED_ENTRY_REJECTED: Period {period_key} is closed. "
+                "Entries cannot be posted into a closed accounting period."
+            )
         assert_period_open(period.status)
         return period_key
 
@@ -157,3 +163,60 @@ class PeriodService:
         """List periods ordered by date descending."""
         stmt = select(LedgerPeriod).order_by(LedgerPeriod.start_date.desc()).limit(limit)
         return list((await self.db.execute(stmt)).scalars().all())
+
+    async def get_upcoming_period_closes(self, within_days: int = 7) -> list[dict[str, object]]:
+        """
+        LS-BL-07: Return open periods whose end_date is within `within_days` days from today.
+        Used for alerting admins that a period is near its close date.
+        """
+        today = date.today()
+        cutoff = date(today.year + (today.month // 12), (today.month % 12) + 1, 1)
+        # Simple approach: list open periods whose end_date <= today + within_days
+        from datetime import timedelta
+        warning_threshold = today + timedelta(days=within_days)
+        stmt = (
+            select(LedgerPeriod)
+            .where(LedgerPeriod.status == PeriodStatus.OPEN)
+            .where(LedgerPeriod.end_date <= warning_threshold)
+            .order_by(LedgerPeriod.end_date.asc())
+        )
+        periods = list((await self.db.execute(stmt)).scalars().all())
+        return [
+            {
+                "period_key": p.period_key,
+                "end_date": p.end_date.isoformat(),
+                "days_until_close": (p.end_date - today).days,
+                "fiscal_year": p.fiscal_year,
+                "status": p.status,
+            }
+            for p in periods
+        ]
+
+    async def auto_seed_next_fiscal_year_if_needed(self) -> list[LedgerPeriod]:
+        """
+        LS-BL-07: Automatically seed the next fiscal year's periods when the last open
+        period of the current year is within 30 days of its end date.
+        Prevents the admin from having to manually create next year's periods.
+        """
+        today = date.today()
+        current_year = today.year
+        # Check if all 12 periods for next year exist already
+        next_year = current_year + 1
+        next_year_key = f"{next_year}-01"
+        stmt = select(LedgerPeriod).where(LedgerPeriod.period_key == next_year_key)
+        existing = (await self.db.execute(stmt)).scalar_one_or_none()
+        if existing:
+            return []  # Already seeded
+
+        # Check if the last period of this year is near close (within 30 days)
+        last_period_key = f"{current_year}-12"
+        stmt = select(LedgerPeriod).where(LedgerPeriod.period_key == last_period_key)
+        last_period = (await self.db.execute(stmt)).scalar_one_or_none()
+        if last_period and (last_period.end_date - today).days <= 30:
+            logger.info(
+                "Auto-seeding fiscal year periods",
+                extra={"next_year": next_year, "triggered_by": "auto_seed"}
+            )
+            return await self.seed_fiscal_year(next_year)
+
+        return []

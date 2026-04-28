@@ -295,3 +295,70 @@ class PeriodManagementResponse(BaseModel):
     period_key: str
     status: str
     fiscal_year: int
+
+
+# LS-EP-02: Overdue report
+class OverdueInstallmentResponse(BaseModel):
+    installment_id: int
+    user_id: int
+    loan_id: int
+    plan_type: str
+    due_date: str
+    days_overdue: int
+    outstanding_amount: float
+
+
+class OverdueReportResponse(BaseModel):
+    as_of: str
+    total_count: int
+    total_outstanding: float
+    items: list[OverdueInstallmentResponse]
+
+
+# LS-EP-05: Tasdeeq report
+class TasdeeqReportResponse(BaseModel):
+    report_date: str
+    record_count: int
+    bytes: int
+    status: str
+    attempts: int
+    report_path: str | None
+    remote_reference: str | None
+    error: str | None
+
+
+# LS-EP-06: Account ledger (T-account view)
+class LedgerLineResponse(BaseModel):
+    entry_number: str
+    entry_date: str
+    debit_amount: float
+    credit_amount: float
+    description: str | None
+    source_type: str
+    source_id: str | int | None
+
+
+class AccountLedgerResponse(BaseModel):
+    account_code: str
+    filters: dict[str, str | None]
+    pagination: CursorPaginationResponse
+    items: list[LedgerLineResponse]
+
+
+# LS-CRIT-03: Charity auto-allocation
+class CharityAutoAllocationResponse(BaseModel):
+    status: str
+    disbursed_count: int
+    total_amount: float
+    reference: str | None = None
+    nisab_threshold: float | None = None
+    message: str | None = None
+
+
+# LS-BL-07: Period close alert
+class PeriodCloseAlertResponse(BaseModel):
+    period_key: str
+    end_date: str
+    days_until_close: int
+    fiscal_year: int
+    status: str

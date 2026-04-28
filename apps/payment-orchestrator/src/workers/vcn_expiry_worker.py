@@ -64,19 +64,31 @@ class VcnExpiryWorker:
 
             logger.info(f"VcnExpiryWorker: sweeping {len(expired_cards)} expired VCNs")
 
+            failed_to_cancel = []
             for card in expired_cards:
                 try:
-                    # Cancel on Stripe first so the card stops being spendable
-                    stripe_adapter.cancel_card(card.issuer_card_id)
-
-                    # Update local status
-                    card.status = "expired"
-                    logger.info(
-                        "VCN expired and canceled on Stripe",
-                        extra={"vcn_id": card.id, "order_id": card.order_id},
+                    # PO-CRIT-04: stripe_adapter.cancel_card() is synchronous.
+                    # Run in thread pool to avoid blocking the asyncio event loop.
+                    canceled = await asyncio.to_thread(
+                        stripe_adapter.cancel_card, card.issuer_card_id
                     )
-                    from src.core.metrics import VCN_VOID_TOTAL
-                    VCN_VOID_TOTAL.labels(reason="expired").inc()
+                    if canceled:
+                        card.status = "expired"
+                        logger.info(
+                            "VCN expired and canceled on Stripe",
+                            extra={"vcn_id": card.id, "order_id": card.order_id},
+                        )
+                        from src.core.metrics import VCN_VOID_TOTAL
+                        VCN_VOID_TOTAL.labels(reason="expired").inc()
+                    else:
+                        # Cancel failed — still mark expired locally to prevent re-use,
+                        # but log a critical alert so ops team can manually cancel on Stripe.
+                        card.status = "expired"
+                        failed_to_cancel.append(card.issuer_card_id)
+                        logger.error(
+                            "PO-CRIT-04: Stripe cancel returned False for expired VCN \u2014 card may still be active on Stripe",
+                            extra={"vcn_id": card.id, "issuer_card_id": card.issuer_card_id, "order_id": card.order_id},
+                        )
                 except Exception as e:
                     logger.error(
                         "Failed to expire VCN",
@@ -84,6 +96,13 @@ class VcnExpiryWorker:
                     )
 
             await db.commit()
+
+            if failed_to_cancel:
+                logger.critical(
+                    "PO-CRIT-04: %d VCNs marked expired locally but Stripe cancellation FAILED \u2014 manual review required",
+                    len(failed_to_cancel),
+                    extra={"issuer_card_ids": failed_to_cancel},
+                )
 
     def stop(self):
         self.is_running = False

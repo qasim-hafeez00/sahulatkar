@@ -55,4 +55,16 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    # Drop the additional partition child tables created in upgrade().
+    # The parent partitioned tables are owned by earlier migrations and not dropped here.
+    months = ['02', '03', '04', '05', '06', '07', '08', '09', '10', '11', '12']
+    for month in months:
+        op.execute(f"DROP TABLE IF EXISTS audit_trails_2025_m{month}")
+    for q in ['q2', 'q3', 'q4']:
+        op.execute(f"DROP TABLE IF EXISTS nq_2025_{q}")
+    for q in ['q1', 'q2', 'q3', 'q4']:
+        op.execute(f"DROP TABLE IF EXISTS te_2025_{q}")
+    for q in ['q2', 'q3', 'q4']:
+        op.execute(f"DROP TABLE IF EXISTS ptxn_2025_{q}")
+    for q in ['q2', 'q3', 'q4']:
+        op.execute(f"DROP TABLE IF EXISTS pe_2025_{q}")

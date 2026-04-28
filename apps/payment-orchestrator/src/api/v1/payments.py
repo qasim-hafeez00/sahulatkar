@@ -109,6 +109,13 @@ async def down_payment(
         )
 
     # ── 2. Down payment range validation ────────────────────────────────────
+    # PO-BL-04: Reject zero, negative, and out-of-range amounts before any gateway call.
+    if request_payload.amount_pkr <= Decimal("0"):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="INVALID_AMOUNT: must be positive",
+        )
+
     total_amount = Decimal(str(order.total_amount))
     min_amount = (total_amount * (settings.DOWN_PAYMENT_MIN_PCT / Decimal("100"))).quantize(Decimal("0.01"))
     max_amount = (total_amount * (settings.DOWN_PAYMENT_MAX_PCT / Decimal("100"))).quantize(Decimal("0.01"))
@@ -126,6 +133,25 @@ async def down_payment(
     adapter = GatewayAdapterFactory.get(selected_gateway, settings)
 
     # ── 4. Create durable workflow (handles idempotency) ────────────────────
+    # PO-BL-06: Pre-check idempotency in Redis to avoid DB constraint 500 on concurrent requests.
+    redis_idem_key = f"sk:po:idem:{request_payload.idempotency_key}"
+    if await redis.get(redis_idem_key):
+        # Quickly retrieve the existing workflow and return it idempotently
+        from src.models.payment_workflow import PaymentWorkflow as _PW
+        _existing = await db.scalar(
+            select(_PW).where(_PW.idempotency_key == request_payload.idempotency_key)
+        )
+        if _existing:
+            DOWN_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="idempotent").inc()
+            return DownPaymentResponse(
+                status="pending" if _existing.status == PaymentStatus.PENDING else "success",
+                order_id=request_payload.order_id,
+                payment_workflow_id=_existing.id,
+                gateway_txn_id=_existing.gateway_session_id or "",
+                idempotency_key=request_payload.idempotency_key,
+            )
+    await redis.set(redis_idem_key, "1", ttl=3600)
+
     orchestrator = PaymentOrchestrator(db)
     workflow = await orchestrator.initiate_payment(
         order_id=request_payload.order_id,
@@ -180,15 +206,19 @@ async def down_payment(
         )
         await routing.record_success(selected_gateway)
     except Exception as exc:
+        # PO-BL-02: Classify error as retryable vs non-retryable
+        from src.services.routing_engine import is_retryable_error
+        is_retryable = is_retryable_error(str(exc))
         await routing.record_failure(selected_gateway)
         GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
         await orchestrator.mark_failed(workflow.id, str(exc), request_id=request_id)
         await db.commit()
         logger.error(
             "Gateway call failed during down payment",
-            extra={"gateway": selected_gateway, "order_id": request_payload.order_id, "error": str(exc)},
+            extra={"gateway": selected_gateway, "order_id": request_payload.order_id, "error": str(exc), "retryable": is_retryable},
         )
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
+        detail = "GATEWAY_DECLINED" if not is_retryable else "GATEWAY_ERROR"
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=detail) from exc
 
     # ── 7. Transition workflow state ─────────────────────────────────────────
     is_async = selected_gateway in _ASYNC_GATEWAYS
@@ -543,6 +573,235 @@ async def internal_trigger_installment(
         },
     )
     await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_PAID), envelope.to_json())
+    INSTALLMENT_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
+
+    return {"status": "success", "txn_id": txn.id, "installment_id": installment.id}
+
+
+# ── PO-EP-01: Down-payment retry endpoint ────────────────────────────────────
+@router.post("/down-payment/{payment_workflow_id}/retry")
+async def retry_down_payment(
+    payment_workflow_id: int,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """
+    Retry a failed or expired payment workflow.
+    Creates a new idempotency key to bypass the stale workflow.
+    """
+    from src.models.payment_workflow import PaymentWorkflow
+    workflow = await db.get(PaymentWorkflow, payment_workflow_id)
+    if workflow is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="WORKFLOW_NOT_FOUND")
+    if workflow.user_id != current_user.id:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN")
+    if workflow.status not in (PaymentStatus.FAILED, PaymentStatus.EXPIRED):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=f"WORKFLOW_NOT_RETRYABLE: current status is {workflow.status}",
+        )
+
+    # Create new idempotency key for the retry attempt
+    import uuid
+    new_idem_key = f"{workflow.idempotency_key}_retry_{uuid.uuid4().hex[:8]}"
+
+    routing = GatewayRoutingEngine(redis)
+    selected_gateway = await routing.select_gateway(preferred=workflow.gateway)
+    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
+    orchestrator = PaymentOrchestrator(db)
+
+    new_workflow = await orchestrator.initiate_payment(
+        order_id=workflow.order_id,
+        user_id=current_user.id,
+        amount_pkr=workflow.amount_pkr,
+        gateway=selected_gateway,
+        idempotency_key=new_idem_key,
+        request_id=None,
+    )
+
+    try:
+        result = await adapter.initiate_payment(
+            order_id=workflow.order_id,
+            amount_pkr=workflow.amount_pkr,
+            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+        )
+        await routing.record_success(selected_gateway)
+        await orchestrator.mark_pending(new_workflow.id, result["gateway_txn_id"])
+        await db.commit()
+    except Exception as exc:
+        await routing.record_failure(selected_gateway)
+        await orchestrator.mark_failed(new_workflow.id, str(exc))
+        await db.commit()
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
+
+    return {
+        "status": "retried",
+        "new_workflow_id": new_workflow.id,
+        "gateway": selected_gateway,
+        "gateway_txn_id": result.get("gateway_txn_id"),
+        "idempotency_key": new_idem_key,
+    }
+
+
+# ── PO-EP-02: Payment history for an order ───────────────────────────────────
+@router.get("/history/{order_id}")
+async def get_payment_history(
+    order_id: int,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Retrieve full payment history for an order (transactions + workflows).
+    """
+    from sk_shared.models.payment import Loan
+    from src.models.payment_workflow import PaymentWorkflow
+
+    # Verify order belongs to user
+    order = await _get_order_for_user(db, order_id, current_user.id)
+
+    loan = await db.scalar(select(Loan).where(Loan.order_id == order_id))
+    txns = []
+    if loan:
+        result = await db.execute(
+            select(PaymentTransaction)
+            .where(
+                PaymentTransaction.loan_id == loan.id,
+                PaymentTransaction.deleted_at.is_(None),
+            )
+            .order_by(PaymentTransaction.id.asc())
+        )
+        txns = result.scalars().all()
+
+    workflows = await db.execute(
+        select(PaymentWorkflow)
+        .where(PaymentWorkflow.order_id == order_id)
+        .order_by(PaymentWorkflow.id.asc())
+    )
+
+    return {
+        "order_id": order_id,
+        "transactions": [
+            {
+                "id": t.id,
+                "amount": str(t.amount),
+                "currency": t.currency,
+                "gateway": t.gateway,
+                "gateway_txn_id": t.gateway_txn_id,
+                "status": t.status,
+                "created_at": t.created_at.isoformat() if t.created_at else None,
+            }
+            for t in txns
+        ],
+        "workflows": [
+            {
+                "id": w.id,
+                "status": w.status,
+                "gateway": w.gateway,
+                "amount_pkr": str(w.amount_pkr),
+                "created_at": w.created_at.isoformat() if w.created_at else None,
+            }
+            for w in workflows.scalars().all()
+        ],
+    }
+
+
+# ── PO-EP-06: Auto-collect installment (internal, called by BillingSweepWorker) ──
+@router.post("/internal/installments/{installment_id}/auto-collect", include_in_schema=False)
+async def auto_collect_installment(
+    installment_id: int,
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_internal_token),
+):
+    """
+    PO-EP-06: Internal endpoint called by Ledger Service BillingSweepWorker
+    to trigger auto-collection of an overdue installment.
+
+    This is the critical missing link between billing sweep and payment execution.
+    Uses Raast mandate if available, otherwise falls back to gateway auto-selection.
+    """
+    from sk_shared.events import build_event_envelope, event_channel
+
+    installment = await db.scalar(
+        select(Installment).where(
+            Installment.id == installment_id,
+            Installment.deleted_at.is_(None),
+        )
+    )
+    if installment is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="INSTALLMENT_NOT_FOUND")
+
+    if installment.status == "paid":
+        return {"status": "already_paid", "installment_id": installment_id}
+
+    if Decimal(str(installment.total_amount)) <= Decimal("0"):
+        raise HTTPException(status_code=422, detail="INVALID_INSTALLMENT_AMOUNT")
+
+    # Use Raast mandate if active, else auto-select
+    from src.models.payment_mandate import PaymentMandate
+    mandate = await db.scalar(
+        select(PaymentMandate).where(
+            PaymentMandate.user_id == installment.user_id,
+            PaymentMandate.gateway == "raast",
+            PaymentMandate.status == "active",
+        )
+    )
+    routing = GatewayRoutingEngine(redis)
+    if mandate and mandate.is_valid(Decimal(str(installment.total_amount))):
+        selected_gateway = "raast"
+    else:
+        selected_gateway = await routing.select_gateway()
+
+    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
+    extra_kwargs = {}
+    if selected_gateway == "raast" and mandate:
+        extra_kwargs["mandate_reference"] = mandate.mandate_reference
+
+    try:
+        result = await adapter.initiate_payment(
+            order_id=installment.loan_id,
+            amount_pkr=Decimal(str(installment.total_amount)),
+            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+            **extra_kwargs,
+        )
+        await routing.record_success(selected_gateway)
+    except Exception as exc:
+        await routing.record_failure(selected_gateway)
+        GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
+        logger.error("Auto-collect installment failed", extra={"installment_id": installment_id, "error": str(exc)})
+        return {"status": "failed", "error": "GATEWAY_DECLINED", "installment_id": installment_id}
+
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    txn = PaymentTransaction(
+        loan_id=installment.loan_id,
+        installment_id=installment.id,
+        user_id=installment.user_id,
+        amount=Decimal(str(installment.total_amount)),
+        currency=settings.PAYMENT_CURRENCY,
+        gateway=selected_gateway,
+        gateway_txn_id=result["gateway_txn_id"],
+        gateway_response=result,
+        status="success",
+        reconciled_at=now,
+    )
+    db.add(txn)
+    await db.commit()
+
+    envelope = build_event_envelope(
+        event="payment.installment_paid",
+        source_service="payment-orchestrator",
+        payload={
+            "installment_id": installment.id,
+            "loan_id": installment.loan_id,
+            "user_id": installment.user_id,
+            "amount_pkr": str(installment.total_amount),
+            "gateway_txn_id": result["gateway_txn_id"],
+            "source": "auto_collect",
+        },
+    )
+    await redis.publish(event_channel("payment.installment_paid"), envelope.to_json())
     INSTALLMENT_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
 
     return {"status": "success", "txn_id": txn.id, "installment_id": installment.id}

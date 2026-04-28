@@ -141,6 +141,32 @@ class BillingSweepService:
                         if result["status"] == "applied":
                             aggregate_stats["late_fees_applied"] += 1
 
+                if self.publisher:
+                    # LS-CRIT-04: Trigger auto-collection by Payment Orchestrator for each overdue installment.
+                    for overdue_inst in overdue_candidates:
+                        days_overdue_inst = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0
+                        await self.publisher.publish_payment_collection_triggered(
+                            installment_id=overdue_inst.id,
+                            loan_id=overdue_inst.loan_id,
+                            user_id=overdue_inst.user_id,
+                            amount=float(overdue_inst.total_amount),
+                            due_date=overdue_inst.due_date.isoformat(),
+                        )
+                        # NS-BL-05: Per-installment event so Notification Service can alert the customer.
+                        await self.publisher.publish_billing_installment_overdue(
+                            installment_id=overdue_inst.id,
+                            order_id=overdue_inst.loan_id,
+                            user_id=overdue_inst.user_id,
+                            amount=float(overdue_inst.total_amount),
+                            days_overdue=days_overdue_inst,
+                        )
+
+                    # Batch event for analytics/reconciliation consumers.
+                    await self.publisher.publish_installments_overdue(
+                        installment_ids=[inst.id for inst in overdue_candidates],
+                        as_of=run_date.isoformat(),
+                    )
+
             logger.info(
                 "Billing sweep completed",
                 extra={

@@ -17,42 +17,55 @@ logger = logging.getLogger("event_listener")
 # All channels the notification service subscribes to
 SUBSCRIBED_CHANNELS = [
     # Auth
-    "sahulatkar:events:auth.otp_requested",
-    "sahulatkar:events:auth.otp_contract_sign",
+    "sk:events:auth.otp_requested",
+    "sk:events:auth.otp_contract_sign",
     # KYC
-    "sahulatkar:events:kyc.submitted",
-    "sahulatkar:events:kyc.approved",
-    "sahulatkar:events:kyc.rejected",
-    "sahulatkar:events:kyc.waitlisted",
+    "sk:events:kyc.submitted",
+    "sk:events:kyc.approved",
+    "sk:events:kyc.rejected",
+    "sk:events:kyc.waitlisted",
+    "sk:events:kyc.documents_needed",   # NS integration gap
     # Credit
-    "sahulatkar:events:credit.assessed.approved",
-    "sahulatkar:events:credit.assessed.rejected",
-    "sahulatkar:events:credit.limit_increased",
+    "sk:events:credit.assessed.approved",
+    "sk:events:credit.assessed.rejected",
+    "sk:events:credit.limit_increased",
+    "sk:events:credit.limit_changed",    # NS integration gap
     # Product / Order
-    "sahulatkar:events:product.extracted",
-    "sahulatkar:events:order.offer_ready",
-    "sahulatkar:events:order.vcn_issued",
-    "sahulatkar:events:order.checkout_completed",
-    "sahulatkar:events:order.checkout_failed",
+    "sk:events:product.extracted",
+    "sk:events:order.offer_ready",
+    "sk:events:order.vcn_issued",
+    "sk:events:order.checkout_completed",
+    "sk:events:order.checkout_failed",
+    "sk:events:order.cancelled",         # NS integration gap
     # Contracts
-    "sahulatkar:events:contract.wakalah_ready",
-    "sahulatkar:events:contract.murabaha_ready",
-    "sahulatkar:events:contract.signed",
+    "sk:events:contract.wakalah_ready",
+    "sk:events:contract.murabaha_ready",
+    "sk:events:contract.signed",
     # Payments
-    "sahulatkar:events:payment.down_payment_initiated",
-    "sahulatkar:events:payment.down_payment_confirmed",
-    "sahulatkar:events:payment.down_payment_failed",
+    "sk:events:payment.down_payment_initiated",
+    "sk:events:payment.down_payment_confirmed",
+    "sk:events:payment.down_payment_failed",
+    "sk:events:payment.failed",          # NS integration gap (auto-debit)
     # Delivery
-    f"sahulatkar:events:{EVENT_DELIVERY_STATUS_CHANGED}",
-    f"sahulatkar:events:{EVENT_DELIVERY_CONFIRMED}",
-    f"sahulatkar:events:{EVENT_DELIVERY_RETURNED}",
+    f"sk:events:{EVENT_DELIVERY_STATUS_CHANGED}",
+    f"sk:events:{EVENT_DELIVERY_CONFIRMED}",
+    f"sk:events:{EVENT_DELIVERY_RETURNED}",
     # Billing
-    "sahulatkar:events:billing.installment_paid",
-    "sahulatkar:events:billing.installment_failed",
-    "sahulatkar:events:billing.late_fee_applied",
-    "sahulatkar:events:billing.late_fee_charity_allocated",
-    "sahulatkar:events:billing.loan_fully_repaid",
+    "sk:events:billing.installment_paid",
+    "sk:events:billing.installment_failed",
+    "sk:events:billing.late_fee_applied",
+    "sk:events:billing.late_fee_charity_allocated",
+    "sk:events:billing.loan_fully_repaid",
+    "sk:events:billing.installment_overdue",  # NS-BL-05: overdue alerts
+    # VCN
+    "sk:events:vcn.expired",             # NS integration gap
 ]
+
+# Events for which a None return from the handler is INTENTIONAL (handled elsewhere).
+# All other events with a None result will be sent to DLQ for investigation.
+_SILENT_DROP_EVENTS: frozenset[str] = frozenset({
+    "delivery.status_changed",  # Handled directly by tracking_service
+})
 
 # Singleton health state (read by health endpoint)
 listener_state = {
@@ -205,6 +218,103 @@ def _extract_loan_repaid(payload: dict) -> Optional[Tuple]:
         f"order:{order_id}",
     )
 
+# ── New integration event extractors (Section 6.4 gaps) ─────────────────────
+
+def _extract_order_cancelled(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    order_id = payload.get("order_id")
+    if not user_id or not order_id:
+        return None
+    return (
+        user_id,
+        {
+            "order_id": str(order_id),
+            "reason": payload.get("reason", ""),
+            "product_description": payload.get("product_description", "your order"),
+        },
+        f"order-cancelled-{order_id}",
+        f"order:{order_id}",
+    )
+
+def _extract_vcn_expired(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    vcn_id = payload.get("vcn_id") or payload.get("id")
+    if not user_id:
+        return None
+    return (
+        user_id,
+        {
+            "vcn_last4": str(payload.get("last4", "****")),
+            "order_id": str(payload.get("order_id", "")),
+        },
+        f"vcn-expired-{vcn_id}-user-{user_id}",
+        f"vcn:{vcn_id}",
+    )
+
+def _extract_payment_failed(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    payment_id = payload.get("payment_id") or payload.get("installment_id")
+    if not user_id:
+        return None
+    return (
+        user_id,
+        {
+            "amount": str(payload.get("amount", "")),
+            "order_id": str(payload.get("order_id", "")),
+            "failure_reason": payload.get("failure_reason", "payment could not be processed"),
+        },
+        f"payment-failed-{payment_id}-user-{user_id}",
+        f"payment:{payment_id}",
+    )
+
+def _extract_kyc_documents_needed(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    if not user_id:
+        return None
+    return (
+        user_id,
+        {
+            "user_name": payload.get("user_name", "Customer"),
+            "required_docs": ", ".join(payload.get("required_documents", [])) or "requested documents",
+            "kyc_id": str(payload.get("kyc_id", "")),
+        },
+        f"kyc-docs-needed-user-{user_id}-{payload.get('kyc_id', '')}",
+        f"kyc:{payload.get('kyc_id', '')}",
+    )
+
+def _extract_credit_limit_changed(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    if not user_id:
+        return None
+    return (
+        user_id,
+        {
+            "new_limit": str(payload.get("new_limit", "")),
+            "old_limit": str(payload.get("old_limit", "")),
+            "change_direction": "increased" if payload.get("new_limit", 0) > payload.get("old_limit", 0) else "adjusted",
+        },
+        f"credit-limit-changed-user-{user_id}-{payload.get('timestamp', '')}",
+        f"credit:{user_id}",
+    )
+
+
+def _extract_billing_installment_overdue(payload: dict) -> Optional[Tuple]:
+    user_id = payload.get("user_id")
+    installment_id = payload.get("installment_id")
+    if not user_id or not installment_id:
+        return None
+    return (
+        user_id,
+        {
+            "installment_id": str(installment_id),
+            "order_id": str(payload.get("order_id", "")),
+            "amount": str(payload.get("amount", "")),
+            "days_overdue": str(payload.get("days_overdue", 0)),
+        },
+        f"billing-installment-overdue-{installment_id}",
+        f"order:{payload.get('order_id', '')}",
+    )
+
 
 # ── Master event handler registry ────────────────────────────────────────────
 EVENT_HANDLERS: dict[str, Callable] = {
@@ -212,16 +322,26 @@ EVENT_HANDLERS: dict[str, Callable] = {
     "kyc.rejected": _extract_kyc_rejected,
     "kyc.submitted": lambda p: (p.get("user_id"), {"user_name": p.get("user_name", "Customer")},
                                  f"kyc-submitted-{p.get('user_id')}", f"kyc:{p.get('kyc_id', '')}"),
+    "kyc.documents_needed": _extract_kyc_documents_needed,
     "credit.assessed.approved": _extract_credit_approved,
     "credit.assessed.rejected": lambda p: (p.get("user_id"), {"rejection_reasons": ", ".join(p.get("reasons", []))},
                                             f"credit-rejected-{p.get('assessment_id', p.get('user_id'))}", None),
+    "credit.limit_changed": _extract_credit_limit_changed,
     "payment.down_payment_confirmed": _extract_down_payment_confirmed,
     "payment.down_payment_failed": lambda p: (p.get("user_id"), {"amount": str(p.get("amount", "")), "order_id": str(p.get("order_id", ""))},
                                                f"dp-failed-order-{p.get('order_id')}", f"order:{p.get('order_id')}"),
+    "payment.failed": _extract_payment_failed,
     "contract.signed": _extract_contract_signed,
     "billing.installment_paid": _extract_installment_paid,
+    "billing.installment_failed": lambda p: (p.get("user_id"), {"amount": str(p.get("amount", "")), "order_id": str(p.get("order_id", ""))},
+                                              f"billing-failed-{p.get('installment_id', '')}", f"order:{p.get('order_id', '')}") if p.get("user_id") else None,
+    "billing.installment_overdue": _extract_billing_installment_overdue,
     "billing.late_fee_applied": _extract_late_fee_applied,
     "billing.loan_fully_repaid": _extract_loan_repaid,
+    "billing.late_fee_charity_allocated": lambda p: (p.get("user_id"),
+                                                      {"fee_amount": str(p.get("fee_amount", "")), "charity_org": settings.CHARITY_ORGANIZATION_NAME},
+                                                      f"charity-allocated-{p.get('late_fee_id', '')}",
+                                                      f"order:{p.get('order_id', '')}"),
     "delivery.confirmed": _extract_delivery_confirmed,
     "delivery.returned": lambda p: (p.get("user_id") or p.get("order_user_id"),
                                      {"order_id": str(p.get("order_id", "")), "tracking_number": p.get("tracking_number", "")},
@@ -229,14 +349,21 @@ EVENT_HANDLERS: dict[str, Callable] = {
     "delivery.status_changed": lambda p: None,  # Handled by tracking_service directly
     "order.checkout_completed": lambda p: (p.get("user_id"), {"order_id": str(p.get("order_id", "")), "merchant": p.get("merchant_name", "the merchant")},
                                             f"checkout-completed-order-{p.get('order_id')}", f"order:{p.get('order_id')}"),
-    "billing.late_fee_charity_allocated": lambda p: (p.get("user_id"),
-                                                      {"fee_amount": str(p.get("fee_amount", "")), "charity_org": settings.CHARITY_ORGANIZATION_NAME},
-                                                      f"charity-allocated-{p.get('late_fee_id', '')}",
-                                                      f"order:{p.get('order_id', '')}"),
+    "order.cancelled": _extract_order_cancelled,
+    "vcn.expired": _extract_vcn_expired,
 }
 
 
-async def _handle_message(event_type: str, envelope: dict, notification_service) -> None:
+async def _handle_message(event_type: str, envelope: dict, notification_service, redis=None) -> None:
+    """
+    Dispatch an incoming event to the appropriate notification handler.
+
+    NS-BL-04: A None result from a handler is ambiguous:
+      - For events in _SILENT_DROP_EVENTS (e.g. delivery.status_changed), None is
+        intentional — the event is handled elsewhere.
+      - For all other events, None means required fields were missing from the payload.
+        These are pushed to the DLQ for investigation rather than silently dropped.
+    """
     payload = envelope.get("payload", {})
     handler = EVENT_HANDLERS.get(event_type)
 
@@ -245,7 +372,27 @@ async def _handle_message(event_type: str, envelope: dict, notification_service)
         return
 
     result = handler(payload)
+
     if result is None:
+        if event_type not in _SILENT_DROP_EVENTS:
+            # NS-BL-04: Non-intentional None — push to DLQ for operator review
+            logger.warning(
+                "Event payload extraction returned None — missing required fields",
+                extra={"event_type": event_type, "payload_keys": list(payload.keys())},
+            )
+            if redis is not None:
+                try:
+                    await redis.lpush(
+                        settings.NOTIFICATION_DLQ_KEY,
+                        json.dumps({
+                            "type": "event_extraction_failure",
+                            "event_type": event_type,
+                            "envelope": envelope,
+                            "failed_at": datetime.now(timezone.utc).isoformat(),
+                        }),
+                    )
+                except Exception as dlq_err:
+                    logger.error("Failed to push extraction failure to DLQ", extra={"error": str(dlq_err)})
         return
 
     user_id, template_vars, idempotency_key, source_reference = result
@@ -296,7 +443,7 @@ async def listen_to_redis_events(app):
 
                 async with db_factory() as db:
                     ns = NotificationService(db=db, redis=redis)
-                    await _handle_message(event_type, envelope, ns)
+                    await _handle_message(event_type, envelope, ns, redis=redis)
 
         except asyncio.CancelledError:
             listener_state["running"] = False

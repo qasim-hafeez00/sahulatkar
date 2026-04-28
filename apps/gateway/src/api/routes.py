@@ -20,6 +20,9 @@ from src.api.v1.credit import router as credit_router
 from src.api.v1.webhooks import router as webhooks_router
 
 from src.api.v1.internal import router as internal_router
+from src.api.v1.admin_partners import router as admin_partners_router
+from src.api.v1.admin_support import router as admin_support_router
+from src.api.v1.admin_admins import router as admin_admins_router
 
 api_router = APIRouter()
 
@@ -50,3 +53,6 @@ api_router.include_router(orders_router, prefix="/v1")
 api_router.include_router(credit_router, prefix="/v1")
 api_router.include_router(internal_router, prefix="/v1")
 api_router.include_router(webhooks_router, prefix="/v1")
+api_router.include_router(admin_partners_router, prefix="/v1")
+api_router.include_router(admin_support_router, prefix="/v1")
+api_router.include_router(admin_admins_router, prefix="/v1")

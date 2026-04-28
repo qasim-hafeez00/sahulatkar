@@ -51,4 +51,6 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    pass
+    op.execute("DROP TABLE IF EXISTS nq_default CASCADE")
+    op.execute("DROP TABLE IF EXISTS nq_2025_q1 CASCADE")
+    op.execute("DROP TABLE IF EXISTS notifications_queue CASCADE")

@@ -1,0 +1,83 @@
+"""Add system_parameters and risk_blacklist
+
+Revision ID: 38ddd97d3de6
+Revises: 049
+Create Date: 2026-04-27 18:26:51.599423
+
+"""
+from typing import Sequence, Union
+
+from alembic import op
+import sqlalchemy as sa
+
+
+# revision identifiers, used by Alembic.
+revision: str = '38ddd97d3de6'
+down_revision: Union[str, Sequence[str], None] = '049'
+branch_labels: Union[str, Sequence[str], None] = None
+depends_on: Union[str, Sequence[str], None] = None
+
+
+def upgrade() -> None:
+    """Upgrade schema."""
+    op.create_table('risk_blacklist',
+        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column('entry_type', sa.String(length=20), nullable=False),
+        sa.Column('value', sa.String(length=255), nullable=False),
+        sa.Column('reason', sa.String(length=500), nullable=False),
+        sa.Column('user_id', sa.BigInteger(), nullable=True),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('deleted_at', sa.DateTime(), nullable=True)
+    )
+    op.create_index('ix_risk_blacklist_entry_type', 'risk_blacklist', ['entry_type'])
+    op.create_index('ix_risk_blacklist_value', 'risk_blacklist', ['value'])
+
+    op.create_table('system_parameters',
+        sa.Column('id', sa.Integer(), primary_key=True, autoincrement=True),
+        sa.Column('param_key', sa.String(length=100), unique=True, nullable=False),
+        sa.Column('param_value', sa.Text(), nullable=False),
+        sa.Column('created_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('updated_at', sa.DateTime(), server_default=sa.text('now()'), nullable=False),
+        sa.Column('deleted_at', sa.DateTime(), nullable=True)
+    )
+    op.create_index('ix_system_parameters_param_key', 'system_parameters', ['param_key'])
+
+    # DB-GAP-05: composite index on (entry_type, value) for O(1) blacklist lookups
+    op.create_index('ix_risk_blacklist_type_value', 'risk_blacklist', ['entry_type', 'value'])
+
+    # DB-GAP-04: seed default system parameters so startup queries return values
+    op.execute("""
+        INSERT INTO system_parameters (param_key, param_value) VALUES
+        ('max_credit_limit_pkr',       '500000'),
+        ('min_order_amount_pkr',        '5000'),
+        ('down_payment_pct',            '25'),
+        ('otp_ttl_seconds',             '180'),
+        ('max_otp_attempts',            '3'),
+        ('session_ttl_seconds',         '900'),
+        ('admin_session_ttl_seconds',   '28800'),
+        ('kyc_auto_approve_enabled',    'false'),
+        ('notification_sms_enabled',    'true'),
+        ('maintenance_mode',            'false'),
+        ('require_admin_mfa',           'true'),
+        ('admin_rate_limit_per_min',    '30'),
+        ('late_fee_rate_pkr_per_day',   '50'),
+        ('max_active_orders',           '5'),
+        ('wakalah_validity_days',       '7'),
+        ('murabaha_validity_days',      '3'),
+        ('profit_rate_3m',              '2.5'),
+        ('profit_rate_4m',              '4.0'),
+        ('profit_rate_6m',              '7.0'),
+        ('profit_rate_12m',             '15.0')
+        ON CONFLICT (param_key) DO NOTHING
+    """)
+
+
+def downgrade() -> None:
+    """Downgrade schema."""
+    op.drop_index('ix_system_parameters_param_key', table_name='system_parameters')
+    op.drop_table('system_parameters')
+    op.drop_index('ix_risk_blacklist_type_value', table_name='risk_blacklist')
+    op.drop_index('ix_risk_blacklist_value', table_name='risk_blacklist')
+    op.drop_index('ix_risk_blacklist_entry_type', table_name='risk_blacklist')
+    op.drop_table('risk_blacklist')

@@ -59,7 +59,26 @@ class ReconciliationService:
 
         now = self._utc_now()
         discrepancy = actual_decimal - expected_decimal
-        status = "matched" if discrepancy == Decimal("0") else "discrepant"
+
+        # LS-BL-06: Also compare the sum of matched PaymentTransaction amounts
+        # against both expected_amount and actual_amount for true reconciliation.
+        matched_vs_expected_discrepancy = matched_amount - expected_decimal
+        matched_vs_actual_discrepancy = matched_amount - actual_decimal
+
+        if abs(matched_vs_expected_discrepancy) > Decimal("1.00"):
+            reconciliation_note = (
+                f"AMOUNT_MISMATCH: matched_txn_sum={matched_amount}, "
+                f"expected={expected_decimal}, actual={actual_decimal}. "
+                f"Discrepancy vs expected: {matched_vs_expected_discrepancy}. "
+                f"Possible missing or duplicate PaymentTransaction records."
+            )
+            status = "discrepant"
+            if notes:
+                notes = f"{notes}\n{reconciliation_note}"
+            else:
+                notes = reconciliation_note
+        else:
+            status = "matched" if discrepancy == Decimal("0") else "discrepant"
 
         from src.core.period_utils import get_period_key
         reconciliation = Reconciliation(

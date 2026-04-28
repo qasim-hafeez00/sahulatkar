@@ -10,6 +10,8 @@ from sk_shared.events import (
     EVENT_LEDGER_RECONCILIATION_MATCHED,
     EVENT_LEDGER_CHARITY_DISBURSED,
     EVENT_LEDGER_SHARIAH_VIOLATION_DETECTED,
+    EVENT_LEDGER_PAYMENT_COLLECTION_TRIGGERED,
+    EVENT_BILLING_INSTALLMENT_OVERDUE,
 )
 from sk_shared.redis_client import RedisClient
 
@@ -52,6 +54,42 @@ class EventPublisher:
         await self._publish(EVENT_LEDGER_SHARIAH_VIOLATION_DETECTED, {
             "reason": reason,
             **details
+        })
+
+    async def publish_payment_collection_triggered(
+        self,
+        *,
+        installment_id: int,
+        loan_id: int,
+        user_id: int,
+        amount: float,
+        due_date: str,
+    ) -> None:
+        """LS-CRIT-04: Signal Payment Orchestrator to trigger auto-collection."""
+        await self._publish(EVENT_LEDGER_PAYMENT_COLLECTION_TRIGGERED, {
+            "installment_id": installment_id,
+            "loan_id": loan_id,
+            "user_id": user_id,
+            "amount": amount,
+            "due_date": due_date,
+        })
+
+    async def publish_billing_installment_overdue(
+        self,
+        *,
+        installment_id: int,
+        order_id: int,
+        user_id: int,
+        amount: float,
+        days_overdue: int,
+    ) -> None:
+        """NS-BL-05: Per-installment overdue event so notification service can alert the customer."""
+        await self._publish(EVENT_BILLING_INSTALLMENT_OVERDUE, {
+            "installment_id": installment_id,
+            "order_id": order_id,
+            "user_id": user_id,
+            "amount": amount,
+            "days_overdue": days_overdue,
         })
 
     async def _publish(self, event_name: str, payload: dict[str, Any]) -> None:

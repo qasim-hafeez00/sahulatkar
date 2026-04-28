@@ -12,7 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.redis_client import RedisClient
 from sk_shared.models.product import Product, ScrapingJob
 
-from src.core.dependencies import get_client_ip, get_current_user_id, get_db, get_redis, require_service_token
+from src.core.dependencies import get_client_ip, get_current_user_id, get_db, get_redis, require_service_token, require_user_id
 from src.repositories.product_repository import ProductRepository
 from src.repositories.scraping_job_repository import ScrapingJobRepository
 from src.repositories.execution_repository import ExecutionRepository
@@ -64,6 +64,13 @@ async def extract_product(
     current_user_id: int | None = Depends(get_current_user_id),
 ):
     client_ip = get_client_ip(request)
+    
+    # URL Pre-validation
+    from urllib.parse import urlparse
+    parsed = urlparse(request_payload.raw_url)
+    if not parsed.scheme or not parsed.netloc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_URL_FORMAT")
+
     service = ProductExtractionService(db, redis)
     return await service.extract_or_enqueue(
         raw_url=request_payload.raw_url,
@@ -214,11 +221,21 @@ async def get_offer(
     if not product.in_stock or product.stock_status == "out_of_stock":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OUT_OF_STOCK")
 
+    min_dp_val = await db.scalar(text("SELECT param_value FROM system_parameters WHERE param_key = 'min_down_payment_pct'"))
+    max_dp_val = await db.scalar(text("SELECT param_value FROM system_parameters WHERE param_key = 'max_down_payment_pct'"))
+    min_dp = Decimal(min_dp_val) if min_dp_val else Decimal("25.0")
+    max_dp = Decimal(max_dp_val) if max_dp_val else Decimal("40.0")
+
+    if down_payment_pct < min_dp or down_payment_pct > max_dp:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"INVALID_DOWN_PAYMENT_PERCENTAGE: Must be between {min_dp} and {max_dp}")
+
     pricing_service = PricingService()
     if plan_months is None:
         offers = pricing_service.calculate_multiple_offers(
             cost_price=Decimal(str(product.cost_price)),
             down_payment_pct=down_payment_pct,
+            min_dp=min_dp,
+            max_dp=max_dp,
         )
         return MultipleOffersResponse(
             product_id=product.uuid,
@@ -230,6 +247,8 @@ async def get_offer(
             cost_price=Decimal(str(product.cost_price)),
             plan_months=plan_months,
             down_payment_pct=down_payment_pct,
+            min_dp=min_dp,
+            max_dp=max_dp,
         )
         return SingleOfferResponse(
             product_id=product.uuid,

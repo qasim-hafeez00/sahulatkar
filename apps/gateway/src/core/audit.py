@@ -20,15 +20,20 @@ async def record_audit_event(
     ip_address = request.client.host if request and request.client else None
     request_id = getattr(request.state, "request_id", None) if request else None
 
-    audit_record = AuditTrail(
-        admin_user_id=admin_user_id,
-        customer_user_id=customer_user_id,
-        module=module,
-        action=action,
-        target_id=target_id,
-        changes=changes or {},
-        ip_address=ip_address,
-        request_id=request_id,
-    )
-    db.add(audit_record)
-    # Caller must run db.commit() explicitly
+    try:
+        audit_record = AuditTrail(
+            admin_user_id=admin_user_id,
+            customer_user_id=customer_user_id,
+            module=module,
+            action=action,
+            target_id=target_id,
+            changes=changes or {},
+            ip_address=ip_address,
+            request_id=request_id,
+        )
+        db.add(audit_record)
+        # Caller must run db.commit() explicitly
+    except Exception as exc:
+        import logging
+        logger = logging.getLogger(__name__)
+        logger.error("Failed to record audit event: %s", exc, exc_info=True)

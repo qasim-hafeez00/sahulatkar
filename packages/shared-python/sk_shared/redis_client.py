@@ -45,6 +45,14 @@ class RedisClient:
     async def llen(self, key: str) -> int:
         return await self.redis.llen(key)
 
+    async def lrange(self, key: str, start: int, end: int) -> list[bytes]:
+        """Return a slice of the list stored at key (LRANGE start end)."""
+        return await self.redis.lrange(key, start, end)
+
+    async def lrem(self, key: str, count: int, value: str) -> int:
+        """Remove elements equal to value from the list (LREM)."""
+        return await self.redis.lrem(key, count, value)
+
     async def ping(self) -> bool:
         return await self.redis.ping()
 

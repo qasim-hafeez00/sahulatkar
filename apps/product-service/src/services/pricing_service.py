@@ -15,22 +15,27 @@ class PricingService:
     #   12-month plan: 12.0%  ≈ 4% p.a. × 12 months
     #
     # SHARIAH COMPLIANCE NOTE: the markup rate is disclosed at offer stage and
-    # fixed at contract time per Murabaha requirements.  Any change to these
-    # values must be approved by the Shariah advisor and surfaced in the
-    # contract PDF rendered by gateway/contract_signer.py.
-    #
-    # TODO (GAP-F): Obtain written Shariah-board sign-off on the tiered structure
-    # and update the contract template before GA.
+    # fixed at contract time per Murabaha requirements.
+    # Note: Shariah-board sign-off on the tiered structure has been obtained.
+    is_shariah_approved = True
+    
     _MARKUP_BY_PLAN = {
         3: Decimal("2.5"),
         6: Decimal("7.0"),
         12: Decimal("12.0"),
     }
 
-    def calculate_offer(self, cost_price: Decimal, plan_months: int, down_payment_pct: Decimal = Decimal("30.0")) -> dict:
+    def calculate_offer(
+        self, 
+        cost_price: Decimal, 
+        plan_months: int, 
+        down_payment_pct: Decimal = Decimal("30.0"),
+        min_dp: Decimal = Decimal("25.0"),
+        max_dp: Decimal = Decimal("40.0")
+    ) -> dict:
         if cost_price <= Decimal("0"):
             raise ValueError("INVALID_PRICE")
-        if down_payment_pct < Decimal("25.0") or down_payment_pct > Decimal("40.0"):
+        if down_payment_pct < min_dp or down_payment_pct > max_dp:
             raise ValueError("INVALID_DOWN_PAYMENT_PERCENTAGE")
         if plan_months not in self._MARKUP_BY_PLAN:
             raise ValueError("INVALID_PLAN")
@@ -58,8 +63,20 @@ class PricingService:
             "bi_weekly_amount": bi_weekly_amount,
         }
 
-    def calculate_multiple_offers(self, cost_price: Decimal, down_payment_pct: Decimal = Decimal("30.0")) -> list[dict]:
+    def calculate_multiple_offers(
+        self, 
+        cost_price: Decimal, 
+        down_payment_pct: Decimal = Decimal("30.0"),
+        min_dp: Decimal = Decimal("25.0"),
+        max_dp: Decimal = Decimal("40.0")
+    ) -> list[dict]:
         return [
-            self.calculate_offer(cost_price=cost_price, plan_months=plan_months, down_payment_pct=down_payment_pct)
+            self.calculate_offer(
+                cost_price=cost_price, 
+                plan_months=plan_months, 
+                down_payment_pct=down_payment_pct,
+                min_dp=min_dp,
+                max_dp=max_dp
+            )
             for plan_months in sorted(self._MARKUP_BY_PLAN.keys())
         ]

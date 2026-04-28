@@ -96,6 +96,8 @@ async def create_manual_entry(
             "entry_number": result.journal_entry.entry_number,
             "created": result.created
         }
+    except LookupError as e:
+        raise HTTPException(status_code=400, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=400, detail=str(e))
 

@@ -90,7 +90,7 @@ class ContractSignerService:
                 WakalahAgreement.id == contract_id,
                 WakalahAgreement.user_id == user_id,
                 WakalahAgreement.deleted_at.is_(None),
-            )
+            ).with_for_update()
         )
         contract = result.scalar_one_or_none()
         if contract is None:
@@ -151,7 +151,7 @@ class ContractSignerService:
                 MurabahaContract.id == contract_id,
                 MurabahaContract.user_id == user_id,
                 MurabahaContract.deleted_at.is_(None),
-            )
+            ).with_for_update()
         )
         contract = result.scalar_one_or_none()
         if contract is None:
@@ -221,35 +221,8 @@ class ContractSignerService:
         db.add(loan)
         await db.flush()  # to get loan.id
         
-        # BUG-03 FIX: Decrement user's available credit when loan is created
-        user_record = await db.scalar(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
-        if user_record:
-            prev_available = float(user_record.available_credit or 0)
-            user_record.available_credit = max(prev_available - principal_amt, 0.0)
-            from src.config import settings
-            if settings.ENVIRONMENT != "test":
-                history_kwargs = {"user_id": user_id}
-                if hasattr(CreditLimitHistory, "previous_limit"):
-                    history_kwargs["previous_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "old_limit"):
-                    history_kwargs["old_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "new_limit"):
-                    history_kwargs["new_limit"] = float(user_record.credit_limit or 0)
-                if hasattr(CreditLimitHistory, "available_before"):
-                    history_kwargs["available_before"] = prev_available
-                if hasattr(CreditLimitHistory, "available_after"):
-                    history_kwargs["available_after"] = user_record.available_credit
-                if hasattr(CreditLimitHistory, "reason"):
-                    history_kwargs["reason"] = f"loan_created:{loan.loan_number}"
-                if hasattr(CreditLimitHistory, "reason_code"):
-                    history_kwargs["reason_code"] = "loan_created"
-                if hasattr(CreditLimitHistory, "changed_by"):
-                    history_kwargs["changed_by"] = "system"
-                if hasattr(CreditLimitHistory, "changed_by_type"):
-                    history_kwargs["changed_by_type"] = "system"
-                if hasattr(CreditLimitHistory, "changed_by_id"):
-                    history_kwargs["changed_by_id"] = str(user_id)
-                db.add(CreditLimitHistory(**history_kwargs))
+        # Credit is already reserved at extraction (internal callback).
+        # Loan creation consumes that reservation; no further decrement needed here.
         
         for sched in contract.installment_schedule:
             inst = Installment(
@@ -271,4 +244,22 @@ class ContractSignerService:
             db.add(inst)
 
         await db.flush()
+
+        # Cross-Service: Publish loan.created so Ledger Service can post initial GL entries.
+        from sk_shared.events import EVENT_LOAN_CREATED, build_event_envelope, event_channel
+        envelope = build_event_envelope(
+            event=EVENT_LOAN_CREATED,
+            source_service="gateway",
+            payload={
+                "loan_id": loan.id,
+                "order_id": order.id,
+                "user_id": user_id,
+                "principal_amount": float(loan.principal_amount),
+                "profit_amount": float(loan.profit_amount),
+                "total_repayable": float(loan.total_repayable),
+                "installment_count": loan.installment_count,
+            },
+        )
+        await redis.publish(event_channel(EVENT_LOAN_CREATED), envelope.to_json())
+
         return contract, order

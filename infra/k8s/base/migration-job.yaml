@@ -1,0 +1,49 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: alembic-migrate
+  labels:
+    app: alembic-migrate
+    component: migrations
+  annotations:
+    # Helm/ArgoCD: run this Job before any Deployment rollout (pre-upgrade hook).
+    helm.sh/hook: pre-upgrade,pre-install
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 3
+  activeDeadlineSeconds: 300
+  template:
+    metadata:
+      labels:
+        app: alembic-migrate
+    spec:
+      restartPolicy: OnFailure
+      serviceAccountName: sk-migration
+      containers:
+        - name: alembic
+          image: $(ECR_REGISTRY)/sk-gateway:$(IMAGE_TAG)
+          command:
+            - alembic
+            - -c
+            - /app/db/alembic.ini
+            - upgrade
+            - head
+          env:
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sk-db-credentials
+                  key: database_url
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            runAsUser: 1000
+            readOnlyRootFilesystem: true

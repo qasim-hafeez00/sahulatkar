@@ -27,7 +27,27 @@ logger = logging.getLogger(__name__)
 # Gateways in priority order (most preferred first for auto-selection).
 # INR-03 fix: SafePay is the primary MVP gateway. Raast is Phase 3 (near-zero fee,
 # T+0 settlement, but requires bank partner provisioning — do not auto-select until live).
-_GATEWAY_PRIORITY = ["safepay", "jazzcash", "raast"]
+# PO-CRIT-06: EasyPaisa added as a secondary gateway option.
+_GATEWAY_PRIORITY = ["safepay", "jazzcash", "easypaisa", "raast"]
+
+# PO-BL-02: Classify non-retryable error codes — these should NOT increment attempt_count
+# the same as network errors. Non-retryable errors signal a permanent decline.
+_NON_RETRYABLE_ERRORS = {
+    "insufficient_funds",
+    "invalid_card",
+    "card_declined",
+    "do_not_honor",
+    "invalid_account",
+    "account_closed",
+    "fraud",
+    "stolen_card",
+    "blocked",
+}
+
+def is_retryable_error(error_message: str) -> bool:
+    """Classify gateway errors as retryable (network/timeout) or non-retryable (card decline)."""
+    error_lower = error_message.lower()
+    return not any(code in error_lower for code in _NON_RETRYABLE_ERRORS)
 
 
 class GatewayRoutingEngine:
@@ -100,6 +120,17 @@ class GatewayRoutingEngine:
                 "window_seconds": settings.GATEWAY_FAILURE_WINDOW_SECONDS,
             })
         return summaries
+
+    async def record_failure_classified(self, gateway: str, error: str) -> None:
+        """PO-BL-02: Record failure with retryable vs non-retryable classification."""
+        from src.services.routing_engine import is_retryable_error
+        await self.record_failure(gateway)
+        if not is_retryable_error(error):
+            logger.warning(
+                "Non-retryable gateway error recorded — do not auto-retry",
+                extra={"gateway": gateway, "error": error},
+            )
+        return is_retryable_error(error)
 
     def _failure_key(self, gateway: str) -> str:
         window = int(time.time()) // settings.GATEWAY_FAILURE_WINDOW_SECONDS

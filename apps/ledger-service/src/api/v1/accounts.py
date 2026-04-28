@@ -36,3 +36,26 @@ async def get_account_details(
         return await service.get_account_balance(account_code, as_of=as_of)
     except LookupError:
         raise HTTPException(status_code=404, detail="ACCOUNT_NOT_FOUND")
+
+@router.get("/{account_code}/ledger")
+async def get_account_ledger(
+    account_code: str,
+    from_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
+    to_date: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
+    cursor: str | None = None,
+    limit: int = Query(50, ge=1, le=200),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+):
+    """Get the full ledger (T-account view) for an account."""
+    service = AccountingService(db, redis=redis)
+    try:
+        return await service.get_account_ledger(
+            account_code=account_code,
+            from_date=from_date,
+            to_date=to_date,
+            cursor=cursor,
+            limit=limit
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))

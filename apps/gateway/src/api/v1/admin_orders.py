@@ -190,6 +190,11 @@ class AdminOrderRefundRequest(BaseModel):
     reason: str = Field(..., min_length=5, max_length=500)
 
 
+class AdminOrderRestructureRequest(BaseModel):
+    new_installment_count: int = Field(..., gt=0, le=12)
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
 @router.put("/{order_id}/status")
 async def admin_override_order_status(
     order_id: int,
@@ -430,3 +435,49 @@ async def request_order_refund(
     )
     await db.commit()
     return {"order_id": order.id, "status": "refund_requested", "queued": True}
+
+
+@router.post("/{order_id}/restructure")
+async def restructure_order_loan(
+    order_id: int,
+    payload: AdminOrderRestructureRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    from sk_shared.models.payment import Loan
+    order = await db.scalar(select(Order).where(Order.id == order_id, Order.deleted_at.is_(None)))
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+    loan = await db.scalar(select(Loan).where(Loan.order_id == order_id, Loan.deleted_at.is_(None)))
+    if loan is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="LOAN_NOT_FOUND")
+
+    if hasattr(redis, "redis"):
+        event = {
+            "event": "loan.restructure_requested",
+            "order_id": order.id,
+            "loan_id": loan.id,
+            "new_installment_count": payload.new_installment_count,
+            "reason": payload.reason,
+            "requested_by_admin_id": current_admin.id,
+            "requested_at": datetime.now(timezone.utc).isoformat(),
+        }
+        await redis.redis.lpush(QueueName.PAYMENT_INITIATE, json.dumps(event))
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_orders",
+        action="loan_restructure_requested",
+        target_id=order.id,
+        changes={
+            "old_installment_count": loan.installment_count,
+            "new_installment_count": payload.new_installment_count,
+            "reason": payload.reason,
+        },
+    )
+    await db.commit()
+    return {"order_id": order.id, "status": "restructure_requested", "queued": True}
