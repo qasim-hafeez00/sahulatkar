@@ -12,10 +12,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages/shared-python/ /tmp/shared-python/
 RUN pip install --no-cache-dir --prefix=/install /tmp/shared-python/
 
-# Install service dependencies (copy pyproject.toml + src so hatchling can resolve metadata)
-COPY apps/gateway/pyproject.toml /tmp/gateway/
-COPY apps/gateway/src/ /tmp/gateway/src/
-RUN pip install --no-cache-dir --prefix=/install /tmp/gateway/
+# Install service runtime dependencies (src is COPY'd at runtime, not installed as a package)
+COPY apps/gateway/pyproject.toml /tmp/gateway.toml
+RUN python3 -c "import tomllib,subprocess,sys; cfg=tomllib.load(open('/tmp/gateway.toml','rb')); deps=[d for d in cfg['project']['dependencies'] if not d.startswith('sk-')]; subprocess.run([sys.executable,'-m','pip','install','--no-cache-dir','--prefix=/install']+deps,check=True)"
 
 # STAGE 2: Runtime
 FROM python:3.12-slim AS runtime
