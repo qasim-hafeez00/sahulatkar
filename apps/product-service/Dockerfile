@@ -12,10 +12,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY packages/shared-python/ /tmp/shared-python/
 RUN pip install --no-cache-dir --prefix=/install /tmp/shared-python/
 
-# Install service dependencies
-COPY apps/product-service/pyproject.toml /tmp/
-RUN pip install --no-cache-dir --prefix=/install -e /tmp/[test] || \
-    pip install --no-cache-dir --prefix=/install /tmp/
+# Install service dependencies (copy pyproject.toml + src so hatchling can resolve metadata)
+COPY apps/product-service/pyproject.toml /tmp/product-service/
+COPY apps/product-service/src/ /tmp/product-service/src/
+RUN pip install --no-cache-dir --prefix=/install /tmp/product-service/
 
 # STAGE 2: Runtime
 FROM python:3.12-slim AS runtime
