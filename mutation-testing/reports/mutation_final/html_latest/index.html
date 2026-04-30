@@ -1,0 +1,84 @@
+<html><head><meta charset="utf-8"><title>Mutmut Report</title></head><body><h1>Mutmut run output</h1><pre>
+â ‹ Generating mutants
+     also copying tests
+     also copying test
+     also copying setup.cfg
+     also copying pyproject.toml
+     also copying pytest.ini
+     also copying .gitignore
+src/services/kyc.py
+
+    done in 5576ms (0 files mutated, 0 ignored, 1 unmodified)
+
+â ™ Running stats
+     python -m pytest  &quot;-vv&quot; &quot;--rootdir=.&quot; &quot;--tb=native&quot; &quot;-x&quot; &quot;-q&quot; &quot;tests/test_services/test_kyc_service_unit.py&quot;
+============================= test session starts ==============================
+platform linux -- Python 3.13.12, pytest-9.0.3, pluggy-1.6.0 -- /mnt/c/Users/Seraphindra/Desktop/sahulatkar/.wsl_venv/bin/python
+cachedir: .pytest_cache
+rootdir: /mnt/c/Users/Seraphindra/Desktop/sahulatkar/apps/gateway/mutants
+configfile: pyproject.toml
+plugins: anyio-4.13.0, asyncio-1.3.0, cov-7.1.0
+asyncio: mode=Mode.AUTO, debug=False, asyncio_default_fixture_loop_scope=function, asyncio_default_test_loop_scope=function
+collecting ... collected 32 items
+
+tests/test_services/test_kyc_service_unit.py::TestGetOrCreateKyc::test_returns_existing_kyc_without_insert PASSED [  3%]
+tests/test_services/test_kyc_service_unit.py::TestGetOrCreateKyc::test_creates_pending_kyc_when_none_exists PASSED [  6%]
+tests/test_services/test_kyc_service_unit.py::TestGetOrCreateKyc::test_new_kyc_initial_status_is_not_submitted PASSED [  9%]
+tests/test_services/test_kyc_service_unit.py::TestUploadDocument::test_cnic_front_sets_only_front_url PASSED [ 12%]
+tests/test_services/test_kyc_service_unit.py::TestUploadDocument::test_cnic_back_sets_only_back_url PASSED [ 15%]
+tests/test_services/test_kyc_service_unit.py::TestUploadDocument::test_liveness_video_sets_only_video_url PASSED [ 18%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_raises_when_cnic_front_missing PASSED [ 21%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_raises_when_cnic_back_missing PASSED [ 25%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_raises_when_liveness_video_missing PASSED [ 28%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_status_is_submitted_before_external_api_calls PASSED [ 31%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_rejected_when_only_ocr_fails_liveness_passes PASSED [ 34%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_rejected_when_only_liveness_fails_ocr_passes PASSED [ 37%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_not_rejected_when_both_shufti_checks_pass PASSED [ 40%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_default_cnic_used_when_ocr_extracts_no_cnic PASSED [ 43%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_nadra_verified_at_set_when_nadra_passes PASSED [ 46%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_nadra_verified_at_not_set_when_nadra_fails PASSED [ 50%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_queue_entry_added_when_no_existing_entry PASSED [ 53%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_queue_entry_not_duplicated_when_already_exists PASSED [ 56%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_rejected_when_nadra_returns_false PASSED [ 59%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_in_review_when_nadra_returns_true PASSED [ 62%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_shufti_exception_sets_rejected_with_reason PASSED [ 65%]
+tests/test_services/test_kyc_service_unit.py::TestSubmitForVerification::test_nadra_exception_sets_rejected_with_reason PASSED [ 68%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_returns_none_when_no_profile_exists PASSED [ 71%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_string_cnic_skips_kms_decryption PASSED [ 75%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_bytes_cnic_triggers_kms_decryption PASSED [ 78%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_utf8_fallback_when_kms_decrypt_fails PASSED [ 81%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_empty_string_set_when_all_decryption_fails PASSED [ 84%]
+tests/test_services/test_kyc_service_unit.py::TestGetProfile::test_none_cnic_skips_decryption_block PASSED [ 87%]
+tests/test_services/test_kyc_service_unit.py::TestUpsertProfile::test_new_profile_created_and_added_when_none_exists PASSED [ 90%]
+tests/test_services/test_kyc_service_unit.py::TestUpsertProfile::test_existing_profile_updated_not_re_inserted PASSED [ 93%]
+tests/test_services/test_kyc_service_unit.py::TestUpsertProfile::test_cnic_is_encrypted_not_stored_plaintext PASSED [ 96%]
+tests/test_services/test_kyc_service_unit.py::TestUpsertProfile::test_all_five_profile_fields_written PASSED [100%]
+
+=============================== warnings summary ===============================
+../src/schemas/kyc.py:16
+  /mnt/c/Users/Seraphindra/Desktop/sahulatkar/apps/gateway/src/schemas/kyc.py:16: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class CustomerProfileResponse(CustomerProfileBase):
+
+../src/schemas/kyc.py:35
+  /mnt/c/Users/Seraphindra/Desktop/sahulatkar/apps/gateway/src/schemas/kyc.py:35: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class KycVerificationResponse(BaseModel):
+
+../src/schemas/kyc.py:49
+  /mnt/c/Users/Seraphindra/Desktop/sahulatkar/apps/gateway/src/schemas/kyc.py:49: PydanticDeprecatedSince20: Support for class-based `config` is deprecated, use ConfigDict instead. Deprecated in Pydantic V2.0 to be removed in V3.0. See Pydantic V2 Migration Guide at https://errors.pydantic.dev/2.13/migration/
+    class KycQueueItemResponse(BaseModel):
+
+../../../.wsl_venv/lib/python3.13/site-packages/pythonjsonlogger/jsonlogger.py:11
+  /mnt/c/Users/Seraphindra/Desktop/sahulatkar/.wsl_venv/lib/python3.13/site-packages/pythonjsonlogger/jsonlogger.py:11: DeprecationWarning: pythonjsonlogger.jsonlogger has been moved to pythonjsonlogger.json
+    warnings.warn(
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================= 32 passed, 4 warnings in 12.37s ========================
+    exit code 0
+
+Stopping early, because we could not find any test case for any mutant. It seems that the selected tests do not cover any code that we mutated.
+In the last pytest run above, you can see which tests we executed.
+You can use mutmut browse to check which parts of the source code we mutated.
+If some of the mutated code should be covered by the executed tests, consider opening an issue (with a MRE if possible).
+
+
+</pre></body></html>
