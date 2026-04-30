@@ -132,3 +132,30 @@ The repository utilizes the test pyramid:
 - **Code Quality**: `ruff` for linting, `mypy --strict` for static type checking across all internal APIs.
 
 *All PRs to `develop` must pass 80% coverage and zero `mypy`/`ruff` warnings.*
+
+---
+
+## Mutation Testing Assignment
+
+This repository includes a mutation-testing submission for the gateway KYC service.
+
+### Reproduce the run
+
+```bash
+cd apps/gateway
+export PYTHONPATH=src
+python -m pytest tests/test_services/test_kyc_service_unit.py -q
+python -m mutmut run --max-children 1
+python -m mutmut results
+python -m mutmut html
+```
+
+### Report locations
+
+- Baseline HTML report: `mutation-testing/reports/mutation_baseline/html_latest/`
+- Final HTML report: `mutation-testing/reports/mutation_final/html_latest/`
+
+### Notes
+
+- The mutation run targets `apps/gateway/src/services/kyc.py`.
+- The copied HTML output is committed in the repository so the raw tool output is available for review.
