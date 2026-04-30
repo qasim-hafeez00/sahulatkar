@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
@@ -9,10 +10,15 @@ from sk_shared.models.kyc import (
     KycVerificationQueue,
     UserKycVerification,
 )
-from src.schemas.kyc import CustomerProfileBase
 from .nadra import NadraClientMock
 from .shufti import ShuftiClientMock
 from src.core.kms import KMSProvider
+from src.core.logging import logger
+
+if TYPE_CHECKING:
+    from src.schemas.kyc import CustomerProfileBase
+else:
+    CustomerProfileBase = Any
 
 
 class KycService:
@@ -149,14 +155,10 @@ class KycService:
                 except Exception:
                     # Check if stored value is legacy plaintext
                     try:
-                        import logging
-                        logger = logging.getLogger(__name__)
                         profile.cnic = raw.decode("utf-8")
-                        logger.warning(f"Legacy plaintext CNIC detected for user {profile.user_id}")
+                        logger.warning("Legacy plaintext CNIC detected for user %s", profile.user_id)
                     except Exception:
-                        import logging
-                        logger = logging.getLogger(__name__)
-                        logger.error(f"Cannot decrypt CNIC for user {profile.user_id}")
+                        logger.error("Cannot decrypt CNIC for user %s", profile.user_id)
                         profile.cnic = ""
         return profile
 

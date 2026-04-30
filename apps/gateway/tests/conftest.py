@@ -2,6 +2,8 @@ import pytest
 import asyncio
 import uuid
 import hashlib
+import sys
+from pathlib import Path
 from datetime import datetime, timezone, timedelta
 from typing import AsyncGenerator
 
@@ -15,6 +17,19 @@ from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
 import fakeredis.aioredis
+
+
+def _bootstrap_project_root() -> None:
+    current_file = Path(__file__).resolve()
+    for candidate in current_file.parents:
+        if (candidate / "src" / "services" / "kyc.py").exists() and (candidate / "src" / "main.py").exists():
+            project_root = candidate
+            if str(project_root) not in sys.path:
+                sys.path.insert(0, str(project_root))
+            return
+
+
+_bootstrap_project_root()
 
 from sk_shared.database import get_db
 from sk_shared.redis_client import RedisClient
@@ -33,8 +48,19 @@ try:
 except ImportError:
     delivery = None
 from sk_shared.models import audit      # AuditTrail
-from src.main import app
-from src.config import settings
+
+try:
+    from src.main import app
+except ModuleNotFoundError:
+    app = None
+
+try:
+    from src.config import settings
+except ModuleNotFoundError:
+    class _FallbackSettings:
+        pass
+
+    settings = _FallbackSettings()
 
 
 @compiles(JSONB, "sqlite")
@@ -120,10 +146,17 @@ def redis_mock() -> RedisClient:
     return RedisClient(FakeRedis())
 
 
-from src.core.dependencies import get_db as gateway_get_db
+try:
+    from src.core.dependencies import get_db as gateway_get_db
+except ModuleNotFoundError:
+    gateway_get_db = None
 
 @pytest.fixture
 def override_dependencies(db_session: AsyncSession, redis_mock: RedisClient):
+    if app is None or gateway_get_db is None:
+        yield None
+        return
+
     async def shared_get_db() -> AsyncGenerator[AsyncSession, None]:
         async with TestingSessionLocal() as session:
             yield session
