@@ -92,7 +92,7 @@ jobs:
         run: |
           pytest apps/${{ matrix.service }}/tests/ -v --cov=apps/${{ matrix.service }}/src --cov-report=xml --cov-fail-under=80
       - name: Upload Coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-${{ matrix.service }}
           path: coverage.xml
@@ -111,7 +111,7 @@ jobs:
       - name: Run Tests
         run: pytest packages/shared-python/tests/ -v --cov=packages/shared-python/sk_shared --cov-report=xml
       - name: Upload Coverage
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: coverage-shared-python
           path: coverage.xml
