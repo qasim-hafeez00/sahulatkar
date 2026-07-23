@@ -1,0 +1,12 @@
+# Standalone Kustomize root for the logging add-on (Loki + Fluent Bit),
+# deliberately separate from the app Kustomize tree — same reasoning as
+# infra/k8s/base/monitoring/kustomization.yaml. Only the namespace is a
+# plain Kubernetes resource here; Loki and Fluent Bit are installed via
+# Helm (see README.md for exact commands and where the values files live).
+#
+#   kubectl apply -k infra/k8s/base/logging
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml

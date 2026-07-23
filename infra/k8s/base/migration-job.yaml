@@ -22,7 +22,7 @@ spec:
       serviceAccountName: sk-migration
       containers:
         - name: alembic
-          image: $(ECR_REGISTRY)/sk-gateway:$(IMAGE_TAG)
+          image: sk-gateway:latest
           command:
             - alembic
             - -c

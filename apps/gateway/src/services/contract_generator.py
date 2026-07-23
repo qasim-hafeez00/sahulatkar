@@ -153,7 +153,7 @@ class ContractGeneratorService:
             )
         )
         if existing is not None:
-            await ContractSignerService.issue_signing_otp(self.db, redis, "wakalah", existing.id, user_id)
+            existing._dev_otp = await ContractSignerService.issue_signing_otp(self.db, redis, "wakalah", existing.id, user_id)
             return existing
 
         product = await self.db.scalar(
@@ -216,7 +216,7 @@ class ContractGeneratorService:
         await self.db.commit()
         await self.db.refresh(contract)
 
-        await ContractSignerService.issue_signing_otp(self.db, redis, "wakalah", contract.id, user_id)
+        contract._dev_otp = await ContractSignerService.issue_signing_otp(self.db, redis, "wakalah", contract.id, user_id)
         return contract
 
     async def generate_murabaha(self, user_id: int, req: MurabahaGenerateRequest, redis) -> MurabahaContract:
@@ -250,7 +250,7 @@ class ContractGeneratorService:
             )
         )
         if existing is not None:
-            await ContractSignerService.issue_signing_otp(self.db, redis, "murabaha", existing.id, user_id)
+            existing._dev_otp = await ContractSignerService.issue_signing_otp(self.db, redis, "murabaha", existing.id, user_id)
             return existing
 
         product = await self.db.scalar(
@@ -314,5 +314,5 @@ class ContractGeneratorService:
         await self.db.commit()
         await self.db.refresh(contract)
 
-        await ContractSignerService.issue_signing_otp(self.db, redis, "murabaha", contract.id, user_id)
+        contract._dev_otp = await ContractSignerService.issue_signing_otp(self.db, redis, "murabaha", contract.id, user_id)
         return contract

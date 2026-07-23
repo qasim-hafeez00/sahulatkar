@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 from datetime import date
 from decimal import Decimal
+from typing import Iterable
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -57,6 +58,192 @@ class BalanceService:
             "credit_total": float(balance_data["credit_total"]),
             "balance": float(balance_data["balance"]),
         }
+
+    @readonly_guard
+    async def get_account_balances_batch(
+        self,
+        account_codes: Iterable[str] | None,
+        as_of: date | None = None,
+        currency: str | None = None,
+    ) -> dict[str, dict[str, object]]:
+        """
+        Batched equivalent of calling get_account_balance() once per account.
+
+        Fixes an N+1 query pattern: get_trial_balance() and list_accounts()
+        used to call get_account_balance() in a per-account loop, which for
+        every account issued a lookup-by-code query plus (for leaf accounts)
+        a snapshot query and an aggregate query -- O(N) queries for N
+        accounts. This method instead issues a small, constant number of
+        queries (chart of accounts, snapshots, journal-entry-line deltas)
+        regardless of how many accounts are requested, then resolves
+        per-account (and, for control accounts, rolled-up) balances in
+        Python from that already-fetched data.
+
+        Args:
+            account_codes: account codes to return balances for. If None,
+                balances are returned for every account in the chart.
+            as_of: date to compute balances as of (defaults to today).
+            currency: pin all accounts to this currency instead of each
+                account's own default currency.
+
+        Returns:
+            Dict keyed by account_code, with the same shape as
+            get_account_balance()'s return value.
+        """
+        target_date = as_of or date.today()
+
+        # Fetch the full chart of accounts once. This is required (not just
+        # an optimization) because control-account rollups need their full
+        # descendant subtree, which may include accounts outside the
+        # requested `account_codes` set. The chart of accounts is small
+        # (dozens of rows), so this single extra query is cheap relative to
+        # the N+1 pattern it replaces.
+        all_accounts = (await self.db.execute(select(LedgerAccount))).scalars().all()
+        accounts_by_id = {account.id: account for account in all_accounts}
+        accounts_by_code = {account.account_code: account for account in all_accounts}
+
+        children_by_parent: dict[int, list[LedgerAccount]] = {}
+        for account in all_accounts:
+            if account.parent_account_id is not None:
+                children_by_parent.setdefault(account.parent_account_id, []).append(account)
+
+        leaf_ids = [account.id for account in all_accounts if not account.is_control]
+        leaf_balances = await self._get_single_account_balances_bulk(
+            leaf_ids, target_date, currency, accounts_by_id
+        )
+
+        resolved: dict[int, dict[str, Decimal]] = {}
+
+        def _resolve(account: LedgerAccount) -> dict[str, Decimal]:
+            if account.id in resolved:
+                return resolved[account.id]
+
+            if not account.is_control:
+                target_currency = currency or account.currency
+                data = leaf_balances.get(
+                    (account.id, target_currency),
+                    {"debit_total": Decimal("0.00"), "credit_total": Decimal("0.00"), "balance": Decimal("0.00")},
+                )
+            else:
+                total_debit = Decimal("0.00")
+                total_credit = Decimal("0.00")
+                total_balance = Decimal("0.00")
+                for child in children_by_parent.get(account.id, []):
+                    child_data = _resolve(child)
+                    total_debit += child_data["debit_total"]
+                    total_credit += child_data["credit_total"]
+                    total_balance += child_data["balance"]
+                data = {"debit_total": total_debit, "credit_total": total_credit, "balance": total_balance}
+
+            resolved[account.id] = data
+            return data
+
+        codes = list(account_codes) if account_codes is not None else list(accounts_by_code)
+        results: dict[str, dict[str, object]] = {}
+        for code in codes:
+            account = accounts_by_code.get(code)
+            if account is None:
+                continue
+            data = _resolve(account)
+            target_currency = currency or account.currency
+            results[code] = {
+                "account_code": account.account_code,
+                "account_name": account.account_name,
+                "account_type": account.account_type,
+                "normal_balance": account.normal_balance,
+                "is_control": bool(account.is_control),
+                "currency": target_currency,
+                "as_of": target_date.isoformat(),
+                "debit_total": float(data["debit_total"]),
+                "credit_total": float(data["credit_total"]),
+                "balance": float(data["balance"]),
+            }
+        return results
+
+    async def _get_single_account_balances_bulk(
+        self,
+        account_ids: list[int],
+        target_date: date,
+        currency: str | None,
+        accounts_by_id: dict[int, LedgerAccount],
+    ) -> dict[tuple[int, str], dict[str, Decimal]]:
+        """
+        Batched equivalent of _get_single_account_balance() for many accounts
+        at once: two queries total (latest-snapshot lookup + journal-entry-line
+        delta aggregation) instead of two queries PER account.
+        """
+        if not account_ids:
+            return {}
+
+        # 1. Latest snapshot at or before target_date, per (account_id, currency).
+        # Ordering by account_id then snapshot_date desc means the first row
+        # seen for each (account_id, currency) pair is the latest snapshot --
+        # avoids needing a window function (portable to sqlite in tests).
+        snapshot_stmt = (
+            select(LedgerAccountBalance)
+            .where(LedgerAccountBalance.account_id.in_(account_ids))
+            .where(LedgerAccountBalance.snapshot_date <= target_date)
+            .order_by(LedgerAccountBalance.account_id.asc(), LedgerAccountBalance.snapshot_date.desc())
+        )
+        snapshot_rows = (await self.db.execute(snapshot_stmt)).scalars().all()
+
+        snapshots: dict[tuple[int, str], LedgerAccountBalance] = {}
+        for row in snapshot_rows:
+            key = (row.account_id, row.currency)
+            if key not in snapshots:
+                snapshots[key] = row
+
+        # 2. All journal entry line deltas for these accounts up to target_date,
+        # in one query -- filtered per-account against that account's own
+        # snapshot start-date (if any) in Python below, matching
+        # _get_single_account_balance()'s "entries after the snapshot date"
+        # semantics without needing a correlated per-account query.
+        entries_stmt = (
+            select(
+                JournalEntryLine.account_id,
+                JournalEntryLine.currency,
+                JournalEntry.entry_date,
+                JournalEntryLine.debit_amount,
+                JournalEntryLine.credit_amount,
+            )
+            .join(JournalEntry, JournalEntry.id == JournalEntryLine.journal_id)
+            .where(JournalEntryLine.account_id.in_(account_ids))
+            .where(JournalEntry.entry_date <= target_date)
+        )
+        entry_rows = (await self.db.execute(entries_stmt)).all()
+
+        deltas: dict[tuple[int, str], list[Decimal]] = {}
+        for row in entry_rows:
+            key = (row.account_id, row.currency)
+            snapshot = snapshots.get(key)
+            if snapshot is not None and row.entry_date <= snapshot.snapshot_date:
+                continue
+            bucket = deltas.setdefault(key, [Decimal("0.00"), Decimal("0.00")])
+            bucket[0] += Decimal(str(row.debit_amount))
+            bucket[1] += Decimal(str(row.credit_amount))
+
+        results: dict[tuple[int, str], dict[str, Decimal]] = {}
+        for account_id in account_ids:
+            account = accounts_by_id[account_id]
+            target_currency = currency or account.currency
+            key = (account_id, target_currency)
+
+            snapshot = snapshots.get(key)
+            current_debit = snapshot.debit_balance if snapshot else Decimal("0.00")
+            current_credit = snapshot.credit_balance if snapshot else Decimal("0.00")
+
+            delta_debit, delta_credit = deltas.get(key, [Decimal("0.00"), Decimal("0.00")])
+            total_debit = current_debit + delta_debit
+            total_credit = current_credit + delta_credit
+
+            if account.normal_balance == "debit":
+                balance = total_debit - total_credit
+            else:
+                balance = total_credit - total_debit
+
+            results[key] = {"debit_total": total_debit, "credit_total": total_credit, "balance": balance}
+
+        return results
 
     async def _get_single_account_balance(self, account_id: int, target_date: date, currency: str) -> dict[str, Decimal]:
         """Calculates balance for a single account using snapshots and incremental aggregation."""

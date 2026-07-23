@@ -15,14 +15,14 @@ from fastapi import APIRouter, Depends, Query, Request, HTTPException
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.models.payment import PaymentTransaction, VirtualCard
+from sk_shared.models.payment import Loan, PaymentTransaction, VirtualCard
 from src.models.payment_workflow import PaymentWorkflow
 from src.models.outbox import OutboxEvent
 from src.state.payment_workflow import PaymentStatus
 
 from src.core.dependencies import RequireRole, get_current_admin, get_db, get_redis
 from src.core.metrics import RECONCILIATION_DISCREPANCY_TOTAL, RECONCILIATION_MATCHED_TOTAL
-from src.schemas.admin import GatewayHealthSummary, PaginatedTransactions, TransactionSummary, VcnAdminSummary
+from src.schemas.admin import AdjustmentRequest, GatewayHealthSummary, PaginatedTransactions, TransactionSummary, VcnAdminSummary
 from src.schemas.reconciliation import ReconciliationImportRequest, ReconciliationReport
 from src.services.reconciliation import ReconciliationService
 from src.services.routing_engine import GatewayRoutingEngine
@@ -48,7 +48,22 @@ async def list_transactions(
     _admin=Depends(get_current_admin),
 ):
     """List all payment transactions with filtering by gateway and status."""
-    query = select(PaymentTransaction).where(PaymentTransaction.deleted_at.is_(None))
+    # PaymentTransaction already has an order_id FK column (see
+    # packages/shared-python/sk_shared/models/payment.py), but every
+    # transaction-creation call site in src/api/v1/payments.py only sets
+    # loan_id/installment_id, leaving order_id NULL — so it could never be
+    # read straight off the row (this is what the "order_id=None # TODO"
+    # below used to do). No Alembic migration is needed since the column
+    # already exists; the fix is to derive it via Loan instead. Left-join
+    # Loan so every transaction can still be traced back to its originating
+    # order for the admin dashboard: t.order_id wins if a row happens to
+    # have it set directly (e.g. a future direct-to-order transaction type),
+    # otherwise fall back to loan.order_id.
+    query = (
+        select(PaymentTransaction, Loan.order_id.label("loan_order_id"))
+        .outerjoin(Loan, PaymentTransaction.loan_id == Loan.id)
+        .where(PaymentTransaction.deleted_at.is_(None))
+    )
 
     if gateway:
         query = query.where(PaymentTransaction.gateway == gateway)
@@ -64,12 +79,12 @@ async def list_transactions(
     result = await db.execute(
         query.order_by(PaymentTransaction.id.desc()).offset(offset).limit(page_size)
     )
-    txns = result.scalars().all()
+    rows = result.all()
 
     items = [
         TransactionSummary(
             id=t.id,
-            order_id=None,     # TODO: Derive from loan.order_id if needed
+            order_id=t.order_id if t.order_id is not None else loan_order_id,
             user_id=t.user_id,
             amount=Decimal(str(t.amount)),
             currency=t.currency,
@@ -79,7 +94,7 @@ async def list_transactions(
             created_at=getattr(t, "created_at", None),
             reconciled_at=t.reconciled_at,
         )
-        for t in txns
+        for t, loan_order_id in rows
     ]
 
     return PaginatedTransactions(items=items, total=total, page=page, page_size=page_size)
@@ -232,9 +247,7 @@ async def force_retry_workflow(
     dependencies=[Depends(RequireRole(_FINANCE_ROLES))],
 )
 async def create_adjustment(
-    order_id: int,
-    amount_pkr: Decimal,
-    reason: str,
+    body: AdjustmentRequest,
     db: AsyncSession = Depends(get_db),
     _admin=Depends(get_current_admin),
 ):
@@ -242,10 +255,10 @@ async def create_adjustment(
     Issue a manual adjustment (credit or debit) for an order.
     Used for compensation or manual corrections.
     """
-    # BV-05 fix: Derive loan_id from order_id. PaymentTransaction links to Loan, 
+    # BV-05 fix: Derive loan_id from order_id. PaymentTransaction links to Loan,
     # not directly to Order.
     from sk_shared.models.payment import Loan
-    loan = await db.scalar(select(Loan).where(Loan.order_id == order_id))
+    loan = await db.scalar(select(Loan).where(Loan.order_id == body.order_id))
     if not loan:
         raise HTTPException(status_code=404, detail="LOAN_NOT_FOUND_FOR_ORDER")
 
@@ -258,10 +271,10 @@ async def create_adjustment(
         event="payment.adjustment_requested",
         source_service="payment-orchestrator",
         payload={
-            "order_id": order_id,
+            "order_id": body.order_id,
             "loan_id": loan.id,
-            "amount_pkr": str(amount_pkr),
-            "reason": reason,
+            "amount_pkr": str(body.amount_pkr),
+            "reason": body.reason,
         }
     )
     outbox = OutboxEvent(
@@ -271,8 +284,8 @@ async def create_adjustment(
     )
     db.add(outbox)
     await db.commit()
-    
-    logger.info(f"Admin queued adjustment of {amount_pkr} for order {order_id}")
+
+    logger.info(f"Admin queued adjustment of {body.amount_pkr} for order {body.order_id}")
     return {"status": "queued", "event": "payment.adjustment_requested"}
 
 

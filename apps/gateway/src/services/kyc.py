@@ -12,6 +12,8 @@ from sk_shared.models.kyc import (
 )
 from .nadra import NadraClientMock
 from .shufti import ShuftiClientMock
+from .notify import notify
+from src.config import settings
 from src.core.kms import KMSProvider
 from src.core.logging import logger
 
@@ -101,6 +103,12 @@ class KycService:
             if not liveness_result.get("success"):
                 reasons.append(liveness_result.get("reason", "Liveness check failed"))
             kyc.rejection_reason = "; ".join(reasons)
+            await notify(
+                self.db, user_id, "kyc",
+                "Verification failed",
+                f"We couldn't verify your documents: {kyc.rejection_reason}. Please resubmit.",
+                source_event="kyc.rejected", source_reference=f"kyc:{kyc.id}",
+            )
             await self.db.commit()
             await self.db.refresh(kyc)
             return kyc
@@ -124,6 +132,12 @@ class KycService:
         if not nadra_ok:
             kyc.status = KycStatus.REJECTED
             kyc.rejection_reason = "NADRA verification failed for CNIC."
+            await notify(
+                self.db, user_id, "kyc",
+                "Verification failed",
+                "NADRA could not verify your CNIC. Please resubmit your documents.",
+                source_event="kyc.rejected", source_reference=f"kyc:{kyc.id}",
+            )
         else:
             kyc.status = KycStatus.IN_REVIEW
             kyc.nadra_verified_at = datetime.now(timezone.utc)
@@ -135,6 +149,28 @@ class KycService:
             )
             if not existing_q.scalar_one_or_none():
                 self.db.add(KycVerificationQueue(kyc_verification_id=kyc.id))
+
+            # DEV ONLY: passing automated NADRA/OCR/liveness checks normally still
+            # requires a human admin to approve the queue entry above before
+            # user.status flips to "active" (the gate OrderService.initiate checks)
+            # and a real credit-engine assessment sets a credit limit. Outside
+            # production, skip straight to an approved, modestly-limited account so
+            # the shopping/financing flow is reachable without the admin panel.
+            if settings.ENVIRONMENT != "production":
+                from sk_shared.models.auth import User as UserModel
+
+                user = await self.db.scalar(select(UserModel).where(UserModel.id == user_id))
+                if user and user.status != "active":
+                    user.status = "active"
+                    # 750k covers this app's typical demo electronics prices comfortably.
+                    user.credit_limit = 750_000.0
+                    user.available_credit = 750_000.0
+                    await notify(
+                        self.db, user_id, "kyc",
+                        "Your account is verified",
+                        "Identity verification is complete. You're approved for Shariah-compliant financing up to PKR 750,000.",
+                        source_event="kyc.approved", source_reference=f"kyc:{kyc.id}",
+                    )
 
         await self.db.commit()
         await self.db.refresh(kyc)

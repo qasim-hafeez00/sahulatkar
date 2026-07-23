@@ -451,9 +451,12 @@ class NotificationService:
     async def dispatch_notification(self, notification_id: int) -> None:
         """Process a single notification: dispatch all pending channels."""
         notification = await self.db.get(Notification, notification_id)
-        if notification is None or notification.status in (
-            NotificationStatus.DELIVERED, NotificationStatus.CANCELLED
-        ):
+        # NOTE: DELIVERED means "at least one channel delivered" (see NotificationStatus),
+        # not "every channel is done" — a retry re-enqueue for this notification_id can
+        # arrive while the aggregate status is already DELIVERED because a different
+        # channel succeeded first. Only CANCELLED is a genuine hard-stop here; whether
+        # there's still work to do is decided below by the per-dispatch-row query.
+        if notification is None or notification.status == NotificationStatus.CANCELLED:
             return
 
         dispatches = (await self.db.scalars(
@@ -548,7 +551,21 @@ class NotificationService:
                     result=res_type
                 ).inc()
 
-        notification.status = NotificationStatus.DELIVERED if any_success else NotificationStatus.FAILED
+        # Derive the aggregate status from ALL dispatch rows (not just the ones
+        # processed in this call) — otherwise a later retry attempt on a channel
+        # that fails again would overwrite a previously-successful DELIVERED
+        # status back to FAILED, even though an earlier channel already delivered.
+        all_dispatches = (await self.db.scalars(
+            select(NotificationDispatch).where(
+                NotificationDispatch.notification_id == notification_id,
+            )
+        )).all()
+        if any_success or any(d.status in (DispatchStatus.SENT, DispatchStatus.DELIVERED) for d in all_dispatches):
+            notification.status = NotificationStatus.DELIVERED
+        elif any(d.status in (DispatchStatus.PENDING, DispatchStatus.RETRYING) for d in all_dispatches):
+            notification.status = NotificationStatus.DISPATCHING
+        else:
+            notification.status = NotificationStatus.FAILED
         await self.db.commit()
 
     async def _get_user_destination(self, notification: Notification, channel: str) -> Optional[str]:

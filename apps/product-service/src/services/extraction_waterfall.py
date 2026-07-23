@@ -117,6 +117,10 @@ class ExtractionWaterfallService:
     async def extract(self, canonical_url: str, platform: str) -> ExtractionResult:
         normalized_platform = (platform or "CUSTOM").upper()
         failures: list[str] = []
+        # Best price seen from any earlier tier attempt (even one that didn't
+        # meet its confidence threshold) — used to sanity-check Tier 3's
+        # LLM-derived price before trusting it as the purchase cost basis.
+        prior_price_hint: Decimal | None = None
 
         async def _run_tier(name: str, domain: str, fn):
             t0 = time.perf_counter()
@@ -126,6 +130,7 @@ class ExtractionWaterfallService:
             return result
 
         async def _accept_or_none(tier_name: str, domain: str, result: ExtractionResult | None) -> ExtractionResult | None:
+            nonlocal prior_price_hint
             if result is None:
                 failures.append(f"{tier_name}:no_result")
                 return None
@@ -136,6 +141,18 @@ class ExtractionWaterfallService:
             if validated.status != "completed":
                 failures.append(f"{tier_name}:{validated.error_code or validated.status}")
                 return None
+
+            if tier_name == "tier3":
+                if prior_price_hint is not None and prior_price_hint > 0:
+                    drift_pct = abs(validated.price - prior_price_hint) / prior_price_hint * Decimal("100")
+                    if drift_pct > settings.TIER3_PRICE_CROSSCHECK_TOLERANCE_PCT:
+                        failures.append(
+                            f"{tier_name}:price_crosscheck_failed:llm={validated.price}:prior={prior_price_hint}"
+                        )
+                        return None
+            elif validated.price > 0:
+                prior_price_hint = validated.price
+
             threshold = self._threshold_for_tier(tier_name)
             if validated.confidence < threshold:
                 failures.append(f"{tier_name}:low_confidence:{validated.confidence}")

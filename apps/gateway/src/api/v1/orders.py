@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import User
@@ -208,6 +208,21 @@ async def cancel_order(
             status_code=status.HTTP_409_CONFLICT,
             detail=f"ORDER_NOT_CANCELLABLE (current status: {order.status})",
         )
+
+    # Cart orders can share one Loan for unified financing (see
+    # ContractSignerService.sign_murabaha). Cancelling a single order out of that
+    # shared group would leave the combined down payment/repayment schedule
+    # inconsistent with the remaining orders, so it isn't supported in this
+    # version — cancel before signing all cart contracts instead.
+    if order.loan_id is not None:
+        sibling_count = await db.scalar(
+            select(func.count()).select_from(Order).where(Order.loan_id == order.loan_id, Order.deleted_at.is_(None))
+        )
+        if sibling_count and sibling_count > 1:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="CART_BUNDLE_CANCEL_NOT_SUPPORTED",
+            )
 
     old_status = order.status
     order.status = OrderState.CANCELLED

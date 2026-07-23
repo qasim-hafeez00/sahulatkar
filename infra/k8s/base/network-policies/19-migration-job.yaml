@@ -1,0 +1,21 @@
+# alembic-migrate: the pre-upgrade migration Job (migration-job.yaml) only
+# needs egress to pgbouncer to run `alembic upgrade head`; it receives no
+# ingress traffic at all (it's a Job, not a long-running server).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-migration-job
+spec:
+  podSelector:
+    matchLabels:
+      app: alembic-migrate
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432

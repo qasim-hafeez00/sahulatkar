@@ -303,9 +303,13 @@ class ProductExtractionService:
         finally:
             await self.redis.redis.delete(lock_key)
 
-    async def get_job_status(self, job_id: UUID) -> JobStatusResponse:
+    async def get_job_status(self, job_id: UUID, current_user_id: int) -> JobStatusResponse:
         job = await self.scraping_job_repo.find_by_uuid(job_id)
-        if job is None:
+        # Return 404 (not 403) for jobs owned by someone else, or jobs with no
+        # owner at all, so an authenticated caller can't distinguish "this
+        # job doesn't exist" from "this job exists but isn't yours" and use
+        # that to enumerate other users' job ids.
+        if job is None or job.user_id != current_user_id:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="JOB_NOT_FOUND")
 
         upo = None

@@ -212,7 +212,7 @@ async def test_extract_async_job_is_deduped(client, db_session, monkeypatch, use
 
 
 @pytest.mark.asyncio
-async def test_job_status_returns_completed_payload(client, db_session):
+async def test_job_status_returns_completed_payload(client, db_session, user_header):
     product = Product(
         name="Worker Product",
         url="https://example.com/a",
@@ -229,7 +229,10 @@ async def test_job_status_returns_completed_payload(client, db_session):
     db_session.add(product)
     await db_session.flush()
 
+    # user_header authenticates as user 101; the job must be owned by that
+    # same user for the polling call below to be allowed to see it.
     job = ScrapingJob(
+        user_id=101,
         input_url="https://example.com/a",
         canonical_url="https://example.com/a",
         platform_detected="CUSTOM",
@@ -240,7 +243,7 @@ async def test_job_status_returns_completed_payload(client, db_session):
     db_session.add(job)
     await db_session.commit()
 
-    res = await client.get(f"/api/v1/products/jobs/{job.uuid}")
+    res = await client.get(f"/api/v1/products/jobs/{job.uuid}", headers=user_header)
     assert res.status_code == 200
     payload = res.json()
     assert payload["status"] == "completed"
@@ -248,9 +251,10 @@ async def test_job_status_returns_completed_payload(client, db_session):
 
 
 @pytest.mark.asyncio
-async def test_queue_checkout_job_enqueues_and_persists(client, db_session, redis_mock):
+async def test_queue_checkout_job_enqueues_and_persists(client, db_session, redis_mock, service_header):
     response = await client.post(
         "/api/v1/products/agent/queue-job",
+        headers=service_header,
         json={
             "order_id": 9001,
             "vcn_id": 7001,
@@ -271,6 +275,19 @@ async def test_queue_checkout_job_enqueues_and_persists(client, db_session, redi
 
     queued_items = await redis_mock.redis.lrange(QueueName.CHECKOUT, 0, -1)
     assert len(queued_items) == 1
+
+
+@pytest.mark.asyncio
+async def test_queue_checkout_job_requires_service_token(client):
+    # Phase 0 security regression: this endpoint previously had no auth
+    # dependency at all, unlike every sibling endpoint in agent.py — any caller
+    # could trigger a real automated purchase for an arbitrary order.
+    response = await client.post(
+        "/api/v1/products/agent/queue-job",
+        json={"order_id": 9002, "vcn_id": 7002},
+    )
+    assert response.status_code == 403
+    assert response.json()["detail"] == "INVALID_SERVICE_TOKEN"
 
 
 @pytest.mark.asyncio

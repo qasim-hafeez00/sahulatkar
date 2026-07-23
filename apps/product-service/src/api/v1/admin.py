@@ -15,7 +15,7 @@ from pydantic import BaseModel
 from sk_shared.redis_client import RedisClient
 from sk_shared.models.product import ScrapingJob, Product, Merchant
 
-from src.core.dependencies import get_client_ip, get_db, get_redis, require_service_token
+from src.core.dependencies import get_client_ip, get_current_admin_id, get_db, get_redis, require_service_token
 from src.repositories.execution_repository import ExecutionRepository
 from src.repositories.merchant_repository import MerchantRepository
 from src.repositories.product_repository import ProductRepository
@@ -181,6 +181,7 @@ async def patch_product(
     payload: AdminProductPatchRequest,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
+    admin_id: int | None = Depends(get_current_admin_id),
 ):
     product_repo = ProductRepository(db)
     product = await product_repo.find_by_uuid(product_uuid)
@@ -189,18 +190,19 @@ async def patch_product(
 
     service = ProductCatalogService(db)
     old_values = {k: getattr(product, k) for k in payload.model_dump(exclude_unset=True).keys()}
-    
+
     updated = await service.patch_product(product, **payload.model_dump(exclude_unset=True))
-    
+
     audit = AuditService(db)
     await audit.log_action(
-        admin_user_id=1,
+        admin_user_id=admin_id,
         action="patch_product",
         target_id=product.id,
         changes={"before": str(old_values), "after": str(payload.model_dump(exclude_unset=True))},
         ip_address=get_client_ip(request),
     )
-    
+    await db.commit()
+
     return {
         "uuid": str(updated.uuid),
         "name": updated.name,
@@ -218,6 +220,7 @@ async def prohibit_product(
     payload: ProhibitProductRequest = Body(default_factory=ProhibitProductRequest),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
+    admin_id: int | None = Depends(get_current_admin_id),
 ):
     repo = ProductRepository(db)
     product = await repo.find_by_uuid(product_uuid)
@@ -229,12 +232,13 @@ async def prohibit_product(
 
     audit = AuditService(db)
     await audit.log_action(
-        admin_user_id=1,
+        admin_user_id=admin_id,
         action="prohibit_product",
         target_id=product.id,
         changes={"reason": payload.reason},
         ip_address=get_client_ip(request),
     )
+    await db.commit()
 
     return AdminProductActionResponse(status="prohibited", product_id=str(product.uuid))
 
@@ -261,6 +265,7 @@ async def delete_product(
     product_uuid: UUID,
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
+    admin_id: int | None = Depends(get_current_admin_id),
 ):
     repo = ProductRepository(db)
     product = await repo.find_by_uuid(product_uuid)
@@ -272,11 +277,12 @@ async def delete_product(
 
     audit = AuditService(db)
     await audit.log_action(
-        admin_user_id=1,
+        admin_user_id=admin_id,
         action="delete_product",
         target_id=product.id,
         ip_address=get_client_ip(request),
     )
+    await db.commit()
 
     return AdminProductActionResponse(status="deleted", product_id=str(product.uuid))
 
@@ -526,20 +532,34 @@ async def block_merchant(
     reason: str = Query(...),
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
+    admin_id: int | None = Depends(get_current_admin_id),
 ):
     service = MerchantService(db)
     merchant, affected = await service.block(domain, reason)
-    
+
     audit = AuditService(db)
     await audit.log_action(
-        admin_user_id=1,
+        admin_user_id=admin_id,
         action="block_merchant",
         target_id=merchant.id,
         changes={"domain": domain, "reason": reason, "affected_products": affected},
         ip_address=get_client_ip(request),
     )
-    
+    await db.commit()
+
     return MerchantBlockResponse(status="blocked", domain=domain, affected_products=affected)
+
+
+_REDACTED_ENTRY_KEYS = ("pan", "cvv")
+
+
+def _redact_sensitive_fields(entry: dict) -> dict:
+    """Strip card data from a DLQ entry before it's ever returned by an API response.
+
+    Defense in depth: the checkout queue payload no longer carries pan/cvv at all,
+    but this guards against any stale or malformed messages already in Redis.
+    """
+    return {k: v for k, v in entry.items() if k not in _REDACTED_ENTRY_KEYS}
 
 
 @router.get("/queue-stats", response_model=QueueStatsResponse)
@@ -549,18 +569,18 @@ async def get_queue_stats(
 ):
     service = DLQService(redis)
     stats = await service.get_stats()
-    
+
     dlq_checkout = await redis.redis.lrange("sk:queue:dlq:checkout", 0, 9)
     dlq_scraping = await redis.redis.lrange("sk:queue:dlq:scraping", 0, 9)
 
-    
+
     return QueueStatsResponse(
         checkout_queue_depth=await redis.redis.llen("sk:queue:checkout"),
         scraping_queue_depth=await redis.redis.llen("sk:queue:scraping"),
         checkout_dlq_depth=stats.get("checkout", 0),
         scraping_dlq_depth=stats.get("scraping", 0),
-        checkout_dlq_entries=[json.loads(e) for e in dlq_checkout],
-        scraping_dlq_entries=[json.loads(e) for e in dlq_scraping],
+        checkout_dlq_entries=[_redact_sensitive_fields(json.loads(e)) for e in dlq_checkout],
+        scraping_dlq_entries=[_redact_sensitive_fields(json.loads(e)) for e in dlq_scraping],
     )
 
 @router.post("/dlq/{queue_name}/reprocess/{index}", response_model=DlqReprocessResponse)

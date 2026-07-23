@@ -1,0 +1,20 @@
+# Standalone Kustomize root for the monitoring add-on. Deliberately NOT
+# referenced from infra/k8s/base/kustomization.yaml or the staging/
+# production overlays — see README.md "Why this isn't wired into the app
+# Kustomize tree" for the reasoning (namespace-transformer conflicts +
+# different lifecycle from app releases). Apply directly:
+#
+#   kubectl apply -k infra/k8s/base/monitoring
+#
+# AFTER kube-prometheus-stack's CRDs are installed via Helm (README.md has
+# the exact command) — this only contains the raw manifests that layer on
+# top of the Helm release (namespace, PrometheusRule, dashboard ConfigMap).
+# prometheus-values.yaml is Helm values, not a Kubernetes resource, so it is
+# intentionally not listed as a kustomize resource here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - namespace.yaml
+  - alert-rules.yaml
+  - grafana-dashboard-golden-signals.yaml

@@ -26,6 +26,7 @@ async def queue_checkout_job(
     request_payload: AgentQueueRequest,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: None = Depends(require_service_token),
 ):
     service = CheckoutAgentService(db, redis)
     execution = await service.queue_job(

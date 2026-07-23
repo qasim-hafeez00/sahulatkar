@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { ArrowLeft, Calendar, Phone, ShieldAlert, UserCircle2 } from 'lucide-react';
-import { adminApi } from '@/lib/api-client';
+import { adminApiServer, GatewayRequestError } from '@/lib/admin-api-server';
 
 type UserDetailResponse = {
   requested_by: {
@@ -31,9 +31,15 @@ function formatDate(value: string | null) {
 
 export default async function UserDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const response = await adminApi
+  // Only a genuine 404 means "this user doesn't exist" -- any other
+  // failure (network error, 5xx, auth) should surface as a real error
+  // instead of being silently repainted as a misleading "not found" state.
+  const response = await adminApiServer
     .get<UserDetailResponse>(`/admin/users/${id}`)
-    .catch(() => null);
+    .catch((err) => {
+      if (err instanceof GatewayRequestError && err.status === 404) return null;
+      throw err;
+    });
 
   if (!response?.user) {
     return (

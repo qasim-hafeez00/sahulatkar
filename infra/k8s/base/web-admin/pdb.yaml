@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: web-admin
+  labels:
+    app: web-admin
+    component: frontend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: web-admin

@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { ArrowLeft, Calendar, Landmark, ReceiptText, TriangleAlert } from 'lucide-react';
-import { adminApi } from '@/lib/api-client';
+import { adminApiServer, GatewayRequestError } from '@/lib/admin-api-server';
 
 type PaymentDetailResponse = {
   id: number;
@@ -36,7 +36,15 @@ function formatAmount(currency: string, value: number) {
 
 export default async function PaymentDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const response = await adminApi.get<PaymentDetailResponse | { error: string }>(`/admin/payments/${id}`).catch(() => null);
+  // Only a genuine 404 means "this payment doesn't exist" -- any other
+  // failure (network error, 5xx, auth) should surface as a real error
+  // instead of being silently repainted as a misleading "not found" state.
+  const response = await adminApiServer
+    .get<PaymentDetailResponse | { error: string }>(`/admin/payments/${id}`)
+    .catch((err) => {
+      if (err instanceof GatewayRequestError && err.status === 404) return null;
+      throw err;
+    });
 
   if (!response || 'error' in response) {
     return (

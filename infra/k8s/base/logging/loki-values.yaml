@@ -1,0 +1,79 @@
+# Helm values for the `grafana/loki` chart, run in SingleBinary deployment
+# mode. This scale (5 backend services + 2 frontends + pgbouncer, one
+# small-to-mid EKS cluster per environment) does not warrant the full
+# read/write/backend microservices (SimpleScalable/Distributed) topology —
+# that's built for multi-tenant, high-cardinality, many-cluster setups.
+# SingleBinary keeps it to one StatefulSet-backed process per cluster with
+# a PVC for local storage, which is the documented sizing for this range.
+#
+# NOTE: chart schema for grafana/loki has changed across major versions —
+# `helm` is not available in this environment to `helm template` this
+# against the real chart (see README.md "Validation" for what was and
+# wasn't possible to check locally). Run
+#   helm show values grafana/loki --version <pinned-version>
+# and diff against this file before the first real install, and pin an
+# exact chart version in the `helm install` command in README.md rather
+# than floating on `latest`.
+
+loki:
+  auth_enabled: false
+  commonConfig:
+    replication_factor: 1
+  storage:
+    type: filesystem
+  schemaConfig:
+    configs:
+      - from: "2024-01-01"
+        store: tsdb
+        object_store: filesystem
+        schema: v13
+        index:
+          prefix: index_
+          period: 24h
+  limits_config:
+    # Keep footprint small — 7 days of container logs is enough to debug an
+    # incident without needing S3-backed long-term retention for a first
+    # pass. Revisit if/when the existing infra/terraform/modules/s3 module
+    # is used to back Loki with object storage instead of the PVC below.
+    retention_period: 168h
+    ingestion_rate_mb: 8
+    ingestion_burst_size_mb: 16
+
+deploymentMode: SingleBinary
+
+singleBinary:
+  replicas: 1
+  resources:
+    requests:
+      cpu: 200m
+      memory: 512Mi
+    limits:
+      cpu: 1000m
+      memory: 1Gi
+  persistence:
+    enabled: true
+    size: 20Gi
+
+# SingleBinary mode doesn't use the read/write/backend split or the nginx
+# gateway in front of them — Grafana's Loki datasource (wired in
+# infra/k8s/base/monitoring/prometheus-values.yaml) talks directly to the
+# `loki.logging.svc.cluster.local:3100` service.
+gateway:
+  enabled: false
+read:
+  replicas: 0
+write:
+  replicas: 0
+backend:
+  replicas: 0
+
+monitoring:
+  serviceMonitor:
+    enabled: false
+  selfMonitoring:
+    enabled: false
+  lokiCanary:
+    enabled: false
+
+test:
+  enabled: false

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
+
 from fastapi import APIRouter, Depends, Query
 from fastapi import HTTPException, status
-from sqlalchemy import select, text
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
@@ -257,4 +259,160 @@ async def reconciliation_summary(
         "total_transactions": int(row["total_txns"] or 0),
         "reconciled_transactions": int(row["reconciled_txns"] or 0),
         "unreconciled_transactions": int(row["unreconciled_txns"] or 0),
+    }
+
+
+# ============================================================================
+# Module 8 — critical-action feed, regulatory calendar, data-privacy panel
+# ============================================================================
+
+
+@router.get("/critical-actions")
+async def critical_actions_feed(
+    page: int = Query(default=1, ge=1),
+    limit: int = Query(default=50, ge=1, le=200),
+    current_admin: AdminUser = Depends(RequirePermission("read_audit")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    offset = (page - 1) * limit
+    rows = (
+        await db.execute(
+            select(AuditTrail)
+            .where(AuditTrail.severity == "critical")
+            .order_by(AuditTrail.created_at.desc())
+            .offset(offset)
+            .limit(limit)
+        )
+    ).scalars().all()
+    total = int(
+        await db.scalar(
+            select(func.count()).select_from(AuditTrail).where(AuditTrail.severity == "critical")
+        )
+        or 0
+    )
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "admin_user_id": row.admin_user_id,
+                "customer_user_id": row.customer_user_id,
+                "module": row.module,
+                "action": row.action,
+                "target_id": row.target_id,
+                "changes": row.changes,
+                "created_at": _iso(row.created_at),
+            }
+            for row in rows
+        ],
+        "pagination": {"page": page, "limit": limit, "total": total},
+    }
+
+
+# Regulatory filing cadence (days between filings) for each report_type the
+# regulatory_reports.report_type CHECK constraint allows.
+_FILING_CADENCE_DAYS = {
+    "monthly_bnpl": 30,
+    "annual_kyc": 365,
+    "aml_sar": 30,
+    "secp_return": 90,
+    "sbp_rcd1": 30,
+    "fbr_gst3": 30,
+}
+
+
+@router.get("/regulatory-calendar")
+async def regulatory_calendar(
+    current_admin: AdminUser = Depends(RequirePermission("read_compliance")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT DISTINCT ON (report_type) report_type, period, generated_at, submitted_at, reference_number
+                FROM regulatory_reports
+                ORDER BY report_type, generated_at DESC
+                """
+            )
+        )
+    ).mappings().all()
+    latest_by_type = {r["report_type"]: r for r in rows}
+
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
+    calendar = []
+    for report_type, cadence_days in _FILING_CADENCE_DAYS.items():
+        latest = latest_by_type.get(report_type)
+        last_filed_at = latest["generated_at"] if latest else None
+        next_due = (last_filed_at + timedelta(days=cadence_days)) if last_filed_at else now
+        calendar.append(
+            {
+                "report_type": report_type,
+                "cadence_days": cadence_days,
+                "last_filed_at": _iso(last_filed_at),
+                "last_reference_number": latest["reference_number"] if latest else None,
+                "next_due_at": _iso(next_due),
+                "status": "overdue" if next_due < now else "upcoming",
+            }
+        )
+
+    return {"calendar": sorted(calendar, key=lambda c: c["next_due_at"])}
+
+
+@router.get("/data-privacy")
+async def data_privacy_panel(
+    current_admin: AdminUser = Depends(RequirePermission("read_compliance")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    deletion_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT status, COUNT(*) AS cnt
+                FROM data_deletion_requests
+                GROUP BY status
+                """
+            )
+        )
+    ).mappings().all()
+    consent_rows = (
+        await db.execute(
+            text(
+                """
+                SELECT consent_type, decision, COUNT(*) AS cnt
+                FROM user_consent_records
+                GROUP BY consent_type, decision
+                """
+            )
+        )
+    ).mappings().all()
+    recent_requests = (
+        await db.execute(
+            text(
+                """
+                SELECT id, user_id, request_type, status, created_at
+                FROM data_deletion_requests
+                ORDER BY created_at DESC
+                LIMIT 10
+                """
+            )
+        )
+    ).mappings().all()
+
+    consent_summary: dict = {}
+    for r in consent_rows:
+        consent_summary.setdefault(r["consent_type"], {})[r["decision"]] = int(r["cnt"])
+
+    return {
+        "deletion_requests_by_status": {r["status"]: int(r["cnt"]) for r in deletion_rows},
+        "consent_summary": consent_summary,
+        "recent_deletion_requests": [
+            {
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "request_type": r["request_type"],
+                "status": r["status"],
+                "created_at": _iso(r["created_at"]),
+            }
+            for r in recent_requests
+        ],
     }

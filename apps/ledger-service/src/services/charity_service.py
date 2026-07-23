@@ -4,6 +4,7 @@ from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 import logging
+from uuid import uuid4
 
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +22,14 @@ logger = logging.getLogger(__name__)
 
 
 class CharityService:
+    # P1: distributed lock guarding process_charity_allocation, mirroring
+    # BillingSweepService's lock — without it, two concurrent disbursement
+    # runs (e.g. an admin click racing the scheduled sweep) can both read the
+    # same pending allocations and both post a charity disbursement GL entry
+    # for them, double-disbursing the same money.
+    LOCK_KEY = "ledger:charity_disbursement:lock"
+    LOCK_TTL_SECONDS = 600
+
     def __init__(self, db_session: AsyncSession, redis: RedisClient | None = None) -> None:
         self.db = db_session
         self.redis = redis
@@ -163,7 +172,37 @@ class CharityService:
         3. Verifies charity_payable GL balance covers the total.
         4. Records the charity disbursement GL entry.
         5. Marks all allocations as disbursed.
+
+        Guarded by a Redis NX lock (mirroring BillingSweepService) so two
+        concurrent runs can't both read the same pending allocations and both
+        post a disbursement GL entry for them.
         """
+        if self.redis is None:
+            raise RuntimeError("Redis client is mandatory for CharityService to ensure distributed locking.")
+
+        lock_owner = uuid4().hex
+        acquired = await self.redis.redis.set(self.LOCK_KEY, lock_owner, ex=self.LOCK_TTL_SECONDS, nx=True)
+        if not acquired:
+            logger.warning("Charity disbursement lock already held; skipping run")
+            return {
+                "status": "locked",
+                "disbursed_count": 0,
+                "total_amount": 0.0,
+                "message": "Another charity disbursement run is already in progress.",
+            }
+
+        try:
+            return await self._process_charity_allocation_locked(payment_reference, receipt_s3)
+        finally:
+            current_owner = await self.redis.get(self.LOCK_KEY)
+            if isinstance(current_owner, bytes):
+                current_owner = current_owner.decode("utf-8")
+            if current_owner == lock_owner:
+                await self.redis.delete(self.LOCK_KEY)
+
+    async def _process_charity_allocation_locked(
+        self, payment_reference: str | None, receipt_s3: str | None
+    ) -> dict[str, object]:
         pending = await self.get_pending_disbursements()
         if not pending:
             return {

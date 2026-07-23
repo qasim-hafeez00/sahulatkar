@@ -17,7 +17,7 @@ dependencies = [
     "prometheus-fastapi-instrumentator>=6.1.0",
     "passlib[bcrypt]>=1.7.4",
     "python-multipart>=0.0.9",
-    "sk-shared"
+    "sk-shared==0.1.0"
 ]
 
 [project.optional-dependencies]

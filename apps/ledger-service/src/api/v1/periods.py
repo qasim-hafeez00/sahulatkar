@@ -5,9 +5,15 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from src.core.database import get_db
+from src.core.dependencies import RequestContext, require_admin_role
 from src.services.period_service import PeriodService
 
 router = APIRouter(prefix="/periods", tags=["Periods"])
+
+_READ_ROLES = ["finance_analyst", "super_admin"]
+# Period close/reopen mirrors finance.py's super_admin-only gate for the same
+# operations under /admin/finance/periods/*.
+_WRITE_ROLES = ["super_admin"]
 
 
 class PeriodCloseRequest(BaseModel):
@@ -18,6 +24,7 @@ class PeriodCloseRequest(BaseModel):
 async def list_periods(
     limit: int = Query(12, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """List accounting periods and their statuses."""
     service = PeriodService(db)
@@ -46,6 +53,7 @@ async def close_period(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     __: bool = Depends(rate_limit_admin_writes),
+    _: RequestContext = Depends(require_admin_role(_WRITE_ROLES)),
 ):
     """Close an accounting period to prevent further postings."""
     service = PeriodService(db)
@@ -63,6 +71,7 @@ async def reopen_period(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     __: bool = Depends(rate_limit_admin_writes),
+    _: RequestContext = Depends(require_admin_role(_WRITE_ROLES)),
 ):
     """Reopen a closed accounting period (use with caution)."""
     service = PeriodService(db)

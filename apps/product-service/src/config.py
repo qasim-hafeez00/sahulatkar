@@ -1,9 +1,15 @@
 from typing import List, Literal
 import logging
+import os
 from decimal import Decimal
 
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from sk_shared.boot_validation import check_placeholder_credentials, raise_if_placeholder_credentials
+from sk_shared.secrets_manager import SecretsManagerLoadError, load_secrets_manager_overrides
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
@@ -45,6 +51,13 @@ class Settings(BaseSettings):
     CHECKOUT_MAX_RETRIES: int = Field(default=3, ge=0, le=20)
     CHECKOUT_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0.1, le=60.0)
     PRICE_DRIFT_THRESHOLD_PCT: Decimal = Field(default=Decimal("5.0"), ge=Decimal("0"), le=Decimal("100"))
+    # Coarser than PRICE_DRIFT_THRESHOLD_PCT (checkout-time re-verification): this
+    # is a sanity cross-check between the LLM-based Tier 3 extractor's price and
+    # an earlier tier's independent (even if below-confidence-threshold) price
+    # candidate, to catch a manipulated/hallucinated LLM price before it becomes
+    # the purchase cost basis. Tiers can legitimately disagree more than 5% due
+    # to rounding/currency display, so this tolerance is intentionally wider.
+    TIER3_PRICE_CROSSCHECK_TOLERANCE_PCT: Decimal = Field(default=Decimal("35.0"), ge=Decimal("0"), le=Decimal("500"))
     HITL_SLA_MINUTES: int = Field(default=15, ge=1, le=1440)
     MIN_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("1"), ge=Decimal("0"))
     MAX_PRODUCT_PRICE_PKR: Decimal = Field(default=Decimal("200000"), ge=Decimal("1"))
@@ -80,6 +93,11 @@ class Settings(BaseSettings):
     INTERNAL_SERVICE_TOKEN: str = "dev-secret-token"
     JWT_PUBLIC_KEY: str = ""
 
+    # Payment Orchestrator internal API — used by the checkout agent to fetch
+    # plaintext VCN PAN/CVV just-in-time instead of carrying card data through
+    # Redis queues/DLQ (see PO's require_internal_token, header "X-Internal-Token").
+    PAYMENT_ORCHESTRATOR_URL: str = "http://payment-orchestrator:8000"
+
     INTERNAL_HTTP_CONNECT_TIMEOUT_SECONDS: float = Field(default=5.0, ge=0.1, le=30.0)
     INTERNAL_HTTP_READ_TIMEOUT_SECONDS: float = Field(default=30.0, ge=1.0, le=300.0)
 
@@ -87,8 +105,18 @@ class Settings(BaseSettings):
     def _validate_runtime_constraints(self):
         if self.MIN_PRODUCT_PRICE_PKR > self.MAX_PRODUCT_PRICE_PKR:
             raise ValueError("MIN_PRODUCT_PRICE_PKR cannot be greater than MAX_PRODUCT_PRICE_PKR")
-        if self.ENVIRONMENT != "local" and self.INTERNAL_SERVICE_TOKEN == "dev-secret-token":
-            raise ValueError("INTERNAL_SERVICE_TOKEN must be changed outside local environment")
+        # Fail fast at Settings construction if the internal service token is
+        # still the local-only placeholder outside the local environment.
+        # Delegates to the shared-kernel "still at placeholder" rule instead
+        # of reimplementing the comparison here (see also
+        # `validate_critical_settings()` below, which covers the broader set
+        # of external-service credentials at application boot).
+        errors = check_placeholder_credentials(
+            [("INTERNAL_SERVICE_TOKEN", self.INTERNAL_SERVICE_TOKEN, "dev-secret-token")],
+            environment=self.ENVIRONMENT,
+        )
+        if errors:
+            raise ValueError(errors[0])
         return self
 
     @property
@@ -102,4 +130,88 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 
-settings = Settings()
+# AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md): credential
+# fields only -- not feature flags, price thresholds, or the Shariah
+# category/domain lists. Keys are the dash-case Secrets Manager suffix under
+# "product-service/<environment>/", values are the exact Settings field name.
+_SECRETS_MANAGER_FIELD_MAP = {
+    "database-url": "DATABASE_URL",
+    "redis-url": "REDIS_URL",
+    "rye-api-key": "RYE_API_KEY",
+    "violet-api-key": "VIOLET_API_KEY",
+    "groq-api-key": "GROQ_API_KEY",
+    "openai-api-key": "OPENAI_API_KEY",
+    "brightdata-proxy-url": "BRIGHTDATA_PROXY_URL",
+    "captcha-api-key": "CAPTCHA_API_KEY",
+    "fernet-key": "FERNET_KEY",
+    "internal-service-token": "INTERNAL_SERVICE_TOKEN",
+    "jwt-public-key": "JWT_PUBLIC_KEY",
+}
+
+
+def get_settings() -> Settings:
+    """Get settings, trying AWS Secrets Manager first, then env vars/.env.
+
+    Same fallback contract as every other service (see
+    docs/SECRETS_MANAGER_MIGRATION.md and gateway's src/config.py): only
+    attempts Secrets Manager when AWS_REGION is set, and falls back to plain
+    env vars/.env on any failure so local/test runs (no AWS_REGION) are
+    unaffected.
+    """
+    if os.getenv("AWS_REGION"):
+        try:
+            overrides = load_secrets_manager_overrides(
+                service_prefix="product-service",
+                environment=os.getenv("ENVIRONMENT", "prod"),
+                secret_field_map=_SECRETS_MANAGER_FIELD_MAP,
+                region=os.getenv("AWS_REGION"),
+            )
+            return Settings(**overrides)
+        except SecretsManagerLoadError as exc:
+            logger.warning(
+                "Failed to load settings from AWS Secrets Manager, falling back to env vars/.env: %s",
+                exc,
+            )
+
+    return Settings()
+
+
+settings = get_settings()
+
+
+def validate_critical_settings() -> None:
+    """Abort startup outside `local` if required external credentials are
+    still missing or at their insecure/dev-only placeholder defaults.
+
+    product-service calls out to several metered, costed third-party APIs
+    per extraction request (Rye API, BrightData proxy, Groq/GPT-4o Vision)
+    and stores screenshots/product images in S3 -- booting without real
+    credentials for these outside `local` means either silently degraded
+    extraction tiers or requests failing well after boot instead of at
+    startup, where it's easiest to catch. Delegates to the shared-kernel
+    boot validator (`sk_shared.boot_validation`) instead of duplicating the
+    "still equal to placeholder" comparison per setting.
+
+    RYE_API_KEY is only checked when FEATURE_RYE_ENABLED is set -- the flag
+    already defaults to False (Rye is an optional extraction tier gated by
+    `not settings.FEATURE_RYE_ENABLED or not settings.RYE_API_KEY` in
+    extraction_waterfall.py), so requiring the key unconditionally would
+    make every non-local deployment that intentionally leaves Rye disabled
+    fail to boot.
+    """
+    checks: list[tuple[str, object, object]] = [
+        ("BRIGHTDATA_PROXY_URL", settings.BRIGHTDATA_PROXY_URL, ""),
+        ("GROQ_API_KEY", settings.GROQ_API_KEY, ""),
+        ("INTERNAL_SERVICE_TOKEN", settings.INTERNAL_SERVICE_TOKEN, "dev-secret-token"),
+        ("S3_BUCKET_SCREENSHOTS", settings.S3_BUCKET_SCREENSHOTS, "sk-screenshots-dev"),
+        ("PRODUCT_IMAGE_BUCKET", settings.PRODUCT_IMAGE_BUCKET, "sk-product-images-dev"),
+    ]
+    if settings.FEATURE_RYE_ENABLED:
+        checks.append(("RYE_API_KEY", settings.RYE_API_KEY, ""))
+
+    raise_if_placeholder_credentials(
+        checks,
+        environment=settings.ENVIRONMENT,
+        settings_obj=settings,
+        error_prefix="PRODUCT_SERVICE_CONFIG_VALIDATION_FAILED",
+    )

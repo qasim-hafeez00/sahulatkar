@@ -14,7 +14,7 @@ dependencies = [
     "cryptography>=42.0.0",
     "prometheus-client>=0.20.0",
     "python-json-logger>=2.0.7",
-    "sk-shared",
+    "sk-shared==0.1.0",
 ]
 
 [project.optional-dependencies]
@@ -40,4 +40,4 @@ pythonpath = ["src"]
 
 [tool.coverage.run]
 source = ["src"]
-omit = ["tests/*", "src/workers/*"]
+omit = ["tests/*"]

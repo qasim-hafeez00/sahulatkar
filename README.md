@@ -49,9 +49,16 @@ This is a monorepo containing everything from the frontend web apps to the infra
 - **`scripts/`**: Utility scripts for data seeding, dev setups, and ad-hoc operations.
 
 ### Documentation & Specifications
-- **`MASTER_PLAN.md` & `MASTER_PLAN_DETAILED.md`**: Core reference documents defining implementation phases, constraints, architectures, and guidelines. (Required to be injected into LLM chat sessions).
-- **`System-md-files/`**: System module specifications (M01-M12).
-- **`docs/`**: Generated system API documentation and runbooks.
+All documentation lives under **[`docs/`](docs/)**:
+- **`docs/MASTER_PLAN.md` & `docs/MASTER_PLAN_DETAILED.md`**: Core reference documents defining implementation phases, constraints, architectures, and guidelines. (Required to be injected into LLM chat sessions).
+- **`docs/System-md-files/`**: System module specifications (M01-M12).
+- **`docs/audits/`**: Per-service engineering audits plus the global system audit.
+- **`docs/Sahulatkar-docs/`**: Research documents (admin ops, DB design, KYC/fraud, payment/delivery, URL pipeline).
+- **`docs/plan.md`**: Backend/platform production implementation plan.
+- **`docs/PRODUCTION_GAPS_REPORT.md`**: Outstanding production-readiness gaps.
+- **`docs/DATABASE_GUIDE.md`**, **`docs/SECRETS_MANAGER_MIGRATION.md`**: Operational runbooks.
+- **`docs/mutation-testing/`**: Mutation-testing assignment report and reference artifacts.
+- **`docs/TODO.md`**: Cross-cutting backlog items not yet scheduled into a phase.
 
 ---
 
@@ -152,8 +159,8 @@ python -m mutmut html
 
 ### Report locations
 
-- Baseline HTML report: `mutation-testing/reports/mutation_baseline/html_latest/`
-- Final HTML report: `mutation-testing/reports/mutation_final/html_latest/`
+- Baseline HTML report: `docs/mutation-testing/reports/mutation_baseline/html_latest/`
+- Final HTML report: `docs/mutation-testing/reports/mutation_final/html_latest/`
 
 ### Notes
 

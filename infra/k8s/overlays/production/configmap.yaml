@@ -1,0 +1,16 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sk-app-config
+data:
+  environment: "production"
+  log_level: "INFO"
+  gateway_public_url: "https://api.sahulatkar.com"
+  # AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md): setting
+  # AWS_REGION makes each service's src/config.py::get_settings() attempt to
+  # load its credential fields from Secrets Manager first (see
+  # sk_shared.secrets_manager.load_secrets_manager_overrides), falling back to
+  # the secretKeyRef-sourced env vars below on any failure. Rollback: remove
+  # this key (or `kubectl set env deployment/<svc> AWS_REGION- -n sk-production`)
+  # to force every service back to env-var-only config with zero code changes.
+  aws_region: "ap-south-1"

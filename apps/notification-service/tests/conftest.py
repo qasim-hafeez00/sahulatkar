@@ -125,7 +125,23 @@ def user_header() -> dict[str, str]:
 
 @pytest.fixture
 def admin_header() -> dict[str, str]:
-    return {"x-admin-role": "operations_manager"}
+    """A validly-signed admin assertion for `operations_manager` with full permissions.
+
+    Mirrors what the Gateway mints via InternalServiceClient.notification_admin_headers
+    after authenticating the admin itself — tests can no longer just set the raw
+    X-Admin-Role/X-Admin-Permissions headers, since those are no longer trusted.
+    """
+    from sk_shared.security import create_signed_assertion
+
+    assertion = create_signed_assertion(
+        {
+            "admin_id": 1,
+            "role": "operations_manager",
+            "permissions": ["admin:notifications:read", "admin:notifications:write"],
+        },
+        secret=settings.INTERNAL_API_KEY,
+    )
+    return {"x-admin-assertion": assertion}
 
 
 async def seed_couriers(session: AsyncSession) -> None:

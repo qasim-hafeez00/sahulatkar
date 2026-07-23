@@ -25,6 +25,7 @@ class WakalahGenerateResponse(BaseModel):
     authorized_amount: float
     valid_until: datetime
     otp_sent: bool
+    dev_otp: Optional[str] = Field(default=None, description="[DEV ONLY] OTP code — not present in production")
 
 
 class WakalahSignRequest(BaseModel):
@@ -43,6 +44,7 @@ class MurabahaGenerateResponse(BaseModel):
     contract_number: str
     disclosure: ContractDisclosure
     otp_sent: bool
+    dev_otp: Optional[str] = Field(default=None, description="[DEV ONLY] OTP code — not present in production")
 
 
 class MurabahaSignRequest(BaseModel):

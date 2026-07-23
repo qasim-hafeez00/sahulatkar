@@ -1,0 +1,50 @@
+# ledger-service: no confirmed direct pod-to-pod HTTP caller in the current
+# code (it publishes billing/overdue events to Redis pub/sub for
+# notification-service to consume — apps/ledger-service/src/events/
+# publisher.py — rather than calling any service by HTTP). Ingress from
+# gateway is allowed as the standard internal-API-mesh default (matches the
+# gateway-as-hub pattern used for every other backend) in case/when admin
+# ledger views call it directly; safe to leave allowed even if unused today.
+# It also calls the Tasdeeq credit-bureau API over HTTPS
+# (services/tasdeeq_service.py).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ledger-service
+spec:
+  podSelector:
+    matchLabels:
+      app: ledger-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432
+    # ASSUMPTION: Redis is external (see 10-gateway.yaml note).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Tasdeeq bureau API + generic HTTPS egress headroom.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

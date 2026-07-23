@@ -1,0 +1,15 @@
+# Baseline default-deny for the namespace: every pod (podSelector: {} matches
+# all pods) has both Ingress and Egress locked down unless an explicit allow
+# policy in this directory says otherwise. NetworkPolicy semantics are
+# additive/OR'd across all policies that select a given pod, so the specific
+# allow-* policies alongside this file layer permitted traffic back in per
+# service without needing to touch this file again.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress

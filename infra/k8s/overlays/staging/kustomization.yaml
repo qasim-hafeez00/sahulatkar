@@ -1,0 +1,43 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: sk-staging
+
+resources:
+  - ../../base
+  - configmap.yaml
+  - secrets.yaml
+  - ingress.yaml
+  - resource-quota.yaml
+
+# NOTE: cluster-issuer.yaml in this directory is deliberately NOT listed
+# above - it is a cluster-scoped ClusterIssuer, and kustomize's namespace
+# transformer would incorrectly stamp it with `namespace: sk-staging`. Apply
+# it separately, once per cluster, via:
+#   kubectl apply -f infra/k8s/overlays/staging/cluster-issuer.yaml
+# See the comment at the top of that file for details.
+
+patches:
+  - path: hpa-min-replicas-patch.yaml
+
+# Staging runs a single replica per workload to keep cost down; production
+# keeps the base manifests' HA replica counts.
+replicas:
+  - name: gateway
+    count: 1
+  - name: product-service
+    count: 1
+  - name: credit-engine
+    count: 1
+  - name: payment-orchestrator
+    count: 1
+  - name: ledger-service
+    count: 1
+  - name: notification-service
+    count: 1
+  - name: web-admin
+    count: 1
+  - name: web-customer
+    count: 1
+  - name: pgbouncer
+    count: 1

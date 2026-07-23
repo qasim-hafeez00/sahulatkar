@@ -4,6 +4,7 @@ from .auth import User, AdminUser, UserSession, UserDevice, Role, Permission, Ro
 from .kyc import KycStatus, CustomerProfile, UserKycVerification, KycVerificationQueue
 from .product import Merchant, Product, ProhibitedCategory, ProhibitedItemLog, ScrapingJob
 from .order import Order, OrderStatusHistory
+from .cart import Cart, CartItem
 from .contracts import WakalahAgreement, MurabahaContract, ContractDigitalSignature
 from .payment import Loan, Installment, PaymentMethod, PaymentTransaction, Reconciliation, ReconciliationItem, VirtualCard
 from .ledger import LedgerAccount, JournalEntry, JournalEntryLine, LateFeeCharityAllocation, CharityOrganization, LedgerPeriod

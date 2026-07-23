@@ -6,8 +6,10 @@ from pathlib import Path
 import fakeredis.aioredis
 import pytest
 from httpx import ASGITransport, AsyncClient
-from sqlalchemy import select
+from sqlalchemy import BigInteger, select
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
@@ -23,6 +25,35 @@ from src.core.database import get_db
 from src.core.dependencies import get_redis
 
 TEST_DATABASE_URL = os.getenv("LEDGER_TEST_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
+
+# The shared `sk_shared.models` package registers every service's tables onto the
+# same Base.metadata (see audit finding on shared-kernel coupling), so importing
+# `src.main` here pulls in Postgres-only column types (JSONB/ARRAY/TSVECTOR) from
+# other services that SQLite's in-memory test engine can't compile without these.
+@compiles(JSONB, "sqlite")
+def _compile_jsonb_sqlite(_type, _compiler, **_kw):
+    return "JSON"
+
+
+@compiles(ARRAY, "sqlite")
+def _compile_array_sqlite(_type, _compiler, **_kw):
+    return "JSON"
+
+
+try:
+    from sqlalchemy.dialects.postgresql import TSVECTOR
+
+    @compiles(TSVECTOR, "sqlite")
+    def _compile_tsvector_sqlite(_type, _compiler, **_kw):
+        return "TEXT"
+except ImportError:
+    pass
+
+
+@compiles(BigInteger, "sqlite")
+def _compile_bigint_sqlite(_type, _compiler, **_kw):
+    return "INTEGER"
 
 
 @pytest.fixture(scope="function")

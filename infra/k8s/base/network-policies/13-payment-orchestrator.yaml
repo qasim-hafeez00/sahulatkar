@@ -1,0 +1,62 @@
+# payment-orchestrator: gateway calls it to drive down-payment/installment
+# flows over cluster DNS with a signed X-Internal-Token (confirmed by
+# overlays/*/ingress.yaml's own comment: gateway is the sole public front
+# door, product-service/credit-engine/payment-orchestrator/ledger-service/
+# notification-service are intentionally ClusterIP-only, not routed by the
+# Ingress). It posts payment confirmation back to gateway's
+# /internal/payments/{id}/confirm callback. It also owns
+# apps/payment-orchestrator/src/api/v1/webhooks.py and declares
+# STRIPE_WEBHOOK_SECRET/RAAST_WEBHOOK_SECRET, but per the Ingress design
+# those webhook routes are not currently reachable from outside the
+# cluster — no ingress rule targets this Service. No external ingress
+# allowance here; add one (scoped to the ingress-controller's namespace) if
+# a route for this service's webhooks is ever added to ingress.yaml. It
+# calls out to JazzCash/Safepay/Raast/Stripe/EasyPaisa over HTTPS.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-payment-orchestrator
+spec:
+  podSelector:
+    matchLabels:
+      app: payment-orchestrator
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432
+    # ASSUMPTION: Redis is external (see 10-gateway.yaml note).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6379
+    # JazzCash / Safepay / Raast / Stripe / EasyPaisa gateway APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

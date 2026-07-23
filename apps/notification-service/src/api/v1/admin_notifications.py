@@ -1,13 +1,13 @@
-from fastapi import APIRouter, Depends, Query, HTTPException, status
+from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional
 
-from sk_shared.models.notification import Notification, NotificationDispatch, NotificationTemplate, ScheduledNotification, DispatchStatus
+from sk_shared.models.notification import Notification, NotificationDispatch, ScheduledNotification, DispatchStatus
 from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_db, get_redis, require_permissions
 from src.config import settings
-from src.services.notification_service import NotificationService, EVENT_CATEGORY_MAP
+from src.services.notification_service import NotificationService
 import logging
 
 logger = logging.getLogger("admin_notifications")
@@ -124,67 +124,6 @@ async def purge_dlq(
 ):
     await redis.delete(settings.NOTIFICATION_DLQ_KEY)
     return {"status": "ok"}
-
-# ── Templates ───────────────────────────────────────────────────────────────
-
-@router.get("/templates")
-async def list_templates(
-    db: AsyncSession = Depends(get_db),
-    _admin = Depends(require_permissions(["admin:notifications:read"]))
-):
-    templates = (await db.scalars(select(NotificationTemplate))).all()
-    return templates
-
-@router.put("/templates/{template_id}")
-async def update_template(
-    template_id: int,
-    updates: dict,
-    db: AsyncSession = Depends(get_db),
-    x_admin_permissions: str | None = None,
-    _admin = Depends(require_permissions(["admin:notifications:write"]))
-):
-    from fastapi import Header
-    template = await db.get(NotificationTemplate, template_id)
-    if not template:
-        raise HTTPException(404)
-
-    category = EVENT_CATEGORY_MAP.get(template.event_type, "system")
-
-    # NS-BL-07: OTP / auth templates require elevated superadmin permission.
-    # Any content change to an OTP template could be used to exfiltrate codes
-    # (e.g., inject a fraudulent phone number or redirect URL).
-    _is_otp_template = template.event_type.startswith("auth.otp") or template.event_type in (
-        "auth.otp_requested", "auth.otp_contract_sign"
-    )
-    if _is_otp_template:
-        from src.core.dependencies import require_permissions as _rp
-        _superadmin_perms = [p.strip() for p in (x_admin_permissions or "").split(",")]
-        if "admin:notifications:superadmin" not in _superadmin_perms and "all_actions" not in _superadmin_perms:
-            raise HTTPException(
-                status_code=status.HTTP_403_FORBIDDEN,
-                detail="SUPERADMIN_REQUIRED_FOR_OTP_TEMPLATES",
-            )
-
-    # Compliance Guard: If auth or compliance, deactivate and require superadmin review
-    if category in ("auth", "compliance"):
-        template.is_active = False
-        logger.warning(
-            "COMPLIANCE_GUARD_TRIGGERED",
-            extra={
-                "template_id": template_id,
-                "event_type": template.event_type,
-                "action": "DEACTIVATED_FOR_REVIEW",
-            },
-        )
-
-    for k, v in updates.items():
-        if k == "is_active" and category in ("auth", "compliance") and v is True:
-            logger.info("COMPLIANCE_TEMPLATE_REACTIVATED", extra={"template_id": template_id})
-        setattr(template, k, v)
-
-    template.version += 1
-    await db.commit()
-    return template
 
 # ── Scheduled ───────────────────────────────────────────────────────────────
 

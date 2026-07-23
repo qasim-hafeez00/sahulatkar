@@ -47,7 +47,57 @@ _DEFAULTS: dict[str, Any] = {
     "profit_rate_4m": 4.0,
     "profit_rate_6m": 7.0,
     "profit_rate_12m": 15.0,
+    # Credit & underwriting policy (Module 5 — Risk & Fraud)
+    "credit_min_score": 550,
+    "credit_max_dti_ratio": 0.45,
+    "credit_min_income_pkr": 30_000,
+    "credit_min_account_age_days": 7,
+    "credit_max_order_amount_new_user_pkr": 50_000,
+    "credit_auto_approve_score_threshold": 720,
+    "fraud_score_review_threshold": 0.5,
+    "fraud_score_block_threshold": 0.85,
+    "underwriting_sla_hours": 24,
+    # Financial ops (Module 6)
+    "gst_rate_pct": 18.0,
+    "credit_loss_provision_rate_pct": 25.0,
+    # Payment plan configuration (Module 13 — System Settings)
+    "plan_3m_enabled": True,
+    "plan_4m_enabled": True,
+    "plan_6m_enabled": True,
+    "plan_12m_enabled": True,
+    "plan_3m_max_amount_pkr": 100_000,
+    "plan_4m_max_amount_pkr": 150_000,
+    "plan_6m_max_amount_pkr": 250_000,
+    "plan_12m_max_amount_pkr": 500_000,
+    # Fee structure configuration (Module 13 — System Settings)
+    "processing_fee_pct": 1.5,
+    "early_settlement_fee_pct": 2.0,
+    "restructuring_fee_pkr": 1_000,
+    "dishonored_payment_fee_pkr": 500,
 }
+
+PAYMENT_PLAN_KEYS: tuple[str, ...] = (
+    "plan_3m_enabled", "plan_4m_enabled", "plan_6m_enabled", "plan_12m_enabled",
+    "plan_3m_max_amount_pkr", "plan_4m_max_amount_pkr", "plan_6m_max_amount_pkr", "plan_12m_max_amount_pkr",
+    "profit_rate_3m", "profit_rate_4m", "profit_rate_6m", "profit_rate_12m",
+)
+
+FEE_STRUCTURE_KEYS: tuple[str, ...] = (
+    "processing_fee_pct", "early_settlement_fee_pct", "restructuring_fee_pkr",
+    "dishonored_payment_fee_pkr", "late_fee_rate_pkr_per_day",
+)
+
+CREDIT_POLICY_KEYS: tuple[str, ...] = (
+    "credit_min_score",
+    "credit_max_dti_ratio",
+    "credit_min_income_pkr",
+    "credit_min_account_age_days",
+    "credit_max_order_amount_new_user_pkr",
+    "credit_auto_approve_score_threshold",
+    "fraud_score_review_threshold",
+    "fraud_score_block_threshold",
+    "underwriting_sla_hours",
+)
 
 
 @router.get("/parameters")
@@ -175,6 +225,93 @@ async def update_single_parameter(
 
 
 # ============================================================================
+# Module 13 — third-party integrations status/config view
+# ============================================================================
+
+
+@router.get("/integrations")
+async def list_integrations(
+    current_admin: AdminUser = Depends(RequirePermission("manage_system")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, name, category, status, config, last_checked_at, updated_at
+                FROM third_party_integrations
+                ORDER BY category, name
+                """
+            )
+        )
+    ).mappings().all()
+    return {
+        "items": [
+            {
+                "id": r["id"],
+                "name": r["name"],
+                "category": r["category"],
+                "status": r["status"],
+                "config": r["config"],
+                "last_checked_at": r["last_checked_at"].isoformat() if r["last_checked_at"] else None,
+                "updated_at": r["updated_at"].isoformat(),
+            }
+            for r in rows
+        ]
+    }
+
+
+class UpdateIntegrationRequest(BaseModel):
+    status: str = Field(..., pattern="^(not_configured|configured|healthy|degraded|failed)$")
+    config: dict[str, Any] | None = None
+
+
+@router.put("/integrations/{integration_id}")
+async def update_integration(
+    integration_id: int,
+    payload: UpdateIntegrationRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_system")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    existing = await db.execute(text("SELECT id, name FROM third_party_integrations WHERE id = :id"), {"id": integration_id})
+    row = existing.mappings().one_or_none()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="INTEGRATION_NOT_FOUND")
+
+    await db.execute(
+        text(
+            """
+            UPDATE third_party_integrations
+            SET status = :status,
+                config = COALESCE(:config, config),
+                last_checked_at = NOW(),
+                updated_by = :updated_by,
+                updated_at = NOW()
+            WHERE id = :id
+            """
+        ),
+        {
+            "status": payload.status,
+            "config": json.dumps(payload.config) if payload.config is not None else None,
+            "updated_by": current_admin.id,
+            "id": integration_id,
+        },
+    )
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="system",
+        action="integration_status_updated",
+        target_id=integration_id,
+        changes={"name": row["name"], "status": payload.status},
+    )
+    await db.commit()
+    return {"id": integration_id, "status": payload.status}
+
+
+# ============================================================================
 # GAP-15: System Health Dashboard
 # ============================================================================
 
@@ -202,11 +339,51 @@ async def system_health(
     except Exception:
         redis_status = "down"
 
+    # Phase 4 — surface recorded metrics (latest value per metric_name) and
+    # background job queue depth. system_health_metrics has no periodic
+    # writer wired up yet, so this gracefully returns an empty list rather
+    # than fabricating numbers until one exists.
+    metric_rows = []
+    try:
+        metric_rows = (
+            await db.execute(
+                text(
+                    """
+                    SELECT DISTINCT ON (metric_name) metric_name, metric_value, recorded_at
+                    FROM system_health_metrics
+                    ORDER BY metric_name, recorded_at DESC
+                    """
+                )
+            )
+        ).mappings().all()
+    except Exception:
+        metric_rows = []
+
+    queue_depth = int(
+        await db.scalar(text("SELECT COUNT(*) FROM background_jobs WHERE status IN ('queued', 'running')")) or 0
+    )
+    failed_jobs_24h = int(
+        await db.scalar(
+            text("SELECT COUNT(*) FROM background_jobs WHERE status = 'failed' AND enqueued_at >= NOW() - INTERVAL '24 hours'")
+        )
+        or 0
+    )
+
     return {
         "status": "ok" if db_status == "up" and redis_status == "up" else "degraded",
         "components": {
             "database": {"status": db_status},
             "redis": {"status": redis_status},
         },
+        "metrics": [
+            {
+                "metric_name": r["metric_name"],
+                "value": float(r["metric_value"]),
+                "recorded_at": r["recorded_at"].isoformat(),
+            }
+            for r in metric_rows
+        ],
+        "queue_depth": queue_depth,
+        "failed_jobs_24h": failed_jobs_24h,
         "timestamp": datetime.now(timezone.utc).isoformat(),
     }

@@ -9,9 +9,9 @@ type SidebarProps = {
   role?: AdminRole;
 };
 
-export function Sidebar({ role = "super_admin" }: SidebarProps) {
+export function Sidebar({ role }: SidebarProps) {
   const pathname = usePathname();
-  const modules = getVisibleModules(role);
+  const modules = role ? getVisibleModules(role) : [];
   const groups = Array.from(new Set(modules.map((module) => module.group)));
 
   return (

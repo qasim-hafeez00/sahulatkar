@@ -2,6 +2,8 @@ import pytest
 from httpx import AsyncClient
 from sk_shared.redis_client import RedisClient
 
+from src.config import settings
+
 pytestmark = pytest.mark.asyncio
 
 async def test_registration_flow_success(client: AsyncClient, redis_mock: RedisClient):
@@ -15,6 +17,27 @@ async def test_registration_flow_success(client: AsyncClient, redis_mock: RedisC
     data = init_res.json()
     assert "otp_token" in data
     assert "******" in data["masked_phone"]
+    # Non-production environments are allowed to surface the OTP for local testing.
+    assert data["dev_otp"] is not None
+    assert len(data["dev_otp"]) == 6
+
+
+async def test_registration_initiate_does_not_leak_otp_in_production(client: AsyncClient, redis_mock: RedisClient):
+    orig_env = settings.ENVIRONMENT
+    settings.ENVIRONMENT = "production"
+    try:
+        init_res = await client.post("/api/v1/auth/register/initiate", json={
+            "phone": "+923009999999",
+            "first_name": "Prod",
+            "last_name": "User"
+        })
+    finally:
+        settings.ENVIRONMENT = orig_env
+
+    assert init_res.status_code == 200
+    data = init_res.json()
+    assert "otp_token" in data
+    assert data.get("dev_otp") is None
     
     otp_token = data["otp_token"]
     
@@ -50,3 +73,24 @@ async def test_initiate_duplicate_phone(client: AsyncClient, db_setup):
     
     assert init_res.status_code == 409
     assert init_res.json()["detail"] == "PHONE_ALREADY_REGISTERED"
+
+
+async def test_refresh_endpoint_rate_limit_returns_429_after_10(client: AsyncClient, redis_mock: RedisClient):
+    """
+    /auth/refresh must share the same rate_limit_auth dependency (10 req/min per IP)
+    as its sibling auth endpoints (login, register/initiate, forgot-password, etc.).
+    The refresh_token itself is bogus here — we only care that the 11th request is
+    rejected by the rate limiter before it ever reaches AuthService.refresh_token.
+    """
+    for _ in range(10):
+        resp = await client.post(
+            "/api/v1/auth/refresh",
+            json={"refresh_token": "not-a-real-token"},
+        )
+        assert resp.status_code == 401
+
+    r = await client.post(
+        "/api/v1/auth/refresh",
+        json={"refresh_token": "not-a-real-token"},
+    )
+    assert r.status_code == 429

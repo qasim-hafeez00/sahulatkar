@@ -56,7 +56,8 @@ async def login(
 async def refresh(
     req: TokenRefreshRequest,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    _: None = Depends(rate_limit_auth)
 ):
     return await AuthService.refresh_token(req, db, redis)
 

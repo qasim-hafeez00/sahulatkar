@@ -41,14 +41,20 @@ async def main(argv: list[str] | None = None) -> None:
     args = parser.parse_args(argv)
 
     redis_client = get_redis_client(settings.redis_url, db=settings.redis_db)
-    async with SessionLocal() as session:
-        service = BillingSweepService(session, redis=redis_client)
-        result = await service.execute_sweep(as_of=args.as_of, batch_size=args.batch_size)
-        if args.dry_run:
-            logger.info("Billing sweep DRY-RUN completed (no changes saved)", extra={"result": result})
-        else:
-            logger.info("Billing sweep run completed", extra={"result": result})
-    await redis_client.close()
+    try:
+        async with SessionLocal() as session:
+            service = BillingSweepService(session, redis=redis_client)
+            result = await service.execute_sweep(as_of=args.as_of, batch_size=args.batch_size, dry_run=args.dry_run)
+            if args.dry_run:
+                logger.info("Billing sweep DRY-RUN completed (no changes saved)", extra={"result": result})
+            else:
+                logger.info("Billing sweep run completed", extra={"result": result})
+    finally:
+        # Bug fix: previously `redis_client.close()` was only called on the
+        # happy path, so a raised exception from execute_sweep() (or from
+        # code inside the `async with SessionLocal()` block) leaked the
+        # Redis connection pool for the lifetime of the process.
+        await redis_client.close()
 
 
 if __name__ == "__main__":

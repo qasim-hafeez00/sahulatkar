@@ -1,34 +1,33 @@
-from fastapi import Depends, HTTPException, Request
-from sk_shared.redis_client import RedisClient
+from fastapi import Request
 
-from src.core.dependencies import get_redis
+from sk_shared.rate_limit import rate_limit_dependency
 
-async def rate_limit_admin_writes(
-    request: Request,
-    redis: RedisClient = Depends(get_redis)
-):
-    """
-    P3-05: Rate limiting on all admin write endpoints: 10 requests/minute per admin actor ID.
-    If no actor ID is found in the state, falls back to IP.
-    """
+
+def _admin_write_identity(request: Request) -> str:
+    """Rate-limit key identity: prefer the authenticated admin actor id
+    (set on request.state by upstream auth), falling back to client IP for
+    unauthenticated/system callers -- same fallback ledger-service's
+    bespoke limiter used before migrating onto sk_shared.rate_limit."""
     actor_id = getattr(request.state, "actor_id", None)
-    if not actor_id:
-        actor_id = request.client.host if request.client else "unknown"
+    if actor_id:
+        return str(actor_id)
+    return request.client.host if request.client else "unknown"
 
-    key = f"rate_limit:admin_write:{actor_id}"
-    
-    # We use a simple sliding window or fixed window counter.
-    # Fixed window is sufficient for this requirement.
-    current_count = await redis.get(key)
-    if current_count and int(current_count) >= 10:
-        raise HTTPException(
-            status_code=429,
-            detail="Rate limit exceeded. Maximum 10 admin write requests per minute allowed."
-        )
-        
-    # Increment and set TTL if it's the first request in the window
-    await redis.incr(key)
-    if not current_count:
-        await redis.expire(key, 60)
-        
-    return True
+
+# P3-05: Rate limiting on all admin write endpoints: 10 requests/minute per
+# admin actor ID (or IP if no actor id is present).
+#
+# Migrated onto sk_shared.rate_limit.SlidingWindowRateLimiter (via the
+# rate_limit_dependency factory) instead of ledger-service's own fixed-window
+# INCR/EXPIRE counter -- same limit/window/key-prefix/identity behavior, but a
+# true sliding window (no fixed-window boundary where ~2x the limit can slip
+# through) and one fewer bespoke rate limiter implementation to maintain
+# across the fleet. fail_open is left at its default (False), matching the
+# old implementation's behavior of not swallowing Redis errors.
+rate_limit_admin_writes = rate_limit_dependency(
+    limit=10,
+    window_seconds=60,
+    key_prefix="rate_limit:admin_write",
+    identity_fn=_admin_write_identity,
+    detail="Rate limit exceeded. Maximum 10 admin write requests per minute allowed.",
+)

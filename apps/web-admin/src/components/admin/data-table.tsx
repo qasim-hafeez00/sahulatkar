@@ -2,6 +2,7 @@
 
 import { ChevronDown, ChevronUp, ChevronsUpDown } from 'lucide-react';
 import React from 'react';
+import { ErrorBanner } from '@/components/ui/error-banner';
 
 export type SortDirection = 'asc' | 'desc' | null;
 
@@ -21,6 +22,10 @@ interface DataTableProps<T> {
   sortKey?: string | null;
   sortDirection?: SortDirection;
   loading?: boolean;
+  /** Set when the last fetch failed. Shown as a dismissible-by-retry banner instead of (or above) the empty/data state. */
+  error?: string | null;
+  /** Called when the admin clicks "Retry" on the error banner. Usually the same function used to fetch the data. */
+  onRetry?: () => void;
 }
 
 export function DataTable<T>({
@@ -31,6 +36,8 @@ export function DataTable<T>({
   sortKey,
   sortDirection,
   loading,
+  error,
+  onRetry,
 }: DataTableProps<T>) {
   const handleHeaderClick = (column: Column<T>) => {
     if (!column.sortable || !onSort) return;
@@ -71,6 +78,10 @@ export function DataTable<T>({
     );
   }
 
+  if (error && data.length === 0) {
+    return <ErrorBanner message={error} onRetry={onRetry} />;
+  }
+
   if (data.length === 0) {
     return (
       <div className="rounded-2xl border border-dashed border-white/10 bg-slate-950/50 p-8 text-center">
@@ -80,7 +91,9 @@ export function DataTable<T>({
   }
 
   return (
-    <div className="overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/50">
+    <div className="space-y-3">
+      {error && <ErrorBanner message={error} onRetry={onRetry} />}
+      <div className="overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/50">
       <table className="w-full">
         <thead>
           <tr className="border-b border-white/10">
@@ -122,6 +135,7 @@ export function DataTable<T>({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }

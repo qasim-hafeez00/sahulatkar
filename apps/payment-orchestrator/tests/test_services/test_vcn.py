@@ -10,6 +10,7 @@ async def test_vcn_issue_hard_gate(client, test_user, seed_signed_order):
     blocked = await client.post(
         "/api/v1/payments/vcn/issue",
         json={"order_id": order.id, "amount_pkr": 5200, "merchant_domain": "example.com"},
+        headers={"Authorization": f"Bearer {token}"},
     )
     assert blocked.status_code == 200
     assert blocked.json()["status"] == "active"
@@ -22,6 +23,7 @@ async def test_vcn_issue_blocks_without_signed_contract(client, test_user, seed_
     response = await client.post(
         "/api/v1/payments/vcn/issue",
         json={"order_id": order.id, "amount_pkr": 5200, "merchant_domain": "example.com"},
+        headers={"Authorization": f"Bearer {token}"},
     )
 
     assert response.status_code == 403

@@ -1,6 +1,6 @@
 import Link from 'next/link';
 import { ArrowLeft, Calendar, FileSearch, UserCog, Workflow } from 'lucide-react';
-import { adminApi } from '@/lib/api-client';
+import { adminApiServer, GatewayRequestError } from '@/lib/admin-api-server';
 
 type HitlDetailResponse = {
   id: number;
@@ -32,7 +32,13 @@ function formatDate(value: string | null) {
 
 export default async function HITLDetailPage({ params }: { params: Promise<{ id: string }> }) {
   const { id } = await params;
-  const response = await adminApi.get<HitlDetailResponse>(`/admin/hitl/queue/${id}`).catch(() => null);
+  // Only a genuine 404 means "this case doesn't exist" -- any other failure
+  // (network error, 5xx, auth) should surface as a real error instead of
+  // being silently repainted as a misleading "not found" state.
+  const response = await adminApiServer.get<HitlDetailResponse>(`/admin/hitl/queue/${id}`).catch((err) => {
+    if (err instanceof GatewayRequestError && err.status === 404) return null;
+    throw err;
+  });
 
   if (!response) {
     return (

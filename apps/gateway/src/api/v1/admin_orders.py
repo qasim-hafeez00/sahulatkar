@@ -57,12 +57,12 @@ async def list_admin_orders(
     
     query = text(
         f"""
-        SELECT 
-            orders.id, orders.status, 
-            orders.total_amount, orders.down_payment_amount, 
+        SELECT
+            orders.id, orders.order_number, orders.status,
+            orders.total_amount, orders.down_payment_amount,
             orders.created_at,
             users.phone as user_phone,
-            products.name as product_name
+            COALESCE(products.name, orders.product_snapshot->>'name') as product_name
         FROM orders
         LEFT JOIN users ON orders.user_id = users.id
         LEFT JOIN products ON orders.product_id = products.id
@@ -92,7 +92,7 @@ async def list_admin_orders(
         "orders": [
             {
                 "id": row["id"],
-                "order_number": f"ORD-{row['id']}",
+                "order_number": row["order_number"] or f"ORD-{row['id']}",
                 "user_phone": row["user_phone"] or "Unknown",
                 "product_name": row["product_name"] or "N/A",
                 "status": row["status"],
@@ -108,6 +108,43 @@ async def list_admin_orders(
     }
 
 
+@router.get("/summary")
+async def orders_summary(
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    status_rows = (
+        await db.execute(
+            text("SELECT status, COUNT(*) AS cnt FROM orders WHERE deleted_at IS NULL GROUP BY status")
+        )
+    ).mappings().all()
+    totals = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) AS total_orders,
+                    COUNT(*) FILTER (WHERE status NOT IN ('cancelled', 'refunded')) AS active_orders,
+                    COUNT(*) FILTER (WHERE created_at >= CURRENT_DATE) AS orders_today,
+                    COALESCE(AVG(total_amount) FILTER (WHERE status NOT IN ('cancelled', 'refunded')), 0) AS avg_order_value,
+                    COALESCE(SUM(total_amount) FILTER (WHERE status NOT IN ('cancelled', 'refunded')), 0) AS gmv
+                FROM orders
+                WHERE deleted_at IS NULL
+                """
+            )
+        )
+    ).mappings().one()
+
+    return {
+        "by_status": {r["status"]: int(r["cnt"]) for r in status_rows},
+        "total_orders": int(totals["total_orders"]),
+        "active_orders": int(totals["active_orders"]),
+        "orders_today": int(totals["orders_today"]),
+        "avg_order_value": float(totals["avg_order_value"] or 0),
+        "gmv": float(totals["gmv"] or 0),
+    }
+
+
 @router.get("/{order_id}")
 async def get_admin_order_detail(
     order_id: int,
@@ -117,12 +154,13 @@ async def get_admin_order_detail(
     """Get detailed order information."""
     query = text(
         """
-        SELECT 
-            orders.id, orders.status, 
+        SELECT
+            orders.id, orders.order_number, orders.status,
             orders.total_amount, orders.down_payment_amount,
             orders.created_at, orders.user_id,
             users.phone as user_phone,
-            products.name as product_name, products.sale_price,
+            COALESCE(products.name, orders.product_snapshot->>'name') as product_name,
+            products.sale_price,
             loans.loan_number, loans.principal_amount, loans.profit_amount,
             loans.total_repayable, loans.total_outstanding, loans.installment_count
         FROM orders
@@ -132,18 +170,18 @@ async def get_admin_order_detail(
         WHERE orders.id = :order_id AND orders.deleted_at IS NULL
         """
     )
-    
+
     try:
         row = (await db.execute(query, {"order_id": order_id})).mappings().one_or_none()
     except Exception:
         row = None
-    
+
     if row is None:
-        return {"error": "Order not found"}
-    
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
     return {
         "id": row["id"],
-        "order_number": f"ORD-{row['id']}",
+        "order_number": row["order_number"] or f"ORD-{row['id']}",
         "status": row["status"],
         "user": {
             "id": row["user_id"],
@@ -432,6 +470,7 @@ async def request_order_refund(
             "amount": float(order.total_amount or 0),
             "order_status": order.status,
         },
+        severity="critical",
     )
     await db.commit()
     return {"order_id": order.id, "status": "refund_requested", "queued": True}
@@ -478,6 +517,132 @@ async def restructure_order_loan(
             "new_installment_count": payload.new_installment_count,
             "reason": payload.reason,
         },
+        severity="critical",
     )
     await db.commit()
     return {"order_id": order.id, "status": "restructure_requested", "queued": True}
+
+
+# ============================================================================
+# Module 3 — manual order creation, communications log
+# ============================================================================
+
+
+class CreateManualOrderRequest(BaseModel):
+    user_id: int
+    product_name: str = Field(..., min_length=1, max_length=255)
+    total_amount: float = Field(..., gt=0)
+    down_payment_pct: float | None = Field(default=None, ge=0, le=100)
+    merchant_id: int | None = None
+    input_url: str | None = Field(default=None, max_length=2048)
+    notes: str = Field(..., min_length=3, max_length=1000)
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def create_manual_order(
+    payload: CreateManualOrderRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    user_exists = await db.scalar(text("SELECT 1 FROM users WHERE id = :uid AND deleted_at IS NULL"), {"uid": payload.user_id})
+    if not user_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    down_payment_pct = payload.down_payment_pct
+    if down_payment_pct is None:
+        default_pct = await db.scalar(text("SELECT param_value FROM system_parameters WHERE param_key = 'down_payment_pct'"))
+        down_payment_pct = float(default_pct) if default_pct else 25.0
+    down_payment_amount = round(payload.total_amount * down_payment_pct / 100, 2)
+
+    row = (
+        await db.execute(
+            text(
+                """
+                INSERT INTO orders (
+                    user_id, merchant_id, input_url, status, product_snapshot,
+                    total_amount, currency, down_payment_amount, down_payment_pct,
+                    product_description, admin_notes
+                ) VALUES (
+                    :user_id, :merchant_id, :input_url, 'contracts_pending', :product_snapshot,
+                    :total_amount, 'PKR', :down_payment_amount, :down_payment_pct,
+                    :product_description, :admin_notes
+                )
+                RETURNING id, order_number, created_at
+                """
+            ),
+            {
+                "user_id": payload.user_id,
+                "merchant_id": payload.merchant_id,
+                "input_url": payload.input_url,
+                "product_snapshot": json.dumps({"name": payload.product_name, "manual_entry": True}),
+                "total_amount": payload.total_amount,
+                "down_payment_amount": down_payment_amount,
+                "down_payment_pct": down_payment_pct,
+                "product_description": payload.product_name,
+                "admin_notes": f"Manually created by admin #{current_admin.id}: {payload.notes}",
+            },
+        )
+    ).mappings().one()
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_orders",
+        action="manual_order_created",
+        target_id=row["id"],
+        changes={"user_id": payload.user_id, "total_amount": payload.total_amount, "notes": payload.notes},
+    )
+    await db.commit()
+    return {
+        "id": row["id"],
+        "order_number": row["order_number"],
+        "status": "contracts_pending",
+        "down_payment_amount": down_payment_amount,
+        "created_at": _iso(row["created_at"]),
+    }
+
+
+@router.get("/{order_id}/communications")
+async def get_order_communications(
+    order_id: int,
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    order_exists = await db.scalar(text("SELECT 1 FROM orders WHERE id = :id AND deleted_at IS NULL"), {"id": order_id})
+    if not order_exists:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT id, source_event, category, priority, title, body, status,
+                       is_read, created_at
+                FROM notifications
+                WHERE source_reference = :ref
+                ORDER BY created_at DESC
+                """
+            ),
+            {"ref": f"order:{order_id}"},
+        )
+    ).mappings().all()
+
+    return {
+        "order_id": order_id,
+        "items": [
+            {
+                "id": r["id"],
+                "source_event": r["source_event"],
+                "category": r["category"],
+                "priority": r["priority"],
+                "title": r["title"],
+                "body": r["body"],
+                "status": r["status"],
+                "is_read": r["is_read"],
+                "created_at": _iso(r["created_at"]),
+            }
+            for r in rows
+        ],
+    }

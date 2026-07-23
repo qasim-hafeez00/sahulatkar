@@ -34,6 +34,22 @@ def _require_internal(request: Request):
             )
 
 
+async def _orders_for_down_payment_txn(db: AsyncSession, txn) -> list[Order]:
+    """Resolve every order a down-payment transaction covers.
+
+    Cart orders share one Loan for unified financing, so a single down-payment
+    transaction (txn.loan_id set) must advance every order sharing that loan_id
+    together; a legacy single-order transaction (txn.loan_id is None) only
+    advances its own order.
+    """
+    if txn.loan_id is not None:
+        return (
+            await db.execute(select(Order).where(Order.loan_id == txn.loan_id))
+        ).scalars().all()
+    order = await db.scalar(select(Order).where(Order.id == txn.order_id))
+    return [order] if order else []
+
+
 from pydantic import Field
 
 class ProductExtractedPayload(BaseModel):
@@ -197,31 +213,36 @@ async def payment_confirmed_callback(
     if payload.failure_reason:
         txn.failure_message = payload.failure_reason
 
-    # BUG-02 FIX: Update order status when down payment is confirmed
+    # BUG-02 FIX: Update order status when down payment is confirmed.
+    # Cart orders share one Loan for unified financing — a single down payment
+    # transaction covers the whole group, so every order sharing txn.loan_id
+    # (not just txn.order_id) must advance together.
     if payload.status == "confirmed" and txn.transaction_type == "down_payment":
-        order = await db.scalar(select(Order).where(Order.id == txn.order_id))
-        if order and order.status == OrderState.CONTRACTS_SIGNED:
-            old_status = order.status
-            order.status = OrderState.DOWN_PAYMENT_RECEIVED
-            db.add(OrderStatusHistory(
-                order_id=order.id,
-                from_status=old_status,
-                to_status=OrderState.DOWN_PAYMENT_RECEIVED,
-                reason="down_payment_confirmed",
-            ))
+        orders = await _orders_for_down_payment_txn(db, txn)
+        for order in orders:
+            if order.status == OrderState.CONTRACTS_SIGNED:
+                old_status = order.status
+                order.status = OrderState.DOWN_PAYMENT_RECEIVED
+                db.add(OrderStatusHistory(
+                    order_id=order.id,
+                    from_status=old_status,
+                    to_status=OrderState.DOWN_PAYMENT_RECEIVED,
+                    reason="down_payment_confirmed",
+                ))
 
     # M-05 FIX: ensure failed down-payment callbacks can recover incorrectly advanced states
     if payload.status == "failed" and txn.transaction_type == "down_payment":
-        order = await db.scalar(select(Order).where(Order.id == txn.order_id))
-        if order and order.status == OrderState.DOWN_PAYMENT_RECEIVED:
-            old_status = order.status
-            order.status = OrderState.CONTRACTS_SIGNED
-            db.add(OrderStatusHistory(
-                order_id=order.id,
-                from_status=old_status,
-                to_status=OrderState.CONTRACTS_SIGNED,
-                reason="down_payment_failed_reverted",
-            ))
+        orders = await _orders_for_down_payment_txn(db, txn)
+        for order in orders:
+            if order.status == OrderState.DOWN_PAYMENT_RECEIVED:
+                old_status = order.status
+                order.status = OrderState.CONTRACTS_SIGNED
+                db.add(OrderStatusHistory(
+                    order_id=order.id,
+                    from_status=old_status,
+                    to_status=OrderState.CONTRACTS_SIGNED,
+                    reason="down_payment_failed_reverted",
+                ))
 
     # Publish event for Ledger orchestrator ingestion
     if payload.status == "confirmed":

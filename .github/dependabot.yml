@@ -1,0 +1,118 @@
+version: 2
+updates:
+  - package-ecosystem: "pip"
+    directory: "/apps/gateway"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/product-service"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/credit-engine"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/payment-orchestrator"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/ledger-service"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/apps/notification-service"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "pip"
+    directory: "/packages/shared-python"
+    schedule:
+      interval: "weekly"
+    groups:
+      python-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "npm"
+    directory: "/apps/web-customer"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "npm"
+    directory: "/apps/web-admin"
+    schedule:
+      interval: "weekly"
+    groups:
+      npm-dependencies:
+        patterns: ["*"]
+
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/gateway"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/product-service"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/credit-engine"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/payment-orchestrator"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/ledger-service"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/notification-service"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/web-customer"
+    schedule:
+      interval: "weekly"
+
+  - package-ecosystem: "docker"
+    directory: "/apps/web-admin"
+    schedule:
+      interval: "weekly"

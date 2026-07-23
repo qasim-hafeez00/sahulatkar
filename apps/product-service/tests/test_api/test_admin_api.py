@@ -2,7 +2,9 @@ from decimal import Decimal
 from datetime import datetime, timezone
 
 import pytest
+from sqlalchemy import select
 
+from sk_shared.models.audit import AuditTrail
 from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.models.product import Merchant, Product, ProhibitedCategory, ScrapingJob
 
@@ -54,6 +56,49 @@ async def test_admin_patch_product_updates_fields(client, db_session, make_produ
     assert product.name == "Updated Name"
     assert str(product.cost_price) == "2100.00"
     assert product.in_stock is False
+
+
+@pytest.mark.asyncio
+async def test_admin_patch_product_audit_log_records_forwarded_admin_id(client, db_session, make_product, service_header):
+    """P1: the audit trail must attribute the action to the real admin (forwarded
+    by the caller via x-admin-user-id), not a hardcoded placeholder id."""
+    product = await make_product(db_session, name="Attributed Product", cost_price=Decimal("500.00"))
+    await db_session.commit()
+
+    headers = {**service_header, "x-admin-user-id": "42"}
+    res = await client.patch(
+        f"/api/v1/admin/products/{product.uuid}",
+        headers=headers,
+        json={"name": "Renamed By Admin 42"},
+    )
+    assert res.status_code == 200
+
+    entry = (await db_session.execute(
+        select(AuditTrail).where(AuditTrail.action == "patch_product").order_by(AuditTrail.id.desc())
+    )).scalars().first()
+    assert entry is not None
+    assert entry.admin_user_id == 42
+
+
+@pytest.mark.asyncio
+async def test_admin_patch_product_audit_log_is_unattributed_without_admin_header(client, db_session, make_product, service_header):
+    """Without a forwarded admin id, the audit entry must be logged as
+    unattributed (NULL) rather than defaulting to a fabricated admin id."""
+    product = await make_product(db_session, name="Unattributed Product", cost_price=Decimal("500.00"))
+    await db_session.commit()
+
+    res = await client.patch(
+        f"/api/v1/admin/products/{product.uuid}",
+        headers=service_header,
+        json={"name": "Renamed With No Admin Header"},
+    )
+    assert res.status_code == 200
+
+    entry = (await db_session.execute(
+        select(AuditTrail).where(AuditTrail.action == "patch_product").order_by(AuditTrail.id.desc())
+    )).scalars().first()
+    assert entry is not None
+    assert entry.admin_user_id is None
 
 
 @pytest.mark.asyncio
@@ -346,3 +391,22 @@ async def test_admin_queue_stats_includes_dlq_previews(client, redis_mock, servi
     assert "scraping_dlq_entries" in body
     assert len(body["checkout_dlq_entries"]) >= 1
     assert len(body["scraping_dlq_entries"]) >= 1
+
+
+@pytest.mark.asyncio
+async def test_admin_queue_stats_redacts_card_data(client, redis_mock, service_header):
+    # Phase 0 security regression: PAN/CVV must never be returned verbatim by
+    # this admin endpoint, even for a stale/malformed DLQ entry that somehow
+    # still carries them.
+    await redis_mock.redis.lpush(
+        "sk:queue:dlq:checkout",
+        '{"queue":"checkout","payload":{"order_id":123},"pan":"4242424242424242","cvv":"123","error":"boom"}',
+    )
+
+    res = await client.get("/api/v1/admin/queue-stats", headers=service_header)
+    assert res.status_code == 200
+    entries = res.json()["checkout_dlq_entries"]
+    assert len(entries) >= 1
+    for entry in entries:
+        assert "pan" not in entry
+        assert "cvv" not in entry

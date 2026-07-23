@@ -201,6 +201,12 @@ class VirtualCard(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     encrypted_pan: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
     encrypted_cvv: Mapped[Optional[bytes]] = mapped_column(LargeBinary, nullable=True)
+    # Versioned-key envelope scheme: records which encryption key version was used
+    # to produce encrypted_pan/encrypted_cvv (e.g. "v1", "v2"), so decryption can look
+    # up the correct key instead of assuming a single static one. NULL means the row
+    # predates this column and must be treated as the legacy "v1" key (see
+    # src/services/vcn.py _LEGACY_KEY_VERSION). New rows always populate this column.
+    encryption_key_version: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     __table_args__ = (
         Index("ix_virtual_cards_order_id", "order_id"),

@@ -7,11 +7,17 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel, Field
 
 from src.core.database import get_db
-from src.core.dependencies import get_redis
+from src.core.dependencies import RequestContext, get_redis, require_admin_role
 from sk_shared.redis_client import RedisClient
 from src.services.accounting_service import AccountingService
 
 router = APIRouter(prefix="/entries", tags=["Journal Entries"])
+
+_READ_ROLES = ["finance_analyst", "super_admin"]
+# Manual postings/reversals directly mutate the general ledger — treated with the
+# same super_admin-only bar as period close/reopen and other irreversible admin
+# actions in finance.py, rather than the lighter finance_analyst read role.
+_WRITE_ROLES = ["super_admin"]
 
 
 class PostingLineSchema(BaseModel):
@@ -44,6 +50,7 @@ async def list_journal_entries(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """Query journal entries with cursor-based pagination."""
     service = AccountingService(db, redis=redis)
@@ -62,6 +69,7 @@ async def get_entry(
     entry_number: str,
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """Get detailed information for a specific journal entry."""
     service = AccountingService(db, redis=redis)
@@ -80,6 +88,7 @@ async def create_manual_entry(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     __: bool = Depends(rate_limit_admin_writes),
+    _: RequestContext = Depends(require_admin_role(_WRITE_ROLES)),
 ):
     """Create a manual journal entry (finance admin only)."""
     service = AccountingService(db, redis=redis)
@@ -110,6 +119,7 @@ async def reverse_entry(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
     __: bool = Depends(rate_limit_admin_writes),
+    _: RequestContext = Depends(require_admin_role(_WRITE_ROLES)),
 ):
     """Reverse an existing journal entry."""
     service = AccountingService(db, redis=redis)

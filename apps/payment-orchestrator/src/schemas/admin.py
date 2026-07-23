@@ -32,6 +32,12 @@ class GatewayHealthSummary(BaseModel):
     window_seconds: int
 
 
+class AdjustmentRequest(BaseModel):
+    order_id: int
+    amount_pkr: Decimal
+    reason: str
+
+
 class VcnAdminSummary(BaseModel):
     vcn_id: int
     order_id: int

@@ -12,7 +12,7 @@ from sk_shared.redis_client import RedisClient
 from sk_shared.storage import get_storage_client
 from src.config import settings
 from src.core.audit import record_audit_event
-from src.core.dependencies import RequirePermission, get_current_admin, get_current_user, get_db, get_redis
+from src.core.dependencies import RequirePermission, get_current_user, get_db, get_redis
 from src.schemas.contracts import (
     AdminContractResponse,
     ContractDisclosure,
@@ -55,6 +55,7 @@ async def generate_wakalah(
         authorized_amount=float(contract.authorized_amount),
         valid_until=contract.valid_until,
         otp_sent=True,
+        dev_otp=getattr(contract, "_dev_otp", None),
     )
 
 
@@ -125,6 +126,7 @@ async def generate_murabaha(
             installment_count=contract.installment_count,
         ),
         otp_sent=True,
+        dev_otp=getattr(contract, "_dev_otp", None),
     )
 
 
@@ -223,7 +225,7 @@ async def get_contract_pdf(
     contract_id: int,
     contract_type: str,
     request: Request,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(RequirePermission("read_order")),
     db: AsyncSession = Depends(get_db),
 ):
     model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract

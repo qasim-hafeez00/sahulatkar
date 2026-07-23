@@ -13,6 +13,10 @@ Security rules:
   - All monetary arithmetic uses Decimal — never float
   - VCN issuance is blocked unless Order.status == CONTRACTS_SIGNED
   - One VCN per order (idempotent: returns existing if re-requested)
+  - PAN/CVV are encrypted with a versioned key envelope (VcnKeyProvider in
+    src/services/vcn_encryption.py) — the key version used is stamped on the
+    VirtualCard row (encryption_key_version) so old ciphertext keeps
+    decrypting correctly after the current key version is rotated.
 
 Boundary rules (DDD):
   - BV-01: Do NOT mutate Loan.total_paid / Loan.total_outstanding here.
@@ -22,8 +26,6 @@ Boundary rules (DDD):
 """
 from __future__ import annotations
 
-import base64
-import hashlib
 import json
 import logging
 from dataclasses import asdict
@@ -32,7 +34,6 @@ from decimal import ROUND_HALF_UP, Decimal
 from secrets import randbelow
 from typing import Optional
 
-from cryptography.fernet import Fernet
 from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -51,15 +52,22 @@ from sk_shared.redis_client import RedisClient
 
 from src.config import settings
 from src.models.outbox import OutboxEvent
+from src.services.vcn_encryption import VcnKeyProvider
 
 logger = logging.getLogger(__name__)
-_fernet_instance: Fernet | None = None
 
 
 class VcnService:
     def __init__(self, db: AsyncSession, redis: RedisClient) -> None:
         self.db = db
         self.redis = redis
+        # Instance-scoped (not module-global) so that rotating
+        # VCN_ENCRYPTION_KEY_CURRENT_VERSION takes effect on the very next
+        # VcnService construction (a fresh instance is built per request —
+        # see src/api/v1/vcn.py) instead of being pinned forever by a
+        # process-lifetime cache, which is what made the old single static
+        # key un-rotatable without a process restart.
+        self._key_provider = VcnKeyProvider()
 
     # ── VCN Issuance ────────────────────────────────────────────────────────
 
@@ -126,7 +134,7 @@ class VcnService:
             # VCN authorized amount = product price + VCN_BUFFER_PCT % buffer + FX buffer
             buffer_multiplier = Decimal("1.0") + Decimal(str(settings.VCN_BUFFER_PCT)) / Decimal("100") + Decimal(str(settings.FX_BUFFER_PCT)) / Decimal("100")
             authorized_amount = (amount_pkr * buffer_multiplier).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
-        
+
             # Calculate USD limit for Stripe
             fx_rate = Decimal(str(settings.FX_PKR_TO_USD_RATE))
             authorized_amount_usd = (authorized_amount * fx_rate).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
@@ -135,7 +143,7 @@ class VcnService:
             from src.services.stripe_cardholder import StripeCardholderService
             cardholder_svc = StripeCardholderService(self.redis)
             stripe_cardholder_id = await cardholder_svc.get_or_create(user_id=order.user_id)
-        
+
             # Real Stripe card creation
             from src.adapters.stripe_issuing import StripeIssuingAdapter
             stripe_adapter = StripeIssuingAdapter(
@@ -144,18 +152,23 @@ class VcnService:
                 fx_buffer_pct=settings.FX_BUFFER_PCT,
             )
             amount_usd_cents = stripe_adapter._pkr_to_usd_cents(authorized_amount)
-        
+
             # Resolve MCC (simplified for this context)
             mcc = "5999"
-        
+
             stripe_card = stripe_adapter.create_card(
                 cardholder_id=stripe_cardholder_id,
                 authorized_amount_cents=amount_usd_cents,
                 merchant_category=mcc,
             )
-        
+
             pan = stripe_card["pan"]
             cvv = stripe_card["cvv"]
+
+            # Both fields are encrypted under the same (current) key version —
+            # only one version tag needs to be stored per row.
+            encrypted_pan, key_version = self._encrypt_value(pan)
+            encrypted_cvv, _ = self._encrypt_value(cvv)
 
             card = VirtualCard(
                 order_id=order_id,
@@ -174,8 +187,9 @@ class VcnService:
                 status="active",
                 issued_at=now,
                 expires_at=now + timedelta(hours=settings.VCN_EXPIRY_HOURS),
-                encrypted_pan=self._encrypt_value(pan),
-                encrypted_cvv=self._encrypt_value(cvv),
+                encrypted_pan=encrypted_pan,
+                encrypted_cvv=encrypted_cvv,
+                encryption_key_version=key_version,
             )
             self.db.add(card)
 
@@ -246,8 +260,11 @@ class VcnService:
                 detail="VCN_EXPIRED",
             )
 
-        pan = self._decrypt_value(card.encrypted_pan)
-        cvv = self._decrypt_value(card.encrypted_cvv)
+        # Decrypt using whichever key version was stamped on this row at
+        # issuance time — not necessarily the current version, so old VCNs
+        # keep decrypting correctly across key rotations.
+        pan = self._decrypt_value(card.encrypted_pan, card.encryption_key_version)
+        cvv = self._decrypt_value(card.encrypted_cvv, card.encryption_key_version)
 
         # Security: log at DEBUG only — never INFO, never include PAN/CVV in log record
         logger.debug("VCN decrypted for checkout agent", extra={"order_id": order_id, "vcn_id": card.id})
@@ -387,24 +404,19 @@ class VcnService:
     def _mask_pan(self, pan: str) -> str:
         return f"**** **** **** {pan[-4:]}"
 
-    def _get_fernet(self) -> Fernet:
-        global _fernet_instance
-        if _fernet_instance is not None:
-            return _fernet_instance
+    def _encrypt_value(self, value: str) -> tuple[bytes, str]:
+        """Encrypt with the current VCN key version. Returns (ciphertext, version_tag).
 
-        secret = settings.VCN_ENCRYPTION_KEY
-        if not secret:
-            if settings.ENVIRONMENT == "local":
-                secret = "local-dev-vcn-key"
-            else:
-                raise RuntimeError("VCN_ENCRYPTION_KEY is required outside local environment")
+        See src/services/vcn_encryption.py::VcnKeyProvider for the versioned
+        envelope scheme (local-mock vs. production-KMS split, rotation).
+        """
+        return self._key_provider.encrypt(value)
 
-        key = base64.urlsafe_b64encode(hashlib.sha256(secret.encode("utf-8")).digest())
-        _fernet_instance = Fernet(key)
-        return _fernet_instance
+    def _decrypt_value(self, ciphertext: bytes, key_version: Optional[str]) -> str:
+        """Decrypt using the key version stamped on the record.
 
-    def _encrypt_value(self, value: str) -> bytes:
-        return self._get_fernet().encrypt(value.encode("utf-8"))
-
-    def _decrypt_value(self, ciphertext: bytes) -> str:
-        return self._get_fernet().decrypt(ciphertext).decode("utf-8")
+        `key_version` should be `VirtualCard.encryption_key_version`, which may
+        be None for rows written before that column existed (treated as the
+        legacy "v1" version — see VcnKeyProvider.LEGACY_VERSION).
+        """
+        return self._key_provider.decrypt(ciphertext, key_version)

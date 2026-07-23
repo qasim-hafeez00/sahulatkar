@@ -20,7 +20,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import OrderState
@@ -32,6 +32,7 @@ from src.adapters.factory import GatewayAdapterFactory
 from src.config import settings
 from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token
 from src.core.metrics import DOWN_PAYMENT_TOTAL, GATEWAY_FAILURE_TOTAL, INSTALLMENT_PAYMENT_TOTAL
+from src.models.refund_workflow import RefundStatus, RefundWorkflow
 from src.orchestration.payment_orchestrator import PaymentOrchestrator
 from src.orchestration.refund_orchestrator import RefundOrchestrator
 from src.schemas.payments import (
@@ -385,9 +386,11 @@ async def initiate_refund(
     # Verify order belongs to this user (defensive guard)
     order = await _get_order_for_user(db, request_payload.order_id, current_user.id)
 
-    # Find original successful payment to identify gateway
+    # Find original successful payment for THIS order (not just any successful
+    # payment ever made by the user) to identify gateway and the refundable amount.
     original_txn = await db.scalar(
         select(PaymentTransaction).where(
+            PaymentTransaction.order_id == order.id,
             PaymentTransaction.user_id == current_user.id,
             PaymentTransaction.status == "success",
             PaymentTransaction.amount > 0,
@@ -397,6 +400,21 @@ async def initiate_refund(
         raise HTTPException(
             status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
             detail="NO_SUCCESSFUL_TRANSACTION_FOUND",
+        )
+
+    # Ceiling check: never refund more than the original payment, net of any
+    # refunds already initiated/settled for this order.
+    already_refunded = await db.scalar(
+        select(func.coalesce(func.sum(RefundWorkflow.amount_pkr), 0)).where(
+            RefundWorkflow.order_id == order.id,
+            RefundWorkflow.status != RefundStatus.FAILED,
+        )
+    )
+    refundable_amount = Decimal(str(original_txn.amount)) - Decimal(str(already_refunded))
+    if request_payload.amount_pkr > refundable_amount:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="REFUND_AMOUNT_EXCEEDS_AVAILABLE",
         )
 
     # Find existing PaymentWorkflow for idempotency linkage

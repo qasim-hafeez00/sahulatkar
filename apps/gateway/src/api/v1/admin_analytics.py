@@ -46,7 +46,7 @@ async def gmv_trend(
             pass
 
     interval_days = int(period.replace("d", ""))
-    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+    threshold = (datetime.now(timezone.utc) - timedelta(days=interval_days)).replace(tzinfo=None)
 
     if _is_sqlite():
         q = text(
@@ -101,7 +101,7 @@ async def approval_funnel(
             pass
 
     interval_days = int(period.replace("d", ""))
-    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+    threshold = (datetime.now(timezone.utc) - timedelta(days=interval_days)).replace(tzinfo=None)
 
     q = text(
         """
@@ -138,7 +138,7 @@ async def credit_band_distribution(
         except Exception:
             pass
 
-    threshold = datetime.now(timezone.utc) - timedelta(days=90)
+    threshold = (datetime.now(timezone.utc) - timedelta(days=90)).replace(tzinfo=None)
     q = text(
         """
         SELECT COALESCE(risk_band, 'unknown') AS band, COUNT(*) AS c
@@ -175,7 +175,7 @@ async def default_rate_trend(
             pass
 
     interval_days = int(period.replace("d", ""))
-    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+    threshold = (datetime.now(timezone.utc) - timedelta(days=interval_days)).replace(tzinfo=None)
 
     if _is_sqlite():
         q = text(
@@ -342,10 +342,10 @@ async def custom_report(
             detail=f"UNKNOWN_REPORT_TYPE. Supported: {list(_CUSTOM_REPORT_QUERIES.keys())}",
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     try:
-        start = datetime.fromisoformat(start_date) if start_date else now - timedelta(days=30)
-        end = datetime.fromisoformat(end_date) if end_date else now
+        start = datetime.fromisoformat(start_date).replace(tzinfo=None) if start_date else now - timedelta(days=30)
+        end = datetime.fromisoformat(end_date).replace(tzinfo=None) if end_date else now
     except ValueError:
         from fastapi import HTTPException, status
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_DATE_FORMAT: use ISO-8601")
@@ -382,7 +382,7 @@ async def export_analytics(
     db: AsyncSession = Depends(get_db),
 ) -> StreamingResponse:
     interval_days = int(period.replace("d", "")) if period.endswith("d") else 30
-    threshold = datetime.now(timezone.utc) - timedelta(days=interval_days)
+    threshold = (datetime.now(timezone.utc) - timedelta(days=interval_days)).replace(tzinfo=None)
 
     if _is_sqlite():
         trunc_expr = "date(created_at)"
@@ -459,3 +459,124 @@ async def export_analytics(
         media_type="text/csv",
         headers={"Content-Disposition": f'attachment; filename="{filename}"'},
     )
+
+
+# ============================================================================
+# Module 9 — executive summary, geographic distribution
+# ============================================================================
+
+_PERIOD_DAYS = {"7d": 7, "30d": 30, "90d": 90}
+
+
+@router.get("/executive-summary")
+async def executive_summary(
+    period: Period = Query(default="30d"),
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    days = _PERIOD_DAYS[period]
+    threshold = (datetime.now(timezone.utc) - timedelta(days=days)).replace(tzinfo=None)
+    prior_threshold = threshold - timedelta(days=days)
+
+    async def _period_totals(start, end) -> dict:
+        row = (
+            await db.execute(
+                text(
+                    """
+                    SELECT
+                        COALESCE(SUM(total_amount), 0) AS gmv,
+                        COUNT(*) AS orders_count
+                    FROM orders
+                    WHERE deleted_at IS NULL AND status NOT IN ('cancelled', 'refunded')
+                      AND created_at >= :start AND created_at < :end
+                    """
+                ),
+                {"start": start, "end": end},
+            )
+        ).mappings().one()
+        return {"gmv": float(row["gmv"] or 0), "orders_count": int(row["orders_count"] or 0)}
+
+    current = await _period_totals(threshold, datetime.now(timezone.utc).replace(tzinfo=None))
+    prior = await _period_totals(prior_threshold, threshold)
+
+    new_users = await db.scalar(
+        text("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND created_at >= :threshold"),
+        {"threshold": threshold},
+    )
+    active_users = await db.scalar(
+        text("SELECT COUNT(*) FROM users WHERE deleted_at IS NULL AND status = 'active'"),
+    )
+
+    approved_apps = await db.scalar(
+        text("SELECT COUNT(*) FROM credit_applications WHERE status = 'approved' AND created_at >= :threshold"),
+        {"threshold": threshold},
+    )
+    decided_apps = await db.scalar(
+        text("SELECT COUNT(*) FROM credit_applications WHERE status IN ('approved','rejected') AND created_at >= :threshold"),
+        {"threshold": threshold},
+    )
+    approval_rate = round((approved_apps / decided_apps * 100), 2) if decided_apps else None
+
+    overdue_installments = await db.scalar(
+        text("SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status = 'overdue'"),
+    )
+    total_finished = await db.scalar(
+        text("SELECT COUNT(*) FROM installments WHERE deleted_at IS NULL AND status IN ('overdue', 'paid')"),
+    )
+    default_rate = round((overdue_installments / total_finished * 100), 2) if total_finished else None
+
+    def _growth_pct(current_val: float, prior_val: float):
+        if prior_val == 0:
+            return None
+        return round((current_val - prior_val) / prior_val * 100, 1)
+
+    return {
+        "period": period,
+        "gmv": current["gmv"],
+        "gmv_growth_pct": _growth_pct(current["gmv"], prior["gmv"]),
+        "orders_count": current["orders_count"],
+        "orders_growth_pct": _growth_pct(current["orders_count"], prior["orders_count"]),
+        "new_users": int(new_users or 0),
+        "active_users": int(active_users or 0),
+        "approval_rate_pct": approval_rate,
+        "default_rate_pct": default_rate,
+        "nps": None,
+        "nps_note": "Not yet collected — no NPS capture mechanism exists in this codebase.",
+    }
+
+
+@router.get("/geographic")
+async def geographic_distribution(
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(u.province, 'Unknown') AS province,
+                    COUNT(DISTINCT u.id) AS user_count,
+                    COUNT(DISTINCT o.id) AS order_count,
+                    COALESCE(SUM(o.total_amount) FILTER (WHERE o.status NOT IN ('cancelled', 'refunded')), 0) AS gmv
+                FROM users u
+                LEFT JOIN orders o ON o.user_id = u.id AND o.deleted_at IS NULL
+                WHERE u.deleted_at IS NULL
+                GROUP BY province
+                ORDER BY user_count DESC
+                """
+            )
+        )
+    ).mappings().all()
+
+    return {
+        "provinces": [
+            {
+                "province": r["province"],
+                "user_count": int(r["user_count"]),
+                "order_count": int(r["order_count"]),
+                "gmv": float(r["gmv"] or 0),
+            }
+            for r in rows
+        ]
+    }

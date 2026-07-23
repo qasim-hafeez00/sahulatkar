@@ -53,6 +53,9 @@ class TrackingEvent(Base, TimestampMixin):
     event_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     location_city: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     courier_raw_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+    # NOTE: naive on purpose — event_time is the RANGE partition key on this table
+    # and Postgres refuses to ALTER its type, so callers must pass naive UTC
+    # datetimes here (e.g. datetime.now(timezone.utc).replace(tzinfo=None)).
     event_time: Mapped[datetime] = mapped_column(DateTime, nullable=False)
 
     __table_args__ = (

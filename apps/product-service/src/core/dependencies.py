@@ -57,6 +57,30 @@ def require_user_id(
     return user_id
 
 
+def get_current_admin_id(
+    internal_token: str = Header(None, alias="x-internal-service-token"),
+    admin_user_id: str = Header(None, alias="x-admin-user-id"),
+) -> int | None:
+    """Zero-Trust admin identity resolution for internal /admin/* routes.
+
+    These routes are only reachable with a valid internal service token (the
+    calling service, e.g. the Gateway, has already authenticated the human
+    admin). The caller forwards that admin's id via x-admin-user-id so audit
+    log entries attribute the action to the real actor instead of a
+    placeholder. Absent header means the caller didn't forward an identity —
+    log as unattributed (None) rather than guessing.
+    """
+    if not internal_token or not hmac.compare_digest(internal_token, settings.INTERNAL_SERVICE_TOKEN):
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="INVALID_SERVICE_TOKEN")
+
+    if not admin_user_id:
+        return None
+    try:
+        return int(admin_user_id)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_ADMIN_USER_ID_FORMAT")
+
+
 def get_request_id(request: Request) -> str:
     return getattr(request.state, "request_id", "")
 

@@ -114,6 +114,133 @@ module "iam" {
   tags              = local.common_tags
 }
 
+# AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md): one IRSA
+# role per backend service, each scoped to only that service's own Secrets
+# Manager namespace -- gateway's role can read "gateway/prod/*" and
+# "gateway/staging/*" but nothing under "ledger-service/*", etc. credit-engine,
+# web-admin, and web-customer are intentionally excluded (this pattern is for
+# the 5 backend Python services with pydantic-settings Settings classes that
+# call sk_shared.secrets_manager.load_secrets_manager_overrides -- see each
+# service's src/config.py).
+data "aws_caller_identity" "current" {}
+
+locals {
+  secrets_manager_services = [
+    "gateway",
+    "product-service",
+    "payment-orchestrator",
+    "ledger-service",
+    "notification-service",
+  ]
+}
+
+data "aws_iam_policy_document" "secrets_manager_read" {
+  for_each = toset(local.secrets_manager_services)
+
+  statement {
+    sid    = "SecretsManagerRead"
+    effect = "Allow"
+    actions = [
+      "secretsmanager:GetSecretValue",
+      "secretsmanager:DescribeSecret",
+    ]
+    resources = [
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${each.key}/prod/*",
+      "arn:aws:secretsmanager:${var.aws_region}:${data.aws_caller_identity.current.account_id}:secret:${each.key}/staging/*",
+    ]
+  }
+}
+
+# NOTE: Terraform only creates the role/trust policy, exactly like
+# module.cert_manager_irsa below -- it does not modify
+# infra/k8s/base/serviceaccounts.yaml (which must stay account-ID-free to
+# avoid hardcoding AWS account IDs/ARNs in a checked-in manifest). Bind each
+# role by annotating the matching ServiceAccount at deploy time, e.g.:
+#   kubectl annotate serviceaccount sk-gateway -n sk-production \
+#     eks.amazonaws.com/role-arn=<secrets_manager_irsa_role_arns["gateway"] output> --overwrite
+module "secrets_manager_irsa" {
+  source   = "../../modules/iam"
+  for_each = toset(local.secrets_manager_services)
+
+  project              = "sahulatkar"
+  environment          = var.environment
+  enable_irsa_role     = true
+  irsa_role_name       = "${each.key}-secrets-manager"
+  irsa_namespace       = "sk-${var.environment}"
+  irsa_service_account = "sk-${each.key}"
+  irsa_policy_json     = data.aws_iam_policy_document.secrets_manager_read[each.key].json
+  oidc_provider_arn    = module.eks.oidc_provider_arn
+  oidc_provider_url    = module.eks.cluster_oidc_issuer_url
+  tags                 = local.common_tags
+}
+
+# Looks up the pre-existing public Route53 hosted zone for sahulatkar.com.
+# See infra/terraform/modules/dns/main.tf for the "zone already exists"
+# assumption this relies on.
+module "dns" {
+  source = "../../modules/dns"
+
+  domain_name = var.root_domain_name
+}
+
+# Least-privilege policy for cert-manager's Route53 DNS-01 solver, scoped to
+# only the sahulatkar.com hosted zone (not "*" hosted zones in the account).
+data "aws_iam_policy_document" "cert_manager_route53" {
+  statement {
+    sid    = "CertManagerRoute53ChangeRecords"
+    effect = "Allow"
+    actions = [
+      "route53:ChangeResourceRecordSets",
+      "route53:ListResourceRecordSets",
+    ]
+    resources = [module.dns.zone_arn]
+  }
+
+  statement {
+    sid    = "CertManagerRoute53GetChange"
+    effect = "Allow"
+    actions = [
+      "route53:GetChange",
+    ]
+    resources = ["arn:aws:route53:::change/*"]
+  }
+
+  statement {
+    sid    = "CertManagerRoute53ListZones"
+    effect = "Allow"
+    actions = [
+      "route53:ListHostedZonesByName",
+    ]
+    resources = ["*"]
+  }
+}
+
+# IRSA role assumed by the cert-manager ServiceAccount (namespace
+# "cert-manager", ServiceAccount "cert-manager" - the defaults used by the
+# jetstack/cert-manager Helm chart) so it can complete ACME DNS-01 challenges
+# against the sahulatkar.com Route53 zone without static AWS credentials.
+#
+# NOTE: the cert-manager Helm chart must be installed with
+#   --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"=<cert_manager_irsa_role_arn output>
+# for this role to actually be assumed - Terraform only creates the role/trust
+# policy, it does not install cert-manager itself (see repo runbook for the
+# manual `helm install` bootstrap steps, consistent with how ingress-nginx and
+# other cluster add-ons are installed today).
+module "cert_manager_irsa" {
+  source = "../../modules/iam"
+
+  project               = "sahulatkar"
+  environment           = var.environment
+  enable_irsa_role      = true
+  irsa_role_name        = "cert-manager-route53"
+  irsa_namespace        = "cert-manager"
+  irsa_service_account  = "cert-manager"
+  irsa_policy_json      = data.aws_iam_policy_document.cert_manager_route53.json
+  oidc_provider_arn     = module.eks.oidc_provider_arn
+  oidc_provider_url     = module.eks.cluster_oidc_issuer_url
+  tags                  = local.common_tags
+}
+
 module "rds" {
   source = "../../modules/rds"
 

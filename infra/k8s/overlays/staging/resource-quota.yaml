@@ -1,0 +1,61 @@
+# Derived from the base Deployments' declared requests/limits at staging's
+# actual replica count (1 per workload — see kustomization.yaml's `replicas:`
+# block), with headroom for rolling updates (maxSurge creates a temporary
+# extra pod per service mid-rollout) and the alembic-migrate Job, then
+# rounded up:
+#
+#   requests.cpu  @ 1 replica each: gateway 100m + product-service 250m +
+#     credit-engine 100m + payment-orchestrator 100m + ledger-service 100m +
+#     notification-service 100m + web-admin 100m + web-customer 100m +
+#     pgbouncer 100m = 1050m  -> ~3x headroom -> 3
+#   requests.memory @ 1 replica each: 256Mi*7 + 512Mi (product-service) +
+#     128Mi (pgbouncer) = 2432Mi -> ~3x headroom -> 6Gi
+#   limits.cpu @ 1 replica each: 500m*7 + 1000m (product-service) +
+#     500m (pgbouncer) = 5000m -> ~2.5x headroom -> 12
+#   limits.memory @ 1 replica each: 512Mi*7 + 1536Mi (product-service) +
+#     256Mi (pgbouncer) = 5376Mi -> ~2.3x headroom -> 12Gi
+#
+# Deliberately lower than production's quota (see overlays/production/
+# resource-quota.yaml) — staging runs single-replica workloads to keep cost
+# down, so it doesn't need to absorb full HPA-max scale-out. If staging is
+# ever used for real load testing, this quota will need to be raised (or the
+# HPAs' maxReplicas will effectively be capped by it first).
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sk-staging-quota
+spec:
+  hard:
+    requests.cpu: "3"
+    requests.memory: 6Gi
+    limits.cpu: "12"
+    limits.memory: 12Gi
+    pods: "40"
+    services: "20"
+    configmaps: "20"
+    secrets: "20"
+    persistentvolumeclaims: "5"
+---
+# Safety net for any container that omits requests/limits (defensive — every
+# Deployment in base/ already declares both explicitly). Bounds match the
+# largest already-declared container (product-service: requests 250m/512Mi,
+# limits 1000m/1536Mi) with room above it.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sk-staging-limits
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      default:
+        cpu: 500m
+        memory: 512Mi
+      min:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: "2"
+        memory: 2Gi

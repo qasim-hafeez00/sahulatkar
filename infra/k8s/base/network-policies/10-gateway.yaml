@@ -1,0 +1,109 @@
+# gateway is the API hub: web-admin/web-customer call it, several backends
+# POST async callbacks into its /internal/* routes
+# (apps/gateway/src/api/v1/internal.py — product-extracted,
+# extraction-failed, checkout-status, shipment-register(ed),
+# users/{id}/credit-result, credit/update-result, payments/{id}/confirm),
+# and it in turn calls product-service (order_service.py kicks off
+# extraction) plus is wired (src/core/http_client.py) to call
+# notification-service/credit-engine/payment-orchestrator/ledger-service for
+# admin and order flows.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-gateway
+spec:
+  podSelector:
+    matchLabels:
+      app: gateway
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # web-admin / web-customer server-side calls into gateway.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: web-admin
+        - podSelector:
+            matchLabels:
+              app: web-customer
+      ports:
+        - protocol: TCP
+          port: 8000
+    # Async callbacks from product-service / credit-engine /
+    # payment-orchestrator into gateway's /internal/* routes.
+    - from:
+        - podSelector:
+            matchLabels:
+              app: product-service
+        - podSelector:
+            matchLabels:
+              app: credit-engine
+        - podSelector:
+            matchLabels:
+              app: payment-orchestrator
+      ports:
+        - protocol: TCP
+          port: 8000
+    # overlays/*/ingress.yaml (landed by the parallel Ingress/cert-manager
+    # Phase 3 track) confirms gateway is the sole public front door,
+    # routing staging-api./api.sahulatkar.com here on Service port 80
+    # (targetPort 8000) — needed for gateway's webhook routes too
+    # (JAZZCASH_WEBHOOK_SECRET / SAFEPAY_WEBHOOK_SECRET /
+    # STRIPE_WEBHOOK_SECRET in src/config.py). That Ingress resource still
+    # requires an nginx ingress controller to be manually installed
+    # in-cluster (see the comment at the top of ingress.yaml); its
+    # namespace/labels aren't known from this repo, so this rule is left
+    # open cluster-wide-by-namespace rather than pinned to a guessed
+    # namespace. Tighten to a namespaceSelector scoped to the actual
+    # ingress-controller namespace once it's installed.
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: product-service
+        - podSelector:
+            matchLabels:
+              app: credit-engine
+        - podSelector:
+            matchLabels:
+              app: payment-orchestrator
+        - podSelector:
+            matchLabels:
+              app: ledger-service
+        - podSelector:
+            matchLabels:
+              app: notification-service
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432
+    # ASSUMPTION: Redis is external to the cluster (ElastiCache or similar —
+    # see sk-redis-credentials in both overlays' secrets.yaml, hostnames
+    # redis-staging.internal / redis-production.internal). Real CIDR is not
+    # discoverable from this repo; scoped by port only. Tighten to the
+    # actual VPC/subnet CIDR once known.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6379
+    # External HTTPS: S3 (contract/KYC storage), NADRA/Shufti KYC vendors.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

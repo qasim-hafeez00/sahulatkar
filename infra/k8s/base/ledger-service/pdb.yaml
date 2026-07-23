@@ -1,0 +1,12 @@
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: ledger-service
+  labels:
+    app: ledger-service
+    component: backend
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: ledger-service

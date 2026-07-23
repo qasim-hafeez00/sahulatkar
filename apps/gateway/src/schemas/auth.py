@@ -13,6 +13,7 @@ class RegisterInitiateRequest(BaseModel):
 class RegisterInitiateResponse(BaseModel):
     otp_token: str
     masked_phone: str
+    dev_otp: Optional[str] = Field(default=None, description="[DEV ONLY] OTP code — not present in production")
 
 class VerifyOtpRequest(BaseModel):
     otp_token: str

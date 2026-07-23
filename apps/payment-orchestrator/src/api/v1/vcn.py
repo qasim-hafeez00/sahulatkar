@@ -1,7 +1,7 @@
 """
 VCN API endpoints.
 
-External endpoints (JWT auth):
+External endpoints (JWT auth + order ownership):
   - POST /payments/vcn/issue         — Issue VCN for an order
   - POST /payments/vcn/{id}/void     — Void a VCN
   - GET  /payments/vcn/{order_id}/status — VCN status for an order
@@ -17,7 +17,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import VirtualCard
 
-from src.core.dependencies import get_db, get_redis, require_internal_token, rate_limit
+from src.api.v1.payments import _get_order_for_user
+from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token, rate_limit
 from src.core.metrics import VCN_VOID_TOTAL
 from src.schemas.vcn import VcnDecryptResponse, VcnIssueRequest, VcnIssueResponse, VcnStatusResponse
 from src.services.vcn import VcnService
@@ -30,9 +31,11 @@ router = APIRouter(prefix="/payments", tags=["vcn"])
 async def issue_vcn(
     request_payload: VcnIssueRequest,
     request: Request,
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Issue a VCN for an order. Requires CONTRACTS_SIGNED state."""
+    await _get_order_for_user(db, request_payload.order_id, current_user.id)
     service = VcnService(db, get_redis(request))
     card = await service.issue_vcn(
         order_id=request_payload.order_id,
@@ -54,10 +57,11 @@ async def issue_vcn(
     )
 
 
-@router.post("/vcn/{vcn_id}/void")
+@router.post("/vcn/{vcn_id}/void", dependencies=[Depends(rate_limit(10, 60))])
 async def void_vcn(
     vcn_id: int,
     reason: str = "manual_void",
+    current_user=Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
 ):
     """Void a VCN. Blocked VCN cannot be re-activated."""
@@ -66,6 +70,7 @@ async def void_vcn(
     )
     if card is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="VCN_NOT_FOUND")
+    await _get_order_for_user(db, card.order_id, current_user.id)
     if card.status == "voided":
         return {"status": "already_voided", "vcn_id": vcn_id}
 
@@ -102,8 +107,13 @@ async def void_vcn(
 
 
 @router.get("/vcn/{order_id}/status", response_model=VcnStatusResponse)
-async def vcn_status(order_id: int, db: AsyncSession = Depends(get_db)):
+async def vcn_status(
+    order_id: int,
+    current_user=Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     """Get VCN status for a given order."""
+    await _get_order_for_user(db, order_id, current_user.id)
     card = await db.scalar(
         select(VirtualCard).where(
             VirtualCard.order_id == order_id,

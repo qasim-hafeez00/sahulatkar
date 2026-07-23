@@ -66,21 +66,30 @@ class BillingSweepService:
             ],
         }
 
-    async def execute_sweep(self, as_of: date | None = None, batch_size: int = 500) -> dict[str, int]:
+    async def execute_sweep(self, as_of: date | None = None, batch_size: int = 500, dry_run: bool = False) -> dict[str, int]:
         """
         Execute billing sweep: detect overdue installments and apply late fees.
-        
+
         This sweep is a DETECTION and LATE-FEE service, not a payment trigger.
         Payment execution is owned by Payment Orchestrator and triggered separately.
         Ledger service listens for payment.installment_paid events and records entries.
-        
+
         Processes installments in batches of batch_size to avoid hitting memory
         limits or database query timeout when thousands of installments are due.
-        
+
         Args:
             as_of: Date to check (defaults to today)
             batch_size: Number of installments per batch (default 500)
-            
+            dry_run: When True, detects/counts overdue installments and previews
+                late fee eligibility exactly as a normal run would, but skips the
+                actual late-fee journal entry (and its commit) and every outbound
+                event publish (installments_overdue, payment_collection_triggered,
+                billing_installment_overdue) that a normal run would fire --
+                consistent with the CLI flag's documented "no database
+                modifications" contract (previously this flag only changed the
+                completion log message; the sweep still wrote late fees and
+                published downstream-triggering events regardless of dry_run).
+
         Returns:
             Aggregated statistics across all batches
         """
@@ -105,7 +114,9 @@ class BillingSweepService:
         try:
             # Aggregate stats across all batches
             aggregate_stats = {"total": 0, "success": 0, "failed": 0, "already_paid": 0, "newly_overdue": 0, "late_fees_applied": 0}
-            overdue_processor = OverdueProcessor(self.db, publisher=self.publisher)
+            # dry_run: build OverdueProcessor without a publisher so its internal
+            # mark_overdue_batch() -> publish_installments_overdue() no-ops.
+            overdue_processor = OverdueProcessor(self.db, publisher=self.publisher if not dry_run else None)
             late_fee_service = LateFeeService(self.db)
 
             # Count due installments for reporting only; payment trigger is external
@@ -136,12 +147,12 @@ class BillingSweepService:
                     # BV-01 fallback: We compute days_overdue in-memory since we no longer write it to DB
                     days_overdue = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0
                     late_fee = await overdue_processor.compute_late_fee_amount(overdue_inst, days_overdue)
-                    if late_fee > 0:
+                    if late_fee > 0 and not dry_run:
                         result = await late_fee_service.apply_late_fee_to_installment(overdue_inst.id, late_fee)
                         if result["status"] == "applied":
                             aggregate_stats["late_fees_applied"] += 1
 
-                if self.publisher:
+                if self.publisher and not dry_run:
                     # LS-CRIT-04: Trigger auto-collection by Payment Orchestrator for each overdue installment.
                     for overdue_inst in overdue_candidates:
                         days_overdue_inst = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0

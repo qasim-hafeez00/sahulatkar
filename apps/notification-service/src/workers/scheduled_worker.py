@@ -33,7 +33,7 @@ async def fire_scheduled_notifications() -> dict:
     A scheduled notification is due when:
       - fired_at IS NULL     (not yet fired)
       - cancelled_at IS NULL (not manually cancelled)
-      - scheduled_for <= now (due time has elapsed)
+      - fire_at <= now       (due time has elapsed)
 
     After firing, sets fired_at to the current UTC timestamp.
     """
@@ -45,7 +45,7 @@ async def fire_scheduled_notifications() -> dict:
         query = select(ScheduledNotification).where(
             ScheduledNotification.fired_at.is_(None),
             ScheduledNotification.cancelled_at.is_(None),
-            ScheduledNotification.scheduled_for <= now,
+            ScheduledNotification.fire_at <= now,
         ).limit(200)  # Process at most 200 per sweep to avoid long-running transactions
 
         pending = list((await db.scalars(query)).all())
@@ -61,7 +61,7 @@ async def fire_scheduled_notifications() -> dict:
                 await ns.create_notification(
                     user_id=scheduled.user_id,
                     event_type=scheduled.event_type,
-                    template_vars=scheduled.template_vars or {},
+                    template_vars=scheduled.payload or {},
                     idempotency_key=f"scheduled-{scheduled.id}",
                     source_reference=f"scheduled:{scheduled.id}",
                 )

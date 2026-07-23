@@ -2,7 +2,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from sqlalchemy import select
-from sk_shared.models.payment import Installment, InstallmentStatus
+from sk_shared.models.payment import Installment, Loan
 from sk_shared.models.order import Order
 from sk_shared.database import SessionLocal
 from sk_shared.redis_client import get_redis_client
@@ -28,15 +28,20 @@ async def fire_installment_reminders() -> dict:
         event_type = f"billing.installment_due_d{days_before}"
 
         async with SessionLocal() as db:
-            query = select(Installment, Order).join(Order, Order.id == Installment.order_id).where(
-                Installment.due_date == target_date,
-                Installment.status == InstallmentStatus.PENDING,
+            query = (
+                select(Installment, Loan, Order)
+                .join(Loan, Loan.id == Installment.loan_id)
+                .join(Order, Order.id == Loan.order_id)
+                .where(
+                    Installment.due_date == target_date,
+                    Installment.status == "pending",
+                )
             )
 
             rows = (await db.execute(query)).all()
             ns = NotificationService(db=db, redis=redis)
 
-            for installment, order in rows:
+            for installment, loan, order in rows:
                 stats["processed"] += 1
                 idempotency_key = f"reminder-d{days_before}-installment-{installment.id}-{target_date}"
 
@@ -45,11 +50,11 @@ async def fire_installment_reminders() -> dict:
                         user_id=order.user_id,
                         event_type=event_type,
                         template_vars={
-                            "installment_amount": str(installment.amount),
+                            "installment_amount": str(installment.total_amount),
                             "due_date": str(installment.due_date),
                             "order_description": order.product_description or f"Order #{order.id}",
                             "installment_number": str(installment.installment_number),
-                            "total_installments": str(installment.total_installments or ""),
+                            "total_installments": str(loan.installment_count),
                         },
                         idempotency_key=idempotency_key,
                         source_reference=f"installment:{installment.id}",
@@ -63,7 +68,10 @@ async def fire_installment_reminders() -> dict:
                         "error": str(e),
                     })
 
-    logger.info("Reminder sweep complete", extra=stats)
+    # extra={"stats": stats} rather than extra=stats: stats's "created" key
+    # collides with LogRecord's own builtin "created" (timestamp) attribute,
+    # which makes logging.info() raise KeyError on every call.
+    logger.info("Reminder sweep complete", extra={"stats": stats})
     return stats
 
 
@@ -89,11 +97,12 @@ async def fire_overdue_reminders() -> dict:
         async with SessionLocal() as db:
             query = (
                 select(Installment, Order)
-                .join(Order, Order.id == Installment.order_id)
+                .join(Loan, Loan.id == Installment.loan_id)
+                .join(Order, Order.id == Loan.order_id)
                 .where(
                     Installment.due_date == target_date,
-                    # Still unpaid — OVERDUE status or PENDING past due date
-                    Installment.status.in_([InstallmentStatus.OVERDUE, InstallmentStatus.PENDING]),
+                    # Still unpaid — overdue status or pending past due date
+                    Installment.status.in_(["overdue", "pending"]),
                 )
             )
 
@@ -110,7 +119,7 @@ async def fire_overdue_reminders() -> dict:
                         user_id=order.user_id,
                         event_type=event_type,
                         template_vars={
-                            "installment_amount": str(installment.amount),
+                            "installment_amount": str(installment.total_amount),
                             "due_date": str(installment.due_date),
                             "days_overdue": str(days_overdue),
                             "order_description": order.product_description or f"Order #{order.id}",
@@ -128,7 +137,7 @@ async def fire_overdue_reminders() -> dict:
                         "error": str(e),
                     })
 
-    logger.info("Overdue reminder sweep complete", extra=stats)
+    logger.info("Overdue reminder sweep complete", extra={"stats": stats})
     return stats
 
 

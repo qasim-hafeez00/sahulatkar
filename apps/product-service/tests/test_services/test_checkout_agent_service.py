@@ -67,13 +67,16 @@ async def test_process_job_sets_pending_verification_payload_when_unverified(db_
     await db_session.commit()
 
     service = CheckoutAgentService(db_session, redis_mock)
-    
+
     # Mock the internal components of the orchestrator
     service.form_filler.run_checkout = AsyncMock(return_value={
         "merchant_order_id": "SK-1",
         "merchant_order_url": "https://m.com/order"
     })
     service.verifier.verify_charge = AsyncMock(return_value=False)
+    service._fetch_vcn_credentials = AsyncMock(return_value={
+        "pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027",
+    })
 
     await service.process_job({"execution_id": str(execution.uuid)})
 

@@ -1,0 +1,114 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: payment-orchestrator
+  labels:
+    app: payment-orchestrator
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: payment-orchestrator
+  template:
+    metadata:
+      labels:
+        app: payment-orchestrator
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sk-payment-orchestrator
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: payment-orchestrator
+          image: sk-payment-orchestrator:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: "payment-orchestrator"
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: environment
+            # AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md):
+            # gates src/config.py::get_settings()'s Secrets Manager attempt.
+            # Requires the sk-payment-orchestrator ServiceAccount to be
+            # IRSA-annotated with the
+            # secrets_manager_irsa_role_arns["payment-orchestrator"] Terraform output.
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: aws_region
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: log_level
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sk-db-credentials
+                  key: database_url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sk-redis-credentials
+                  key: payment_orchestrator_url
+            - name: JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sk-jwt-keys
+                  key: jwt_public_key
+            - name: JWT_PRIVATE_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sk-jwt-keys
+                  key: jwt_private_key
+            - name: INTERNAL_API_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sk-internal-service-token
+                  key: internal_api_token
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir: {}

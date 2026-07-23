@@ -2,7 +2,7 @@ from __future__ import annotations
 from datetime import date, datetime
 from decimal import Decimal
 from typing import Optional
-from sqlalchemy import BigInteger, Boolean, Date, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, Integer
+from sqlalchemy import BigInteger, Boolean, CheckConstraint, Date, DateTime, ForeignKey, Index, Numeric, String, Text, UniqueConstraint, Integer
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
@@ -55,6 +55,7 @@ class JournalEntry(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         Index("ix_journal_entries_entry_date", "entry_date"),
         Index("ix_journal_entries_source", "source_type", "source_id"),
         UniqueConstraint("source_type", "source_id", name="uq_journal_entries_source"),
+        CheckConstraint("total_debit = total_credit", name="chk_journal_entries_balanced"),
     )
 
 
@@ -155,5 +156,5 @@ class LedgerAccountBalance(Base, TimestampMixin):
 
     __table_args__ = (
         Index("ix_ledger_account_balances_account_date", "account_id", "snapshot_date"),
-        UniqueConstraint("account_id", "snapshot_date", name="uq_ledger_account_balance_date"),
+        UniqueConstraint("account_id", "snapshot_date", "currency", name="uq_ledger_account_balance_date"),
     )

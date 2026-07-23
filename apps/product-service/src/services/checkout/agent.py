@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.config import settings
+from src.core.http_client import request as internal_http_request
 from src.middleware.metrics import CHECKOUT_STEP_DURATION
 from src.services.s3_service import S3Service
 from src.services.checkout.form_filler import CheckoutFormFiller
@@ -48,12 +49,16 @@ class CheckoutAgentService:
         *,
         order_id: int,
         vcn_id: int,
-        pan: str | None = None,
-        cvv: str | None = None,
         correlation_id: str | None = None,
         force_failure: bool = False,
     ) -> PurchaseExecution:
-        """Enqueue a new checkout job into the FIFO worker queue."""
+        """Enqueue a new checkout job into the FIFO worker queue.
+
+        The job payload intentionally never carries PAN/CVV — card data must never
+        sit in a Redis queue or DLQ in plaintext. The worker fetches it just-in-time
+        from Payment Orchestrator's internal decrypt endpoint (see
+        `_fetch_vcn_credentials`) right before it's needed.
+        """
         existing = await self.db.scalar(
             select(PurchaseExecution)
             .where(
@@ -82,14 +87,26 @@ class CheckoutAgentService:
             "execution_id": str(execution.uuid),
             "order_id": order_id,
             "vcn_id": vcn_id,
-            "pan": pan,
-            "cvv": cvv,
             "correlation_id": correlation_id,
             "force_failure": force_failure,
         }
         # BUG-02 FIX: Use lpush for FIFO behavior.
         await self.redis.lpush(QueueName.CHECKOUT, json.dumps(payload))
         return execution
+
+    async def _fetch_vcn_credentials(self, order_id: int) -> dict:
+        """Fetch plaintext PAN/CVV/expiry for an order's VCN, just-in-time.
+
+        Calls Payment Orchestrator's internal-only decrypt endpoint instead of
+        ever persisting card data in Redis queues/DLQ or the admin API.
+        """
+        response = await internal_http_request(
+            "GET",
+            f"{settings.PAYMENT_ORCHESTRATOR_URL}/api/v1/payments/internal/vcn/{order_id}/decrypt",
+            headers={"X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN},
+        )
+        response.raise_for_status()
+        return response.json()
 
     async def process_job(self, payload: dict) -> None:
         """Main entry point for background workers to execute a checkout job."""
@@ -137,18 +154,19 @@ class CheckoutAgentService:
 
             self.form_filler.set_step_callback(emit_step)
 
-            # Handover credentials: we now expect these in the job payload
-            # rather than decrypting them from the database, satisfying VIOLATION-01.
-            pan = payload.get("pan") or ""
-            cvv = payload.get("cvv") or ""
+            # Card data is never carried in the queue payload — fetch it
+            # just-in-time from Payment Orchestrator's internal decrypt endpoint.
+            credentials = await self._fetch_vcn_credentials(execution.order_id)
 
             # Execute Playwright automation logic via FormFiller
             # BUG-01 FIX: order is passed explicitly.
             result = await self.form_filler.run_checkout(
                 product=product,
                 order=order,
-                pan=pan,
-                cvv=cvv,
+                pan=credentials["pan"],
+                cvv=credentials["cvv"],
+                exp_month=credentials["expiry_month"],
+                exp_year=credentials["expiry_year"],
                 attempt_number=execution.attempt_number,
                 execution_uuid=str(execution.uuid),
             )

@@ -85,3 +85,11 @@ resource "aws_iam_role" "irsa_workload" {
 
   tags = merge(local.default_tags, var.tags)
 }
+
+resource "aws_iam_role_policy" "irsa_workload_inline" {
+  count = var.enable_irsa_role && var.irsa_policy_json != "" ? 1 : 0
+
+  name   = "sk-${var.environment}-${var.irsa_role_name}-policy"
+  role   = aws_iam_role.irsa_workload[0].id
+  policy = var.irsa_policy_json
+}

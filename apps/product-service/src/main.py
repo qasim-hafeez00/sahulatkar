@@ -15,7 +15,7 @@ from sk_shared.database import SessionLocal
 
 from src.api.routes import api_router
 from src.api.v1.health import router as health_router
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from src.core.http_client import close_http_client, init_http_client
 from src.middleware.logging import RequestLoggingMiddleware
 from src.middleware.metrics import MetricsMiddleware
@@ -62,6 +62,14 @@ async def _run_listener_forever(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Refuse to boot outside `local` with missing/placeholder external
+    # credentials (Rye, BrightData, Groq, INTERNAL_SERVICE_TOKEN, S3 buckets).
+    try:
+        validate_critical_settings()
+    except RuntimeError as exc:
+        logger.critical("STARTUP_ABORTED: %s", exc)
+        raise
+
     app.state.redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
     await init_http_client()
 

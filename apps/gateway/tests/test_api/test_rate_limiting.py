@@ -19,7 +19,7 @@ async def test_global_rate_limit_returns_429_after_threshold(client: AsyncClient
     100 requests per minute per IP is the global limit.
     We exceed it by sending 101 rapid requests to the health endpoint
     (which is exempt) and a lightweight auth endpoint.
-    
+
     NOTE: The health route is skipped by rate_limit_middleware, so we use
     /api/v1/auth/login (unauthenticated) which does count.
     We use a very tight loop to fill the fixed window bucket.
@@ -81,6 +81,9 @@ async def test_per_user_rate_limit_returns_429_after_60(client: AsyncClient, tes
 
 
 async def test_per_admin_rate_limit_returns_429_after_30(client: AsyncClient, test_admin):
+    """
+    Admin tier is settings.ADMIN_RATE_LIMIT_PER_MIN (default 30 req/min per admin_id).
+    """
     _, token = test_admin
     headers = _auth(token)
 

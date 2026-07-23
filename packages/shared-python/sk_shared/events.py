@@ -11,6 +11,13 @@ from pydantic import BaseModel, field_validator
 
 EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED = "payment.down_payment_confirmed"
 EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
+EVENT_PAYMENT_CONFIRMED = "payment.confirmed"
+EVENT_PAYMENT_SESSION_EXPIRED = "payment.session_expired"
+EVENT_PAYMENT_REFUND_INITIATED = "payment.refund_initiated"
+EVENT_PAYMENT_REFUND_SETTLED = "payment.refund_settled"
+EVENT_PAYMENT_REFUND_FAILED = "payment.refund_failed"
+EVENT_PAYMENT_ADJUSTMENT_REQUESTED = "payment.adjustment_requested"
+EVENT_VCN_CHARGED = "vcn.charged"
 EVENT_LEDGER_DOWN_PAYMENT_POSTED = "ledger.down_payment_posted"
 EVENT_LEDGER_PURCHASE_POSTED = "ledger.purchase_posted"
 EVENT_LEDGER_INSTALLMENT_PAID = "ledger.installment_paid"
@@ -35,15 +42,31 @@ EVENT_LEDGER_PAYMENT_COLLECTION_TRIGGERED = "ledger.payment_collection_triggered
 # NS-BL-05: Per-installment overdue alert published by billing sweep for notification delivery.
 EVENT_BILLING_INSTALLMENT_OVERDUE = "billing.installment_overdue"
 
+# Credit Engine events — see apps/credit-engine/src/services/pipeline.py.
+EVENT_CREDIT_EVALUATION_REQUESTED = "credit.evaluation_requested"
+EVENT_CREDIT_APPROVED = "credit.approved"
+EVENT_CREDIT_REJECTED = "credit.rejected"
+EVENT_CREDIT_MANUAL_REVIEW_REQUIRED = "credit.manual_review_required"
+EVENT_CREDIT_LIMIT_CHANGED = "credit.limit_changed"
+EVENT_FRAUD_DETECTED = "fraud.detected"
+EVENT_CUSTOMER_RISK_UPDATED = "customer.risk_updated"
+
 # All known event names — used by EventEnvelopeSchema for publish-side validation.
 _KNOWN_EVENTS: frozenset[str] = frozenset({
     EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED,
     EVENT_PAYMENT_INSTALLMENT_PAID,
+    EVENT_PAYMENT_CONFIRMED,
+    EVENT_PAYMENT_SESSION_EXPIRED,
+    EVENT_PAYMENT_REFUND_INITIATED,
+    EVENT_PAYMENT_REFUND_SETTLED,
+    EVENT_PAYMENT_REFUND_FAILED,
+    EVENT_PAYMENT_ADJUSTMENT_REQUESTED,
+    EVENT_VCN_ISSUED,
+    EVENT_VCN_CHARGED,
     EVENT_LEDGER_DOWN_PAYMENT_POSTED,
     EVENT_LEDGER_PURCHASE_POSTED,
     EVENT_LEDGER_INSTALLMENT_PAID,
     EVENT_LEDGER_LATE_FEE_RECORDED,
-    EVENT_VCN_ISSUED,
     EVENT_ORDER_PURCHASE_CONFIRMED,
     EVENT_ORDER_CANCELLED,
     EVENT_LOAN_CREATED,
@@ -58,6 +81,13 @@ _KNOWN_EVENTS: frozenset[str] = frozenset({
     EVENT_LEDGER_SHARIAH_VIOLATION_DETECTED,
     EVENT_LEDGER_PAYMENT_COLLECTION_TRIGGERED,
     EVENT_BILLING_INSTALLMENT_OVERDUE,
+    EVENT_CREDIT_EVALUATION_REQUESTED,
+    EVENT_CREDIT_APPROVED,
+    EVENT_CREDIT_REJECTED,
+    EVENT_CREDIT_MANUAL_REVIEW_REQUIRED,
+    EVENT_CREDIT_LIMIT_CHANGED,
+    EVENT_FRAUD_DETECTED,
+    EVENT_CUSTOMER_RISK_UPDATED,
 })
 
 
