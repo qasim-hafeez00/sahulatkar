@@ -82,7 +82,7 @@ async def test_bug01_order_is_passed_to_playwright_checkout(db_session, redis_mo
 
     captured: dict = {}
 
-    async def fake_run_checkout(product, order, pan, cvv, attempt_number, execution_uuid):
+    async def fake_run_checkout(product, order, pan, cvv, exp_month, exp_year, attempt_number, execution_uuid):
         captured["order"] = order
         return {
             "merchant_order_id": "SK-TEST-001",
@@ -91,11 +91,16 @@ async def test_bug01_order_is_passed_to_playwright_checkout(db_session, redis_mo
         }
 
     service = CheckoutAgentService(db_session, redis_mock)
-    
+
     # Patch the class methods
     with patch("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", side_effect=fake_run_checkout):
         with patch("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", AsyncMock(return_value=True)):
-            await service.process_job({"execution_id": str(execution.uuid)})
+            with patch.object(
+                CheckoutAgentService,
+                "_fetch_vcn_credentials",
+                AsyncMock(return_value={"pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027"}),
+            ):
+                await service.process_job({"execution_id": str(execution.uuid)})
 
     assert "order" in captured, (
         "BUG-01 not fixed: run_checkout was not called with 'order' parameter."
@@ -126,7 +131,7 @@ async def test_bug03_screenshot_captured_before_browser_close_and_uploaded(db_se
     FAKE_SCREENSHOT = b"\xff\xd8\xff\xe0fake_jpeg_bytes"
     s3_uploads: list[dict] = []
 
-    async def fake_run_checkout(product, order, pan, cvv, attempt_number, execution_uuid):
+    async def fake_run_checkout(product, order, pan, cvv, exp_month, exp_year, attempt_number, execution_uuid):
         return {
             "merchant_order_id": "SK-TEST-002",
             "merchant_order_url": "https://example.com/confirm",
@@ -138,11 +143,16 @@ async def test_bug03_screenshot_captured_before_browser_close_and_uploaded(db_se
         return key
 
     service = CheckoutAgentService(db_session, redis_mock)
-    
+
     with patch("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", side_effect=fake_run_checkout):
         with patch("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", AsyncMock(return_value=True)):
             with patch.object(S3Service, "upload_bytes", fake_s3_upload):
-                await service.process_job({"execution_id": str(execution.uuid)})
+                with patch.object(
+                    CheckoutAgentService,
+                    "_fetch_vcn_credentials",
+                    AsyncMock(return_value={"pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027"}),
+                ):
+                    await service.process_job({"execution_id": str(execution.uuid)})
 
     assert len(s3_uploads) == 1
     assert s3_uploads[0]["data"] == FAKE_SCREENSHOT
@@ -171,7 +181,7 @@ async def test_s3_upload_failure_does_not_fail_checkout(db_session, redis_mock):
     await db_session.commit()
     await db_session.refresh(execution)
 
-    async def fake_run_checkout(product, order, pan, cvv, attempt_number, execution_uuid):
+    async def fake_run_checkout(product, order, pan, cvv, exp_month, exp_year, attempt_number, execution_uuid):
         return {
             "merchant_order_id": "SK-TEST-003",
             "merchant_order_url": "https://example.com/confirm",
@@ -186,7 +196,12 @@ async def test_s3_upload_failure_does_not_fail_checkout(db_session, redis_mock):
     with patch("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", side_effect=fake_run_checkout):
         with patch("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", AsyncMock(return_value=True)):
             with patch.object(S3Service, "upload_bytes", fake_s3_upload_fail):
-                await service.process_job({"execution_id": str(execution.uuid)})
+                with patch.object(
+                    CheckoutAgentService,
+                    "_fetch_vcn_credentials",
+                    AsyncMock(return_value={"pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027"}),
+                ):
+                    await service.process_job({"execution_id": str(execution.uuid)})
 
     await db_session.refresh(execution)
     assert execution.status in {"pending_verification", "succeeded"}

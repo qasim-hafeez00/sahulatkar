@@ -14,7 +14,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from sk_shared.redis_client import get_redis_client
 
 from src.api.routes import api_router
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from src.core.logging import setup_logging
 from src.core.metrics import EVENT_LISTENER_UP, REQUEST_LATENCY
 
@@ -26,6 +26,12 @@ async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
     setup_logging(settings.SERVICE_NAME, settings.LOG_LEVEL)
     logger.info("payment-orchestrator starting", extra={"env": settings.ENVIRONMENT})
+
+    # Boot-time credential validation: refuse to start outside `local` if any
+    # payment-gateway secret (Stripe/Safepay/JazzCash/Raast), the VCN
+    # PAN/CVV encryption key, or the internal service token is still at its
+    # empty placeholder default. Raises RuntimeError, which aborts startup.
+    validate_critical_settings()
 
     # Security: warn if internal token is too short or not set
     if not settings.INTERNAL_API_TOKEN or len(settings.INTERNAL_API_TOKEN) < 32:

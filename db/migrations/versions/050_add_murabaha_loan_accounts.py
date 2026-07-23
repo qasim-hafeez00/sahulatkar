@@ -1,7 +1,7 @@
 """Add Murabaha loan origination GL accounts
 
 Revision ID: 050
-Revises: 38ddd97d3de6
+Revises: 049a
 Create Date: 2026-04-28 00:00:00.000000
 
 These three accounts support the loan.created journal entry that posts the
@@ -12,7 +12,7 @@ from typing import Sequence, Union
 from alembic import op
 
 revision: str = '050'
-down_revision: Union[str, None] = '38ddd97d3de6'
+down_revision: Union[str, None] = '049a'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 

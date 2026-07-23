@@ -1,15 +1,19 @@
+import uuid
+import hashlib
 import pytest
 from datetime import datetime, timedelta, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy import select
 
 from sk_shared.constants import OrderState, RedisNS
+from sk_shared.models.auth import AdminUser
 from sk_shared.models.contracts import MurabahaContract
 from sk_shared.models.contracts import WakalahAgreement
 from sk_shared.models.order import Order
 from sk_shared.models.payment import Installment, Loan
 from sk_shared.models.product import Merchant, Product
-from sk_shared.security import hash_otp
+from sk_shared.security import create_access_token, hash_otp
+from src.config import settings
 from tests.conftest import TestingSessionLocal
 
 pytestmark = pytest.mark.asyncio
@@ -275,4 +279,45 @@ async def test_admin_contract_pdf_returns_download_url(client, test_user, test_a
     data = r_pdf.json()
     assert "download_url" in data
     assert data["download_url"]
+
+
+async def test_admin_contract_pdf_rejects_admin_without_read_order_permission(client, test_user, redis_mock):
+    """P1: get_contract_pdf must enforce the same read_order permission as
+    list_wakalah/list_murabaha, not just any valid admin session."""
+    user, token = test_user
+    order = await _seed_order(user.id)
+
+    r_wk_gen = await client.post(
+        "/api/v1/contracts/wakalah/generate",
+        headers=_auth(token),
+        json={"order_id": order.id},
+    )
+    assert r_wk_gen.status_code == 200
+    wk_contract_id = r_wk_gen.json()["contract_id"]
+
+    async with TestingSessionLocal() as session:
+        limited_admin = AdminUser(
+            uuid=uuid.uuid4(),
+            email="limited-admin@test.com",
+            password_hash="fixture-not-used",
+            mfa_enabled=False,
+        )
+        session.add(limited_admin)
+        await session.commit()
+        await session.refresh(limited_admin)
+
+    limited_token = create_access_token(
+        {"admin_id": limited_admin.id, "role": "support_agent", "permissions": ["read_ticket"], "token_type": "admin"},
+        settings.JWT_PRIVATE_KEY,
+        timedelta(seconds=3600),
+    )
+    token_hash = hashlib.sha256(limited_token.encode()).hexdigest()
+    await redis_mock.set(f"sk:auth:admin_session:{token_hash}", f"{limited_admin.id}:support_agent", 3600)
+
+    r_pdf = await client.get(
+        f"/api/v1/contracts/admin/wakalah/{wk_contract_id}/pdf",
+        headers=_auth(limited_token),
+    )
+    assert r_pdf.status_code == 403
+    assert r_pdf.json()["detail"] == "Missing required permission"
 

@@ -13,12 +13,24 @@ class CreditCheckRequest(BaseModel):
 
 class CreditCheckResponse(BaseModel):
     approved: bool
+    outcome: str = "approved"
     risk_band: str
     approved_limit: float
     down_payment_pct: float
     rejection_reason: str | None
+    manual_review_required: bool = False
+    requested_amount: float | None = None
+    suggested_down_payment_pct: float | None = None
     processing_time_ms: int
     explanation: dict[str, Any]
+
+
+class CreditEvaluateRequest(BaseModel):
+    user_id: str
+    order_amount: float = Field(gt=0)
+    product_category: str = "general"
+    is_first_order: bool = False
+    device_fingerprint_hash: str | None = None
 
 
 class CreditApplyRequest(BaseModel):
@@ -34,6 +46,7 @@ class CreditApplyRequest(BaseModel):
     order_amount: float = Field(gt=0)
     product_category: str = "general"
     is_first_order: bool = False
+    device_fingerprint_hash: str | None = None
 
 
 class CreditApplyResponse(BaseModel):
@@ -42,6 +55,57 @@ class CreditApplyResponse(BaseModel):
     approved_limit: float | None
     risk_band: str | None
     rejection_reason: str | None
+    manual_review_required: bool = False
+    outcome: str | None = None
+    suggested_down_payment_pct: float | None = None
+
+
+class PrequalifyRequest(BaseModel):
+    user_id: str
+    product_category: str = "general"
+
+
+class PrequalifyResponse(BaseModel):
+    eligible: bool
+    reason: str | None
+    indicative_limit: float
+    down_payment_pct: float | None
+    risk_band: str | None
+    processing_time_ms: int
+
+
+class CreditScoreResponse(BaseModel):
+    user_id: str
+    risk_band: str
+    score: float
+    identity_score: float
+    alt_data_score: float
+    model_version: str
+
+
+class CreditHistoryItem(BaseModel):
+    application_id: str
+    application_type: str
+    status: str
+    requested_limit: float | None
+    approved_limit: float | None
+    rejection_reason: str | None
+    decided_by: str | None
+    created_at: datetime
+
+
+class CreditHistoryResponse(BaseModel):
+    user_id: str
+    applications: list[CreditHistoryItem]
+
+
+class RecalculateResponse(BaseModel):
+    user_id: str
+    current_limit: float
+    recalculated_limit: float
+    risk_band: str
+    limit_increased: bool
+    delta: float
 
 
 class CreditStatusItem(BaseModel):

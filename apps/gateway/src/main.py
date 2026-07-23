@@ -120,14 +120,20 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+def _resolve_cors_origins() -> list[str]:
+    if settings.CORS_ORIGINS:
+        return [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]
+    origins = ["https://app.sahulatkar.pk", "https://admin.sahulatkar.pk"]
+    if settings.ENVIRONMENT != "production":
+        origins += ["http://localhost:3000", "http://localhost:3001", "http://127.0.0.1:3000"]
+    return origins
+
+
 app.add_middleware(SecurityHeadersMiddleware)
 app.add_middleware(RequestIDMiddleware)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "https://app.sahulatkar.pk",
-        "https://admin.sahulatkar.pk"
-    ],
+    allow_origins=_resolve_cors_origins(),
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],

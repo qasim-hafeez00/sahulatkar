@@ -62,3 +62,9 @@ variable "create_read_replica" {
   description = "Create production read replica"
   default     = true
 }
+
+variable "root_domain_name" {
+  type        = string
+  description = "Apex domain name whose Route53 hosted zone is used for ingress TLS (cert-manager DNS-01). Assumes the zone already exists / is delegated - see infra/terraform/modules/dns."
+  default     = "sahulatkar.com"
+}

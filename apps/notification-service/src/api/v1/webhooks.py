@@ -1,4 +1,5 @@
 import json
+import logging
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, status
 from datetime import datetime, timezone
@@ -17,6 +18,9 @@ from src.services.aftership_client import AfterShipClient
 from src.services.tracking_service import TrackingService
 
 router = APIRouter(prefix="/webhooks", tags=["Webhooks"])
+
+_sms_log = logging.getLogger("sms_delivery_webhook")
+_whatsapp_log = logging.getLogger("whatsapp_delivery_webhook")
 
 
 @router.post("/aftership", response_model=WebhookAck)
@@ -184,6 +188,11 @@ async def sms_delivery_receipt(
     if settings.JAZZ_SMS_WEBHOOK_SECRET:
         if not verify_hmac(raw, x_jazz_hmac_sha256 or "", settings.JAZZ_SMS_WEBHOOK_SECRET):
             raise HTTPException(status_code=403, detail="INVALID_SIGNATURE")
+    else:
+        _sms_log.warning(
+            "SMS delivery webhook received without signature verification — "
+            "set JAZZ_SMS_WEBHOOK_SECRET to enforce HMAC validation."
+        )
 
     payload = json.loads(raw.decode("utf-8"))
     message_id = payload.get("message_id") or payload.get("MessageSid")
@@ -228,6 +237,11 @@ async def whatsapp_delivery_receipt(
     if settings.JAZZ_WHATSAPP_WEBHOOK_SECRET:
         if not verify_hmac(raw, x_whatsapp_signature or "", settings.JAZZ_WHATSAPP_WEBHOOK_SECRET):
             raise HTTPException(status_code=403, detail="INVALID_SIGNATURE")
+    else:
+        _whatsapp_log.warning(
+            "WhatsApp delivery webhook received without signature verification — "
+            "set JAZZ_WHATSAPP_WEBHOOK_SECRET to enforce HMAC validation."
+        )
 
     payload = json.loads(raw.decode("utf-8"))
     message_id = payload.get("message_id")

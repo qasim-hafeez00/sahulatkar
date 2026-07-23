@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
+from sk_shared.models.hitl import HitlQueue
 
 from src.core.dependencies import get_current_admin, get_db, RequirePermission
 from src.schemas.hitl import HitlListResponse, HitlQueueItemResponse, HitlResolveRequest, HitlStatusResponse
@@ -11,6 +15,33 @@ from src.services.hitl_queue import HitlQueueService
 
 
 router = APIRouter(prefix="/admin/hitl", tags=["Admin HITL"])
+
+
+@router.get("/stats")
+async def get_hitl_stats(
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    today_start = datetime.utcnow().replace(hour=0, minute=0, second=0, microsecond=0)
+
+    pending = await db.scalar(
+        select(func.count()).select_from(HitlQueue).where(HitlQueue.status == "pending")
+    )
+    in_progress = await db.scalar(
+        select(func.count()).select_from(HitlQueue).where(HitlQueue.status.in_(["claimed", "in_progress"]))
+    )
+    resolved_today = await db.scalar(
+        select(func.count()).select_from(HitlQueue).where(
+            HitlQueue.status == "resolved",
+            HitlQueue.resolved_at >= today_start,
+        )
+    )
+
+    return {
+        "pending": int(pending or 0),
+        "in_progress": int(in_progress or 0),
+        "resolved_today": int(resolved_today or 0),
+    }
 
 
 def _serialize(item) -> HitlQueueItemResponse:

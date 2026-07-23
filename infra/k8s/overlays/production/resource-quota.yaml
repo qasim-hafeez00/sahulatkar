@@ -1,0 +1,63 @@
+# Derived from the base Deployments' declared requests/limits at each
+# workload's HPA maxReplicas (the real ceiling production is allowed to
+# scale out to — see each service's hpa.yaml: maxReplicas 8 for every
+# backend + web-customer, 6 for web-admin; pgbouncer has no HPA, fixed at
+# its base replicas: 2), plus modest (~10%) headroom for the alembic-migrate
+# Job and rolling-update surge, rounded up:
+#
+#   requests.cpu @ max scale: (gateway 100m + credit-engine 100m +
+#     payment-orchestrator 100m + ledger-service 100m +
+#     notification-service 100m + web-customer 100m) * 8 + product-service
+#     250m*8 + web-admin 100m*6 + pgbouncer 100m*2 = 7600m -> 8
+#   requests.memory @ max scale: 256Mi*8*6 + 512Mi*8 (product-service) +
+#     256Mi*6 (web-admin) + 128Mi*2 (pgbouncer) = 18176Mi -> ~20Gi
+#   limits.cpu @ max scale: 500m*8*6 + 1000m*8 (product-service) +
+#     500m*6 (web-admin) + 500m*2 (pgbouncer) = 36000m -> ~40
+#   limits.memory @ max scale: 512Mi*8*6 + 1536Mi*8 (product-service) +
+#     512Mi*6 (web-admin) + 256Mi*2 (pgbouncer) = 40448Mi -> ~44Gi
+#
+# Sized to the HPAs' own declared ceiling rather than below it — a tighter
+# quota would silently cap autoscaling under real load, which defeats the
+# HPAs' purpose. The quota's job here is to stop anything *beyond* what's
+# already declared (rogue extra Deployments/DaemonSets, debug pods, etc.),
+# not to be a second, stricter scaling limit.
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: sk-production-quota
+spec:
+  hard:
+    requests.cpu: "8"
+    requests.memory: 20Gi
+    limits.cpu: "40"
+    limits.memory: 44Gi
+    pods: "80"
+    services: "30"
+    configmaps: "30"
+    secrets: "30"
+    persistentvolumeclaims: "10"
+---
+# Safety net for any container that omits requests/limits (defensive — every
+# Deployment in base/ already declares both explicitly). Max bound set above
+# production's largest already-declared container (product-service: requests
+# 250m/512Mi, limits 1000m/1536Mi) to leave room for a heavier future
+# service without needing a LimitRange change.
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: sk-production-limits
+spec:
+  limits:
+    - type: Container
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      default:
+        cpu: 500m
+        memory: 512Mi
+      min:
+        cpu: 50m
+        memory: 64Mi
+      max:
+        cpu: "4"
+        memory: 4Gi

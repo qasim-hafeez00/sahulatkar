@@ -15,6 +15,12 @@ class RedisClient:
     async def set(self, key: str, value: str, ttl: Optional[int] = None) -> None:
         await self.redis.set(name=key, value=value, ex=ttl)
 
+    async def set_nx(self, key: str, value: str, ttl: Optional[int] = None) -> bool:
+        """Atomic SET-if-not-exists (single Redis round trip via NX) — True if this call
+        claimed the key, False if it already existed. Unlike a get-then-set pair, this closes
+        the race where two concurrent callers both see "not present" and both proceed."""
+        return bool(await self.redis.set(name=key, value=value, ex=ttl, nx=True))
+
     async def delete(self, key: str) -> None:
         await self.redis.delete(key)
 
@@ -52,6 +58,11 @@ class RedisClient:
     async def lrem(self, key: str, count: int, value: str) -> int:
         """Remove elements equal to value from the list (LREM)."""
         return await self.redis.lrem(key, count, value)
+
+    async def brpop(self, key: str, timeout: int = 0) -> Optional[tuple]:
+        """Blocking pop from the right of the list (BRPOP). Returns
+        (key, value) or None if timeout elapses with no item."""
+        return await self.redis.brpop(key, timeout=timeout)
 
     async def ping(self) -> bool:
         return await self.redis.ping()

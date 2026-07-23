@@ -1,0 +1,69 @@
+# Public entry point for the production environment. Only the services that
+# are meant to be reachable from outside the cluster are routed here (gateway
+# is the API front door for everything else - product-service, credit-engine,
+# payment-orchestrator, ledger-service, notification-service are internal
+# ClusterIP-only services that gateway calls over cluster DNS with a signed
+# X-Internal-Token, per apps/gateway/src/core/http_client.py, and are
+# intentionally NOT exposed here).
+#
+# Hostnames:
+#   - api.sahulatkar.com is CONFIRMED from infra/k8s/overlays/production/configmap.yaml
+#     (gateway_public_url), consistent with the staging-api.sahulatkar.com pattern
+#     that is independently confirmed in .github/workflows/build-and-push.yml.
+#   - sahulatkar.com / admin.sahulatkar.com are DERIVED from that pattern for
+#     web-customer/web-admin - NOT independently confirmed anywhere in CI or
+#     configmaps. Verify/adjust before relying on them (in particular, decide
+#     whether www.sahulatkar.com should also be included - it was left out
+#     here since nothing in the repo references it).
+#
+# Requires an nginx ingress controller (IngressClass "nginx") and cert-manager
+# to already be installed in-cluster (manual `helm install` bootstrap step,
+# see repo runbook) and the ClusterIssuer in cluster-issuer.yaml in this same
+# directory to already be applied (that file is intentionally NOT part of this
+# kustomization - see the comment at the top of cluster-issuer.yaml for why).
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: sk-ingress
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - api.sahulatkar.com
+        - sahulatkar.com
+        - admin.sahulatkar.com
+      secretName: sk-production-tls
+  rules:
+    - host: api.sahulatkar.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: gateway
+                port:
+                  number: 80
+    - host: sahulatkar.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-customer
+                port:
+                  number: 80
+    - host: admin.sahulatkar.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: web-admin
+                port:
+                  number: 80

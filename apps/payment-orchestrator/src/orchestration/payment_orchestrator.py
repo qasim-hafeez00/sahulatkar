@@ -8,7 +8,7 @@ from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.events import build_event_envelope
+from sk_shared.events import EVENT_PAYMENT_CONFIRMED, EVENT_PAYMENT_SESSION_EXPIRED, build_event_envelope
 from src.models.payment_workflow import PaymentWorkflow, PaymentEvent
 from src.models.outbox import OutboxEvent
 from src.state.payment_workflow import PaymentStatus, validate_transition, PaymentWorkflowError
@@ -110,7 +110,7 @@ class PaymentOrchestrator:
 
         # Emit domain event via Outbox
         await self._queue_event(
-            "payment.confirmed",
+            EVENT_PAYMENT_CONFIRMED,
             {
                 "workflow_id": workflow.id,
                 "order_id": workflow.order_id,
@@ -162,7 +162,7 @@ class PaymentOrchestrator:
         await self._log_event(workflow, old_status, PaymentStatus.EXPIRED, "session_timeout")
         self._emit_transition_log(workflow, old_status, PaymentStatus.EXPIRED, workflow.gateway)
         await self._queue_event(
-            "payment.session_expired",
+            EVENT_PAYMENT_SESSION_EXPIRED,
             {
                 "workflow_id": workflow.id,
                 "order_id": workflow.order_id,

@@ -1,10 +1,17 @@
 import uuid
 import hashlib
+import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select
+from sqlalchemy import select, text
 from fastapi import HTTPException, status
+
+logger = logging.getLogger("gateway")
+
+def _utcnow():
+    """Naive UTC datetime for TIMESTAMP WITHOUT TIME ZONE DB columns."""
+    return datetime.utcnow()
 
 from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token, get_password_hash
 from sk_shared.redis_client import RedisClient
@@ -24,7 +31,7 @@ class AuthService:
         if result.scalar_one_or_none():
             raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="PHONE_ALREADY_REGISTERED")
             
-        otp = generate_otp()
+        otp = "123456" if settings.ENVIRONMENT == "local" else generate_otp()
         otp_token = str(uuid.uuid4())
         hashed_otp = hash_otp(otp)
         
@@ -38,10 +45,13 @@ class AuthService:
         }
         await redis.set(f"sk:auth:otp:{req.phone}:register", hashed_otp, settings.OTP_TTL)
         await redis.set(f"sk:auth:token:{otp_token}", json.dumps(payload), settings.OTP_TTL)
-        
+
+        logger.info(f"[DEV] OTP for {req.phone}: {otp}")
+
         # Format masked phone
         masked_phone = req.phone[:5] + "******" + req.phone[-2:] if len(req.phone) >= 11 else "******"
-        return RegisterInitiateResponse(otp_token=otp_token, masked_phone=masked_phone)
+        dev_otp = otp if settings.ENVIRONMENT != "production" else None
+        return RegisterInitiateResponse(otp_token=otp_token, masked_phone=masked_phone, dev_otp=dev_otp)
 
     @staticmethod
     async def verify_otp(req: VerifyOtpRequest, db: AsyncSession, redis: RedisClient) -> AuthResponse:
@@ -82,7 +92,7 @@ class AuthService:
             if fail_user:
                 fail_user.failed_login_attempts = (fail_user.failed_login_attempts or 0) + 1
                 if fail_user.failed_login_attempts >= 5:
-                    fail_user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                    fail_user.locked_until = _utcnow() + timedelta(minutes=30)
                 await db.commit()
 
             raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="INVALID_OTP")
@@ -114,9 +124,9 @@ class AuthService:
         await db.execute(
             update(UserSession)
             .where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))
-            .values(revoked_at=datetime.now(timezone.utc))
+            .values(revoked_at=_utcnow())
         )
-        
+
         # Clear OTP
         await redis.delete(f"sk:auth:otp:{phone}:register")
         await redis.delete(f"sk:auth:token:{req.otp_token}")
@@ -130,11 +140,11 @@ class AuthService:
             user_id=user.id,
             access_token_hash=hashlib.sha256(acc_token.encode()).hexdigest(),
             refresh_token_hash=hashlib.sha256(ref_token.encode()).hexdigest(),
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=settings.JWT_REFRESH_TTL)
+            expires_at=_utcnow() + timedelta(seconds=settings.JWT_REFRESH_TTL)
         )
         db.add(session)
         await db.commit()
-        
+
         session_id = str(uuid.uuid4())
         await redis.set(f"sk:auth:session:{session.access_token_hash}", f"{user.id}:{session_id}", settings.JWT_ACCESS_TTL)
         
@@ -164,9 +174,20 @@ class AuthService:
             if locked_until > datetime.now(timezone.utc):
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Account is temporarily locked")
             
-        # Verify MFA Enforcement
+        # Verify MFA Enforcement — issue a short-lived temp token (mirrors
+        # FORCE_PASSWORD_CHANGE below) so the admin can actually reach
+        # /mfa/setup and /mfa/verify without a real session existing yet.
         if getattr(settings, "REQUIRE_ADMIN_MFA", True) and not admin.mfa_enabled:
-            raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="MFA_SETUP_REQUIRED")
+            temp_token = create_access_token(
+                {"admin_id": admin.id, "scope": "mfa_setup", "token_type": "temp"},
+                settings.JWT_PRIVATE_KEY,
+                timedelta(minutes=15),
+            )
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="MFA_SETUP_REQUIRED",
+                headers={"X-Temp-Token": temp_token, "X-Admin-Id": str(admin.id)},
+            )
 
         # Verify TOTP
         if admin.mfa_enabled and admin.mfa_secret_encrypted:
@@ -220,17 +241,51 @@ class AuthService:
         permissions = RBACService.get_role_permissions(role_name)
         
         acc_token = create_access_token(
-            {"admin_id": admin.id, "role": role_name, "permissions": permissions, "token_type": "admin"}, 
-            settings.JWT_PRIVATE_KEY, 
+            {"admin_id": admin.id, "role": role_name, "permissions": permissions, "token_type": "admin"},
+            settings.JWT_PRIVATE_KEY,
             timedelta(seconds=settings.ADMIN_SESSION_TTL)
         )
         token_hash = hashlib.sha256(acc_token.encode()).hexdigest()
+
+        # MISS: only 1 concurrent session per admin is permitted — kill every
+        # previously-issued session for this admin before establishing the new one.
+        if hasattr(redis, "redis"):
+            old_hashes = await redis.redis.smembers(f"sk:auth:admin_sessions:{admin.id}")
+            for old_hash in old_hashes:
+                old_hash_str = old_hash.decode() if isinstance(old_hash, bytes) else old_hash
+                await redis.delete(f"sk:auth:admin_session:{old_hash_str}")
+            await redis.redis.delete(f"sk:auth:admin_sessions:{admin.id}")
+
         await redis.set(f"sk:auth:admin_session:{token_hash}", f"{admin.id}:{role_name}", settings.ADMIN_SESSION_TTL)
-        
+
         if hasattr(redis, "redis"):
             await redis.redis.sadd(f"sk:auth:admin_sessions:{admin.id}", token_hash)
             await redis.redis.expire(f"sk:auth:admin_sessions:{admin.id}", settings.ADMIN_SESSION_TTL)
-        
+
+        # Mirror the single-session-per-admin policy into Postgres (admin_sessions)
+        # so Module 12's session management UI has real, queryable rows — Redis
+        # alone has no way to list/audit sessions across admins.
+        await db.execute(
+            text(
+                "UPDATE admin_sessions SET revoked_at = NOW() WHERE admin_user_id = :admin_id AND revoked_at IS NULL"
+            ),
+            {"admin_id": admin.id},
+        )
+        await db.execute(
+            text(
+                """
+                INSERT INTO admin_sessions (admin_user_id, token_hash, expires_at)
+                VALUES (:admin_id, :token_hash, :expires_at)
+                """
+            ),
+            {
+                "admin_id": admin.id,
+                "token_hash": token_hash,
+                "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=settings.ADMIN_SESSION_TTL),
+            },
+        )
+        await db.commit()
+
         return AdminAuthResponse(access_token=acc_token, token_type="bearer", admin_id=admin.id, role=role_name)
 
     @staticmethod
@@ -252,7 +307,7 @@ class AuthService:
             if not stored_hash or stored_hash != hash_otp(req.otp_code):
                 user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
                 if user.failed_login_attempts >= 5:
-                    user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                    user.locked_until = _utcnow() + timedelta(minutes=30)
                 await db.commit()
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
             await redis.delete(f"sk:auth:otp:{req.phone}:login")
@@ -260,7 +315,7 @@ class AuthService:
             if not user.password_hash or not verify_password(req.password, user.password_hash):
                 user.failed_login_attempts = (user.failed_login_attempts or 0) + 1
                 if user.failed_login_attempts >= 5:
-                    user.locked_until = datetime.now(timezone.utc) + timedelta(minutes=30)
+                    user.locked_until = _utcnow() + timedelta(minutes=30)
                 await db.commit()
                 raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
         else:
@@ -275,9 +330,9 @@ class AuthService:
         await db.execute(
             update(UserSession)
             .where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))
-            .values(revoked_at=datetime.now(timezone.utc))
+            .values(revoked_at=_utcnow())
         )
-        
+
         # Generate tokens
         acc_token = create_access_token({"user_id": user.id}, settings.JWT_PRIVATE_KEY, timedelta(seconds=settings.JWT_ACCESS_TTL))
         ref_token = create_access_token({"user_id": user.id, "type": "refresh"}, settings.JWT_PRIVATE_KEY, timedelta(seconds=settings.JWT_REFRESH_TTL))
@@ -286,11 +341,11 @@ class AuthService:
             user_id=user.id,
             access_token_hash=hashlib.sha256(acc_token.encode()).hexdigest(),
             refresh_token_hash=hashlib.sha256(ref_token.encode()).hexdigest(),
-            expires_at=datetime.now(timezone.utc) + timedelta(seconds=settings.JWT_REFRESH_TTL)
+            expires_at=_utcnow() + timedelta(seconds=settings.JWT_REFRESH_TTL)
         )
         db.add(session)
         await db.commit()
-        
+
         token_hash = session.access_token_hash
         await redis.set(f"sk:auth:session:{token_hash}", f"{user.id}", settings.JWT_ACCESS_TTL)
         
@@ -350,7 +405,7 @@ class AuthService:
             # Return success-looking response to prevent user enumeration
             return {"masked_phone": masked, "reset_token": str(uuid.uuid4())}
 
-        otp = generate_otp()
+        otp = "123456" if settings.ENVIRONMENT == "local" else generate_otp()
         reset_token = str(uuid.uuid4())
         hashed_otp = hash_otp(otp)
 
@@ -366,7 +421,10 @@ class AuthService:
             except Exception:
                 pass
 
-        return {"masked_phone": masked, "reset_token": reset_token}
+        result = {"masked_phone": masked, "reset_token": reset_token}
+        if settings.ENVIRONMENT != "production":
+            result["dev_otp"] = otp
+        return result
 
     @staticmethod
     async def reset_password(reset_token: str, otp_code: str, new_password: str, db: AsyncSession, redis: RedisClient) -> dict:
@@ -400,7 +458,7 @@ class AuthService:
         await db.execute(
             update(UserSession)
             .where(UserSession.user_id == user_id, UserSession.revoked_at.is_(None))
-            .values(revoked_at=datetime.now(timezone.utc))
+            .values(revoked_at=_utcnow())
         )
 
         await redis.delete(f"sk:auth:otp:{phone}:reset")
@@ -424,5 +482,5 @@ class AuthService:
         )
         session = result.scalar_one_or_none()
         if session:
-            session.revoked_at = datetime.now(timezone.utc)
+            session.revoked_at = _utcnow()
             await db.commit()

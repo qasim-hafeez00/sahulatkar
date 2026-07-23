@@ -1,0 +1,36 @@
+# web-admin (Next.js): browser-side calls use the public gateway_public_url
+# ConfigMap value (NEXT_PUBLIC_API_URL/NEXT_PUBLIC_GATEWAY_URL), which
+# routes over the internet via the Ingress (see overlays/*/ingress.yaml,
+# landed by the parallel Ingress/cert-manager Phase 3 track — routes
+# staging-admin./admin.sahulatkar.com to this Service on port 80), not pod
+# networking. Egress to gateway's ClusterIP is still allowed here for
+# Next.js server-side rendering/server actions that read the same env var
+# and fetch server-side.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-web-admin
+spec:
+  podSelector:
+    matchLabels:
+      app: web-admin
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    # ASSUMPTION: no Ingress controller exists yet in this repo. Left open
+    # cluster-wide-by-namespace so it keeps working once one is deployed;
+    # tighten to that controller's namespace once the Ingress track lands.
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - protocol: TCP
+          port: 3000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000

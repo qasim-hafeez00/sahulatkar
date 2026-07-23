@@ -35,6 +35,8 @@ class RedisNS:
     CREDIT_USER = "sk:credit:user"
     CREDIT_VELOCITY = "sk:credit:velocity"
     CREDIT_BLACKLIST = "sk:credit:blacklist"
+    CREDIT_POLICY = "sk:credit:policy"
+    CREDIT_IDEMPOTENCY = "sk:credit:idempotency"
     PRODUCT_UPO = "sk:product:upo"
     PRODUCT_URL = "sk:product:url"
     KYC_NADRA = "sk:kyc:nadra"
@@ -77,6 +79,8 @@ class RedisTTL:
     SESSION = 86400
     ADMIN_SESSION = 28800
     CREDIT_CACHE = 30
+    CREDIT_POLICY = 300
+    CREDIT_IDEMPOTENCY = 86400
     PRODUCT_CACHE = 300
     PRODUCT_URL_MAP = 86400
     NADRA_CACHE = 2592000

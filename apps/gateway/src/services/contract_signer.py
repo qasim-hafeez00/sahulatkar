@@ -12,20 +12,21 @@ from sk_shared.notifications import NotificationClient
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import generate_otp, hash_otp
 from src.config import settings
+from src.services.notify import notify
 
 
 class ContractSignerService:
     @staticmethod
-    async def issue_signing_otp(db: AsyncSession, redis: RedisClient, contract_type: str, contract_id: int, user_id: int) -> None:
+    async def issue_signing_otp(db: AsyncSession, redis: RedisClient, contract_type: str, contract_id: int, user_id: int) -> str | None:
         # Fetch user phone number for the notification
         model = WakalahAgreement if contract_type == "wakalah" else MurabahaContract
         contract = await db.scalar(select(model).where(model.id == contract_id))
         if not contract:
-            return
+            return None
 
         user = await db.scalar(select(User).where(User.id == contract.user_id))
         if not user or not user.phone:
-            return
+            return None
 
         otp = generate_otp()
         otp_hash = hash_otp(otp)
@@ -40,6 +41,10 @@ class ContractSignerService:
             notify_backend = redis.redis if hasattr(redis, "redis") else redis
             notify = NotificationClient(notify_backend)
             await notify.push_contract_otp(user.phone, otp)
+
+        # DEV ONLY: let callers surface the code directly (mirrors AuthService's
+        # register/otp dev_otp) since there's no SMS gateway in local/dev envs.
+        return None if settings.ENVIRONMENT == "production" else otp
 
     @staticmethod
     async def verify_signing_otp(redis: RedisClient, contract_type: str, contract_id: int, user_id: int, otp_code: str) -> str:
@@ -194,23 +199,62 @@ class ContractSignerService:
         
         # P3-2: Automate Loan and Installment creation natively
         from sk_shared.models.payment import Loan, Installment
-        from sk_shared.models.credit import CreditLimitHistory
+        from sk_shared.models.cart import CartItem
         from datetime import timedelta
         import uuid
 
-        down_payment = float(order.down_payment_amount or 0)
-        total_sale = float(contract.total_sale_price)
-        total_repayable = round(total_sale - down_payment, 2)
-        principal_amt = float(contract.cost_price) - down_payment
+        # Cart-aware unified financing: a cart's line items are separate Orders each
+        # with their own Murabaha contract (Islamic finance requires a Murabaha sale
+        # to identify a specific underlying asset), but they share ONE combined Loan
+        # and repayment schedule. If this order isn't part of a cart, sibling_order_ids
+        # is just [order.id] and the block below behaves exactly as the single-order
+        # flow always has.
+        cart_item = await db.scalar(select(CartItem).where(CartItem.order_id == order.id))
+        sibling_order_ids = [order.id]
+        if cart_item is not None:
+            sibling_items = (
+                await db.execute(select(CartItem).where(CartItem.cart_id == cart_item.cart_id))
+            ).scalars().all()
+            sibling_order_ids = [i.order_id for i in sibling_items]
+
+        sibling_contracts = (
+            await db.execute(
+                select(MurabahaContract).where(MurabahaContract.order_id.in_(sibling_order_ids))
+            )
+        ).scalars().all()
+
+        # Not every sibling order in the cart is guaranteed to have generated (let
+        # alone signed) its Murabaha contract yet — the frontend signs them one at a
+        # time. Only consolidate into a Loan once every sibling has signed.
+        all_signed = (
+            len(sibling_contracts) == len(sibling_order_ids)
+            and all(c.signed_at is not None for c in sibling_contracts)
+        )
+        if not all_signed:
+            await db.flush()
+            return contract, order
+
+        sibling_orders = (
+            await db.execute(select(Order).where(Order.id.in_(sibling_order_ids)))
+        ).scalars().all()
+        orders_by_id = {o.id: o for o in sibling_orders}
+
+        total_cost_price = sum(float(c.cost_price) for c in sibling_contracts)
+        total_profit_amount = sum(float(c.profit_amount) for c in sibling_contracts)
+        total_sale_price = sum(float(c.total_sale_price) for c in sibling_contracts)
+        down_payment = sum(float(orders_by_id[c.order_id].down_payment_amount or 0) for c in sibling_contracts)
+        total_repayable = round(total_sale_price - down_payment, 2)
+        principal_amt = total_cost_price - down_payment
         installment_amt = round(total_repayable / contract.installment_count, 2)
+        primary_order_id = min(sibling_order_ids)
 
         loan = Loan(
-            order_id=order.id,
+            order_id=primary_order_id,
             user_id=user_id,
             murabaha_contract_id=contract.id,
             loan_number=f"L-{datetime.now(timezone.utc).year}-{uuid.uuid4().hex[:8].upper()}",
             principal_amount=principal_amt,
-            profit_amount=float(contract.profit_amount),
+            profit_amount=total_profit_amount,
             total_repayable=total_repayable,
             down_payment_amount=down_payment,
             balance_financed=principal_amt,
@@ -226,19 +270,25 @@ class ContractSignerService:
         db.add(loan)
         await db.flush()  # to get loan.id
 
+        # Every order in the group (all siblings, or just this one) resolves the
+        # shared loan via orders.loan_id — independent of which order loans.order_id
+        # happens to point at.
+        for sibling_order in sibling_orders:
+            sibling_order.loan_id = loan.id
+
         # Credit is already reserved at extraction (internal callback).
         # Loan creation consumes that reservation; no further decrement needed here.
 
-        for sched in contract.installment_schedule:
+        for n in range(1, contract.installment_count + 1):
             inst = Installment(
                 loan_id=loan.id,
                 user_id=user_id,
-                installment_number=sched["installment_no"],
+                installment_number=n,
                 is_down_payment=False,
                 principal_portion=principal_amt / contract.installment_count,
-                profit_portion=float(contract.profit_amount) / contract.installment_count,
-                total_amount=float(sched["amount"]),  # already corrected in generator
-                due_date=(datetime.now(timezone.utc) + timedelta(days=30 * sched["installment_no"])).date(),
+                profit_portion=total_profit_amount / contract.installment_count,
+                total_amount=installment_amt,
+                due_date=(datetime.now(timezone.utc) + timedelta(days=30 * n)).date(),
                 status="pending",
                 paid_amount=0.0,
                 days_overdue=0,
@@ -266,5 +316,12 @@ class ContractSignerService:
             },
         )
         await redis.publish(event_channel(EVENT_LOAN_CREATED), envelope.to_json())
+
+        await notify(
+            db, user_id, "credit",
+            "Financing approved",
+            f"Your Murabaha financing (Loan {loan.loan_number}) for PKR {total_repayable:,.0f} across {contract.installment_count} installments has been approved.",
+            source_event="loan.created", source_reference=f"loan:{loan.id}",
+        )
 
         return contract, order

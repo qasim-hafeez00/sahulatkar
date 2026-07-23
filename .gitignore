@@ -10,8 +10,6 @@ dist/
 downloads/
 eggs/
 .eggs/
-lib/
-lib64/
 parts/
 sdist/
 var/
@@ -32,6 +30,13 @@ venv.bak/
 # Databases
 *.sqlite3
 *.db
+
+# Coverage / mutation testing scratch
+.coverage
+htmlcov/
+mutants/
+mutmut_browse.json
+.mutmut-cache
 
 # Node
 node_modules/

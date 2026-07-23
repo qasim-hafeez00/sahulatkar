@@ -76,9 +76,13 @@ async def test_checkout_consumer_processes_successful_job(monkeypatch, db_sessio
     async def mock_verify_charge(*args, **kwargs):
         return True
 
+    async def mock_fetch_vcn_credentials(*args, **kwargs):
+        return {"pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027"}
+
     monkeypatch.setattr("src.workers.checkout_consumer.SessionLocal", _SingleSessionFactory(db_session))
     monkeypatch.setattr("src.services.checkout.form_filler.CheckoutFormFiller.run_checkout", mock_run_checkout)
     monkeypatch.setattr("src.services.checkout.vcn_verifier.VcnVerifier.verify_charge", mock_verify_charge)
+    monkeypatch.setattr("src.services.checkout.agent.CheckoutAgentService._fetch_vcn_credentials", mock_fetch_vcn_credentials)
 
     await consumer._process_with_sem(payload, redis_mock)
 

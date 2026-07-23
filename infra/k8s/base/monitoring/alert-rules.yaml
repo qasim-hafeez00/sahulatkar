@@ -1,0 +1,157 @@
+# PrometheusRule CRD consumed by the Prometheus Operator installed via
+# kube-prometheus-stack (see prometheus-values.yaml — ruleSelectorNilUsesHelmValues
+# is set to false so any PrometheusRule in the cluster is picked up, not just
+# chart-bundled ones). Requires the CRDs from the Helm chart to already be
+# installed — apply this AFTER `helm install`, per README.md.
+#
+# Every query below uses a metric name/label set that was verified to exist
+# in the actual service code (apps/*/src) rather than assumed from a
+# "services emit uniform metrics" template — see README.md for the
+# per-service metric inventory. Thresholds are derived from resource
+# requests/limits and HPA targets already committed in
+# infra/k8s/base/*/deployment.yaml and infra/k8s/base/*/hpa.yaml, not
+# invented numbers.
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: sahulatkar-baseline-alerts
+  namespace: monitoring
+  labels:
+    release: kube-prometheus-stack
+spec:
+  groups:
+    - name: sahulatkar.crashloop
+      rules:
+        - alert: PodCrashLooping
+          expr: |
+            increase(kube_pod_container_status_restarts_total{namespace=~"sk-.*"}[15m]) > 3
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "Pod {{ $labels.namespace }}/{{ $labels.pod }} is crash-looping"
+            description: "Container {{ $labels.container }} in {{ $labels.namespace }}/{{ $labels.pod }} restarted {{ $value }} times in the last 15 minutes."
+
+    - name: sahulatkar.error-rate
+      rules:
+        # gateway: prometheus_fastapi_instrumentator defaults
+        # (apps/gateway/src/core/metrics.py) -> http_requests_total{method,status,handler}
+        - alert: GatewayHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{job="gateway", status=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{job="gateway"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "gateway 5xx rate above 5%"
+            description: "gateway has returned 5xx responses for more than 5% of requests over the last 5 minutes ({{ $value | humanizePercentage }})."
+
+        # product-service: self-rolled middleware
+        # (apps/product-service/src/middleware/metrics.py) ->
+        # http_requests_total{method,endpoint,status_code}. Same metric NAME
+        # as gateway's but a DIFFERENT label schema (status_code, not status)
+        # — verified separately, not assumed identical.
+        - alert: ProductServiceHighErrorRate
+          expr: |
+            (
+              sum(rate(http_requests_total{job="product-service", status_code=~"5.."}[5m]))
+              /
+              sum(rate(http_requests_total{job="product-service"}[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "product-service 5xx rate above 5%"
+            description: "product-service has returned 5xx responses for more than 5% of requests over the last 5 minutes ({{ $value | humanizePercentage }})."
+
+        # ledger-service: apps/ledger-service/src/core/middleware.py ->
+        # ledger_http_requests_total{method,path,status_code}
+        - alert: LedgerServiceHighErrorRate
+          expr: |
+            (
+              sum(rate(ledger_http_requests_total{status_code=~"5.."}[5m]))
+              /
+              sum(rate(ledger_http_requests_total[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "ledger-service 5xx rate above 5%"
+            description: "ledger-service has returned 5xx responses for more than 5% of requests over the last 5 minutes ({{ $value | humanizePercentage }})."
+
+        # notification-service: apps/notification-service/src/core/middleware.py ->
+        # notification_http_requests_total{method,endpoint,status_code}
+        - alert: NotificationServiceHighErrorRate
+          expr: |
+            (
+              sum(rate(notification_http_requests_total{status_code=~"5.."}[5m]))
+              /
+              sum(rate(notification_http_requests_total[5m]))
+            ) > 0.05
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "notification-service 5xx rate above 5%"
+            description: "notification-service has returned 5xx responses for more than 5% of requests over the last 5 minutes ({{ $value | humanizePercentage }})."
+
+        # payment-orchestrator: VERIFIED GAP — apps/payment-orchestrator/src/main.py
+        # and core/metrics.py only record a latency histogram
+        # (payment_request_latency_seconds) for generic requests; there is no
+        # status-code-labeled request counter, so a true HTTP error-rate ratio
+        # cannot be computed from what this service actually emits today. This
+        # uses the domain-specific gateway-failure counter
+        # (payment_gateway_failure_total, apps/payment-orchestrator/src/core/metrics.py)
+        # as the closest available error signal instead of inventing a metric
+        # that doesn't exist.
+        - alert: PaymentOrchestratorGatewayFailuresElevated
+          expr: |
+            sum(rate(payment_gateway_failure_total[5m])) > 0.1
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "Elevated payment gateway failure rate in payment-orchestrator"
+            description: "payment-orchestrator recorded {{ $value | humanize }} payment_gateway_failure_total events/sec over 5m. This is a proxy signal, not a generic HTTP error rate — see comment in alert-rules.yaml for why."
+
+    - name: sahulatkar.resource-pressure
+      rules:
+        # Cluster-wide by design (cAdvisor + kube-state-metrics, bundled with
+        # kube-prometheus-stack) — applies passively to every container in
+        # sk-* namespaces, including credit-engine, without any
+        # credit-engine-specific configuration.
+        - alert: ContainerMemoryNearLimit
+          expr: |
+            (
+              max by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~"sk-.*", container!="", container!="POD"})
+              /
+              on (namespace, pod, container) group_left
+              max by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"sk-.*", resource="memory"})
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} memory near limit"
+            description: "Memory working set has been above 90% of the container's configured limit for 10m (limits are set per-service in infra/k8s/base/*/deployment.yaml, e.g. product-service=1536Mi, most others=512Mi) — sustained pressure here risks an OOMKill."
+
+        - alert: ContainerCPUNearLimit
+          expr: |
+            (
+              sum by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{namespace=~"sk-.*", container!="", container!="POD"}[5m]))
+              /
+              on (namespace, pod, container) group_left
+              max by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~"sk-.*", resource="cpu"})
+            ) > 0.9
+          for: 10m
+          labels:
+            severity: warning
+          annotations:
+            summary: "{{ $labels.namespace }}/{{ $labels.pod }}/{{ $labels.container }} CPU near limit"
+            description: "CPU usage has been above 90% of the container's configured limit for 10m. Every backend's HPA (infra/k8s/base/*/hpa.yaml) already targets 70% CPU utilization and scales up to 8 replicas, so sustained pressure at 90%+ of the hard limit means HPA is not keeping up (likely maxed out on replicas), not a transient blip."

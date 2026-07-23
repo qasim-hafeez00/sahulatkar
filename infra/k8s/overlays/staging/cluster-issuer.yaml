@@ -1,0 +1,48 @@
+# INTENTIONALLY NOT referenced from kustomization.yaml in this directory.
+#
+# ClusterIssuer is a cluster-scoped cert-manager custom resource (no
+# namespace). This overlay's kustomization.yaml sets `namespace: sk-staging`
+# for everything it builds, and kustomize's namespace transformer does not
+# know cert-manager's CRD is cluster-scoped - it injects `metadata.namespace`
+# into any resource kind it doesn't specifically recognize as cluster-scoped.
+# (Verified empirically with `kubectl kustomize` against a scratch
+# ClusterIssuer manifest during implementation: the namespace field does get
+# injected, and a JSON6902 patch to strip it back out afterwards does not
+# work either, because the namespace transformer runs after patches.)
+#
+# So this is applied directly, once per cluster, as a one-time bootstrap step
+# - the same pattern this repo already uses for other cluster add-ons (see
+# the manual `helm install ingress-nginx / cert-manager / ...` steps in the
+# deployment runbook):
+#
+#   # after cert-manager itself has been Helm-installed with its
+#   # ServiceAccount annotated with the cert_manager_irsa_role_arn
+#   # Terraform output for this environment:
+#   kubectl apply -f infra/k8s/overlays/staging/cluster-issuer.yaml
+#
+# Uses Let's Encrypt's STAGING ACME endpoint on purpose, to avoid hitting
+# Let's Encrypt's production rate limits while iterating on this environment.
+# Certs issued here will show a "not trusted" warning in browsers - that is
+# expected for a staging environment.
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-staging
+spec:
+  acme:
+    server: https://acme-staging-v02.api.letsencrypt.org/directory
+    email: platform@sahulatkar.com
+    privateKeySecretRef:
+      name: letsencrypt-staging-account-key
+    solvers:
+      - dns01:
+          route53:
+            region: ap-south-1
+            # Fill in from `terraform output route53_zone_id` in
+            # infra/terraform/environments/staging after `terraform apply`.
+            hostedZoneID: "<ROUTE53_ZONE_ID_STAGING>"
+            # No accessKeyID/secretAccessKeySecretRef/role needed: the
+            # cert-manager pod assumes its permissions via IRSA through the
+            # ServiceAccount annotation set at Helm-install time (see
+            # cert_manager_irsa_role_arn terraform output for this
+            # environment).

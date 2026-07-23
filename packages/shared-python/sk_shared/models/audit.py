@@ -26,3 +26,4 @@ class AuditTrail(Base, TimestampMixin):
     changes: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     request_id: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    severity: Mapped[str] = mapped_column(String(10), nullable=False, default="info")

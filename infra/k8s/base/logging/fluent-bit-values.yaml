@@ -1,0 +1,132 @@
+# Helm values for the `fluent/fluent-bit` chart, run as a DaemonSet (one
+# pod per node, tailing every container's log file via the kubelet's
+# /var/log/containers path) shipping to the Loki install in this same
+# `logging` namespace.
+#
+# Fluent Bit vs. Promtail: chose Fluent Bit because (a) it's what the plan
+# names explicitly ("Fluent Bit -> Loki or CloudWatch Logs"), (b) it's a
+# CNCF-graduated, ~450KB C binary with a much smaller memory footprint per
+# node than Promtail's Go runtime, which matters running as a DaemonSet on
+# every node, and (c) critically, it has first-class output plugins for
+# BOTH Loki and CloudWatch Logs built in — Promtail only speaks Loki. The
+# plan's own phrasing ("Loki or CloudWatch Logs") signals the destination
+# might change later; Fluent Bit means that's a values-file edit (swap the
+# [OUTPUT] block), not a collector replacement, if this repo ever moves off
+# self-hosted Loki to AWS-managed CloudWatch Logs.
+#
+# IMPORTANT — verified against the actual services, not assumed uniform:
+# only gateway and payment-orchestrator emit genuine single-JSON-object
+# log lines (both use pythonjsonlogger.JsonFormatter — see
+# apps/gateway/src/core/logging.py and
+# apps/payment-orchestrator/src/core/logging.py). ledger-service and
+# notification-service call logging.basicConfig() with a *plain text*
+# format string ("%(asctime)s %(levelname)s %(name)s %(message)s" /
+# "%(asctime)s - %(name)s - %(levelname)s - %(message)s") — not JSON — so
+# any extra={...} fields their middleware attaches
+# (apps/ledger-service/src/core/middleware.py,
+# apps/notification-service/src/core/middleware.py) are NOT rendered into
+# the log line by that formatter today. product-service has no root JSON
+# formatter at all; its middleware
+# (apps/product-service/src/middleware/logging.py) manually
+# json.dumps()s a dict and passes it as the *message* of an otherwise
+# plain-text line, so the JSON is a substring of the line, not the whole
+# line.
+#
+# Given that split, the JSON parser below is applied opportunistically
+# with Reserve_Data On: for gateway/payment-orchestrator it extracts real
+# structured fields (level, logger, message, timestamp, service); for the
+# other three it simply fails to match and Fluent Bit ships the raw text
+# line unparsed, still queryable in Loki by label (namespace/pod/container)
+# and full-text search — nothing is dropped, it's just not structured
+# for those three services until their logging setup is made consistent
+# with gateway's (that's an app-code change, out of scope for this infra
+# track).
+
+kind: DaemonSet
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    cpu: 200m
+    memory: 128Mi
+
+tolerations:
+  - operator: Exists
+
+serviceAccount:
+  create: true
+
+config:
+  service: |
+    [SERVICE]
+        Daemon Off
+        Flush 1
+        Log_Level info
+        Parsers_File parsers.conf
+        Parsers_File custom_parsers.conf
+        HTTP_Server On
+        HTTP_Listen 0.0.0.0
+        HTTP_Port 2020
+        Health_Check On
+
+  inputs: |
+    [INPUT]
+        Name tail
+        Path /var/log/containers/*.log
+        multiline.parser docker, cri
+        Tag kube.*
+        Mem_Buf_Limit 10MB
+        Skip_Long_Lines On
+
+  filters: |
+    [FILTER]
+        Name kubernetes
+        Match kube.*
+        Merge_Log Off
+        Keep_Log On
+        K8S-Logging.Parser On
+        K8S-Logging.Exclude On
+
+    # Opportunistic JSON extraction — see the file-level comment above for
+    # exactly which services this actually structures today.
+    [FILTER]
+        Name parser
+        Match kube.*
+        Key_Name log
+        Parser sk_json
+        Reserve_Data On
+
+  customParsers: |
+    [PARSER]
+        Name sk_json
+        Format json
+        Time_Keep On
+
+  outputs: |
+    [OUTPUT]
+        Name loki
+        Match kube.*
+        Host loki.logging.svc.cluster.local
+        Port 3100
+        Labels job=fluentbit
+        Label_Keys $kubernetes['namespace_name'],$kubernetes['pod_name'],$kubernetes['container_name']
+        Auto_Kubernetes_Labels off
+        Line_Format json
+        Remove_Keys kubernetes,stream
+
+daemonSetVolumes:
+  - name: varlog
+    hostPath:
+      path: /var/log
+  - name: varlibdockercontainers
+    hostPath:
+      path: /var/lib/docker/containers
+
+daemonSetVolumeMounts:
+  - name: varlog
+    mountPath: /var/log
+  - name: varlibdockercontainers
+    mountPath: /var/lib/docker/containers
+    readOnly: true

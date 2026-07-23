@@ -36,8 +36,8 @@ class WakalahAgreement(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     product_url: Mapped[str] = mapped_column(String(2048), nullable=True)
     price_variance_pct: Mapped[float] = mapped_column(Numeric(4, 2), default=5.00, nullable=False)
     
-    signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     signatures: Mapped[list["ContractDigitalSignature"]] = relationship(
         "ContractDigitalSignature",
@@ -78,8 +78,8 @@ class MurabahaContract(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     template_version: Mapped[str] = mapped_column(String(10), default="1.0", nullable=False)
     validated_by_shariah_board: Mapped[bool] = mapped_column(default=False, nullable=False)
     
-    signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
-    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     signatures: Mapped[list["ContractDigitalSignature"]] = relationship(
         "ContractDigitalSignature",
@@ -112,7 +112,7 @@ class ContractDigitalSignature(Base, UUIDMixin, TimestampMixin):
     ip_address: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)
     device_id: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     otp_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    signed_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
     wakalah_agreement: Mapped[Optional["WakalahAgreement"]] = relationship(
         "WakalahAgreement",

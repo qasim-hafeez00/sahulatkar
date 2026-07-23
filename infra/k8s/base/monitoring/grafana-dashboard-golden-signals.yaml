@@ -1,0 +1,88 @@
+# Starter Grafana dashboard, auto-imported by the Grafana sidecar that
+# kube-prometheus-stack enables via `grafana.sidecar.dashboards` in
+# prometheus-values.yaml (it watches for ConfigMaps labeled
+# grafana_dashboard: "1" in any namespace — see searchNamespace: ALL).
+#
+# Deliberately NOT a single templated "pick a service" dashboard: the five
+# instrumented services use three different metric-name/label schemas
+# (verified against apps/*/src, see README.md), so a `$service` template
+# variable would either be wrong for most services or require a fake
+# unifying metric that doesn't exist. Each row below queries the metric
+# names that service actually emits.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sahulatkar-golden-signals-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  sahulatkar-golden-signals.json: |
+    {
+      "title": "SahulatKar - Service Golden Signals",
+      "uid": "sk-golden-signals",
+      "schemaVersion": 39,
+      "timezone": "browser",
+      "time": { "from": "now-6h", "to": "now" },
+      "refresh": "30s",
+      "tags": ["sahulatkar", "golden-signals"],
+      "panels": [
+        { "title": "Pod restarts (1h) by namespace/pod", "type": "timeseries", "gridPos": { "h": 7, "w": 24, "x": 0, "y": 0 },
+          "id": 1,
+          "targets": [ { "expr": "increase(kube_pod_container_status_restarts_total{namespace=~\"sk-.*\"}[1h])", "legendFormat": "{{namespace}}/{{pod}}" } ] },
+
+        { "title": "gateway - request rate by handler", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 7 },
+          "id": 10,
+          "targets": [ { "expr": "sum by (handler) (rate(http_requests_total{job=\"gateway\"}[5m]))", "legendFormat": "{{handler}}" } ] },
+        { "title": "gateway - 5xx error rate", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 7 },
+          "id": 11, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "sum(rate(http_requests_total{job=\"gateway\", status=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"gateway\"}[5m]))", "legendFormat": "5xx ratio" } ] },
+        { "title": "gateway - p95 latency", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 7 },
+          "id": 12, "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le, handler) (rate(http_request_duration_seconds_bucket{job=\"gateway\"}[5m])))", "legendFormat": "{{handler}}" } ] },
+
+        { "title": "product-service - request rate by endpoint", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 14 },
+          "id": 20,
+          "targets": [ { "expr": "sum by (endpoint) (rate(http_requests_total{job=\"product-service\"}[5m]))", "legendFormat": "{{endpoint}}" } ] },
+        { "title": "product-service - 5xx error rate", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 14 },
+          "id": 21, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "sum(rate(http_requests_total{job=\"product-service\", status_code=~\"5..\"}[5m])) / sum(rate(http_requests_total{job=\"product-service\"}[5m]))", "legendFormat": "5xx ratio" } ] },
+        { "title": "product-service - p95 latency", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 14 },
+          "id": 22, "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(http_request_duration_seconds_bucket{job=\"product-service\"}[5m])))", "legendFormat": "{{endpoint}}" } ] },
+
+        { "title": "ledger-service - request rate by path", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 21 },
+          "id": 30,
+          "targets": [ { "expr": "sum by (path) (rate(ledger_http_requests_total[5m]))", "legendFormat": "{{path}}" } ] },
+        { "title": "ledger-service - 5xx error rate", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 21 },
+          "id": 31, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "sum(rate(ledger_http_requests_total{status_code=~\"5..\"}[5m])) / sum(rate(ledger_http_requests_total[5m]))", "legendFormat": "5xx ratio" } ] },
+        { "title": "ledger-service - p95 latency", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 21 },
+          "id": 32, "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le, path) (rate(ledger_http_request_duration_seconds_bucket[5m])))", "legendFormat": "{{path}}" } ] },
+
+        { "title": "notification-service - request rate by endpoint", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 0, "y": 28 },
+          "id": 40,
+          "targets": [ { "expr": "sum by (endpoint) (rate(notification_http_requests_total[5m]))", "legendFormat": "{{endpoint}}" } ] },
+        { "title": "notification-service - 5xx error rate", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 8, "y": 28 },
+          "id": 41, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "sum(rate(notification_http_requests_total{status_code=~\"5..\"}[5m])) / sum(rate(notification_http_requests_total[5m]))", "legendFormat": "5xx ratio" } ] },
+        { "title": "notification-service - p95 latency", "type": "timeseries", "gridPos": { "h": 7, "w": 8, "x": 16, "y": 28 },
+          "id": 42, "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(notification_http_request_duration_seconds_bucket[5m])))", "legendFormat": "{{endpoint}}" } ] },
+
+        { "title": "payment-orchestrator - p95 request latency (NOTE: no generic request-rate/error-rate metric exists yet, see alert-rules.yaml)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 35 },
+          "id": 50, "fieldConfig": { "defaults": { "unit": "s" }, "overrides": [] },
+          "targets": [ { "expr": "histogram_quantile(0.95, sum by (le, endpoint) (rate(payment_request_latency_seconds_bucket[5m])))", "legendFormat": "{{endpoint}}" } ] },
+        { "title": "payment-orchestrator - gateway failures/sec (proxy error signal)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 35 },
+          "id": 51,
+          "targets": [ { "expr": "sum by (gateway) (rate(payment_gateway_failure_total[5m]))", "legendFormat": "{{gateway}}" } ] },
+
+        { "title": "Container memory usage vs limit (sk-* namespaces)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 0, "y": 42 },
+          "id": 60, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "max by (namespace, pod, container) (container_memory_working_set_bytes{namespace=~\"sk-.*\", container!=\"\", container!=\"POD\"}) / on (namespace, pod, container) group_left max by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~\"sk-.*\", resource=\"memory\"})", "legendFormat": "{{namespace}}/{{pod}}/{{container}}" } ] },
+        { "title": "Container CPU usage vs limit (sk-* namespaces)", "type": "timeseries", "gridPos": { "h": 7, "w": 12, "x": 12, "y": 42 },
+          "id": 61, "fieldConfig": { "defaults": { "unit": "percentunit" }, "overrides": [] },
+          "targets": [ { "expr": "sum by (namespace, pod, container) (rate(container_cpu_usage_seconds_total{namespace=~\"sk-.*\", container!=\"\", container!=\"POD\"}[5m])) / on (namespace, pod, container) group_left max by (namespace, pod, container) (kube_pod_container_resource_limits{namespace=~\"sk-.*\", resource=\"cpu\"})", "legendFormat": "{{namespace}}/{{pod}}/{{container}}" } ] }
+      ]
+    }

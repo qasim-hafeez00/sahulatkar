@@ -111,6 +111,85 @@ async def list_admin_payments(
     }
 
 
+@router.get("/collections-summary")
+async def collections_summary(
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    row = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    COUNT(*) FILTER (WHERE status = 'overdue') AS overdue_count,
+                    COALESCE(SUM(total_amount - paid_amount) FILTER (WHERE status = 'overdue'), 0) AS overdue_amount,
+                    COUNT(*) FILTER (WHERE status = 'pending') AS pending_count,
+                    COALESCE(SUM(total_amount - paid_amount) FILTER (WHERE status = 'pending'), 0) AS pending_amount,
+                    COUNT(*) FILTER (WHERE status = 'paid' AND paid_at >= CURRENT_DATE) AS collected_today_count,
+                    COALESCE(SUM(paid_amount) FILTER (WHERE status = 'paid' AND paid_at >= CURRENT_DATE), 0) AS collected_today_amount,
+                    COALESCE(SUM(paid_amount) FILTER (WHERE status = 'paid' AND paid_at >= date_trunc('month', CURRENT_DATE)), 0) AS collected_mtd_amount,
+                    COUNT(*) FILTER (WHERE status = 'paid' AND due_date >= paid_at::date) AS on_time_paid_count,
+                    COUNT(*) FILTER (WHERE status = 'paid') AS total_paid_count
+                FROM installments
+                WHERE deleted_at IS NULL
+                """
+            )
+        )
+    ).mappings().one()
+
+    total_paid = int(row["total_paid_count"] or 0)
+    on_time = int(row["on_time_paid_count"] or 0)
+    on_time_rate = round((on_time / total_paid * 100), 2) if total_paid > 0 else None
+
+    return {
+        "overdue_count": int(row["overdue_count"] or 0),
+        "overdue_amount": float(row["overdue_amount"] or 0),
+        "pending_count": int(row["pending_count"] or 0),
+        "pending_amount": float(row["pending_amount"] or 0),
+        "collected_today_count": int(row["collected_today_count"] or 0),
+        "collected_today_amount": float(row["collected_today_amount"] or 0),
+        "collected_mtd_amount": float(row["collected_mtd_amount"] or 0),
+        "on_time_payment_rate": on_time_rate,
+    }
+
+
+@router.get("/aging-buckets")
+async def aging_buckets(
+    current_admin: AdminUser = Depends(RequirePermission("manage_payments")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    CASE
+                        WHEN status != 'overdue' THEN 'current'
+                        WHEN CURRENT_DATE - due_date <= 30 THEN '1-30_days'
+                        WHEN CURRENT_DATE - due_date <= 60 THEN '31-60_days'
+                        WHEN CURRENT_DATE - due_date <= 90 THEN '61-90_days'
+                        ELSE '90_plus_days'
+                    END AS bucket,
+                    COUNT(*) AS cnt,
+                    COALESCE(SUM(total_amount - paid_amount), 0) AS amount
+                FROM installments
+                WHERE deleted_at IS NULL AND status IN ('pending', 'overdue')
+                GROUP BY bucket
+                """
+            )
+        )
+    ).mappings().all()
+
+    bucket_order = ["current", "1-30_days", "31-60_days", "61-90_days", "90_plus_days"]
+    by_bucket = {r["bucket"]: {"count": int(r["cnt"]), "amount": float(r["amount"] or 0)} for r in rows}
+    return {
+        "buckets": [
+            {"bucket": b, "count": by_bucket.get(b, {}).get("count", 0), "amount": by_bucket.get(b, {}).get("amount", 0.0)}
+            for b in bucket_order
+        ]
+    }
+
+
 @router.get("/{payment_id}")
 async def get_admin_payment_detail(
     payment_id: int,

@@ -1,3 +1,4 @@
+import hmac
 from typing import AsyncGenerator
 
 from fastapi import Header, HTTPException, Request, status
@@ -5,6 +6,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.database import SessionLocal
 from sk_shared.redis_client import RedisClient
+from sk_shared.security import verify_signed_assertion
 
 from src.config import settings
 from src.services.aftership_client import AfterShipClient
@@ -34,23 +36,45 @@ def get_current_user_id(x_user_id: str | None = Header(default=None)) -> int:
 
 
 def require_internal_key(x_internal_key: str | None = Header(default=None)) -> None:
-    if x_internal_key != settings.INTERNAL_API_KEY:
+    # Constant-time compare: a naive `!=` leaks how many leading bytes matched via
+    # timing, letting an attacker brute-force the key one byte at a time.
+    if not x_internal_key or not hmac.compare_digest(x_internal_key, settings.INTERNAL_API_KEY):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_INTERNAL")
 
 
-def require_operations_manager(x_admin_role: str | None = Header(default=None)) -> None:
-    if x_admin_role != "operations_manager":
+def _verify_admin_assertion(x_admin_assertion: str | None) -> dict:
+    """Verify the short-lived, HMAC-signed admin assertion minted by the Gateway.
+
+    Previously these admin dependencies trusted raw X-Admin-Role / X-Admin-Permissions
+    headers with zero cryptographic verification — any direct caller could set those
+    headers themselves and get full admin access. Now the caller must present a
+    signed assertion (created via sk_shared.security.create_signed_assertion using the
+    INTERNAL_API_KEY shared secret) whose signature and expiry we verify server-side.
+    """
+    if not x_admin_assertion:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_NO_ASSERTION")
+    try:
+        return verify_signed_assertion(x_admin_assertion, settings.INTERNAL_API_KEY)
+    except ValueError:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_INVALID_ASSERTION")
+
+
+def require_operations_manager(x_admin_assertion: str | None = Header(default=None)) -> None:
+    claims = _verify_admin_assertion(x_admin_assertion)
+    if claims.get("role") != "operations_manager":
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN")
 
+
 def require_permissions(required_permissions: list[str]):
-    def _check(x_admin_permissions: str | None = Header(default=None)):
-        if not x_admin_permissions:
+    def _check(x_admin_assertion: str | None = Header(default=None)):
+        claims = _verify_admin_assertion(x_admin_assertion)
+        perms = claims.get("permissions") or []
+        if not isinstance(perms, list):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_NO_PERMISSIONS")
-        
-        perms = [p.strip() for p in x_admin_permissions.split(",")]
+
         for rp in required_permissions:
             if rp in perms or "all_actions" in perms:
                 return True
-        
+
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN_ADMIN_INSUFFICIENT_PERMISSIONS")
     return _check

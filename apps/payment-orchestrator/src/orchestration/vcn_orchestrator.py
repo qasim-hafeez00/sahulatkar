@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import VirtualCard
 from src.models.outbox import OutboxEvent
-from sk_shared.events import build_event_envelope
+from sk_shared.events import EVENT_VCN_CHARGED, build_event_envelope
 
 logger = logging.getLogger(__name__)
 
@@ -43,7 +43,7 @@ class VcnOrchestrator:
             logger.info(f"VCN {card.id} transaction created", extra={"order_id": card.order_id})
             
             await self._queue_event(
-                "vcn.charged",
+                EVENT_VCN_CHARGED,
                 {
                     "vcn_id": card.id,
                     "order_id": card.order_id,

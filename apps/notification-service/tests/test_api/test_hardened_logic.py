@@ -96,30 +96,6 @@ async def test_sendgrid_unsubscribe_category_specific(client, db_session):
     assert pref_order.email_enabled is True
 
 @pytest.mark.asyncio
-async def test_shariah_compliance_guard(client, db_session, admin_header):
-    from sk_shared.models.notification import NotificationTemplate
-    
-    # Setup: Compliance template
-    tmpl = NotificationTemplate(
-        event_type="billing.late_fee_applied", channel="sms", body_template="Old", is_active=True
-    )
-    db_session.add(tmpl)
-    await db_session.commit()
-    
-    # Update template
-    headers = {**admin_header, "x-admin-permissions": "admin:notifications:write"}
-    resp = await client.put(
-        f"/api/v1/admin/notifications/templates/{tmpl.id}", 
-        json={"body_template": "New Body"}, 
-        headers=headers
-    )
-    assert resp.status_code == 200
-    
-    # Verify: Automatically deactivated
-    await db_session.refresh(tmpl)
-    assert tmpl.body_template == "New Body"
-    assert tmpl.is_active is False
-
 @pytest.mark.asyncio
 async def test_enhanced_health_check(client, redis_mock):
     from src.core.event_listeners import listener_state

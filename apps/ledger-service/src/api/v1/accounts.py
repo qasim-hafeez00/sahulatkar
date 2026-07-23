@@ -4,11 +4,13 @@ from fastapi import APIRouter, Depends, Query, HTTPException
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
-from src.core.dependencies import get_redis
+from src.core.dependencies import RequestContext, get_redis, require_admin_role
 from sk_shared.redis_client import RedisClient
 from src.services.accounting_service import AccountingService
 
 router = APIRouter(prefix="/accounts", tags=["Accounts"])
+
+_READ_ROLES = ["finance_analyst", "super_admin"]
 
 
 @router.get("/")
@@ -17,6 +19,7 @@ async def list_accounts(
     as_of: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """List all GL accounts with their current balances."""
     service = AccountingService(db, redis=redis)
@@ -29,6 +32,7 @@ async def get_account_details(
     as_of: str | None = Query(None, regex=r"^\d{4}-\d{2}-\d{2}$"),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """Get detailed information and balance for a specific account."""
     service = AccountingService(db, redis=redis)
@@ -46,6 +50,7 @@ async def get_account_ledger(
     limit: int = Query(50, ge=1, le=200),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
+    _: RequestContext = Depends(require_admin_role(_READ_ROLES)),
 ):
     """Get the full ledger (T-account view) for an account."""
     service = AccountingService(db, redis=redis)

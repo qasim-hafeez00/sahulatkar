@@ -19,27 +19,6 @@ def test_late_fee_charity_enforcement():
     assert "Edhi Foundation" in body
 
 @pytest.mark.asyncio
-async def test_compliance_guard_logic(db_session):
-    # Testing the logic directly since the API test had path issues
-    from sk_shared.models.notification import NotificationTemplate
-    from src.api.v1.admin_notifications import update_template
-    from fastapi import HTTPException
-    
-    tmpl = NotificationTemplate(
-        event_type="auth.otp_requested", channel="sms", body_template="OTP: {{otp}}", is_active=True, version=1
-    )
-    db_session.add(tmpl)
-    await db_session.commit()
-    
-    # We mock the dependency call or just call the function if it doesn't use too many deps
-    # But it uses db: AsyncSession.
-    
-    # Simulate update
-    # In a real test we'd use the client, but here we test the service-level effect if possible
-    # Actually, let's just use the client test again but FIX THE PATH.
-    pass
-
-@pytest.mark.asyncio
 async def test_health_ready_path(client):
     from src.core.event_listeners import listener_state
     from src.services.notification_service import DISPATCHERS

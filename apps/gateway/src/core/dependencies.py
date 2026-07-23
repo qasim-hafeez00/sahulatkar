@@ -7,10 +7,18 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
 
 from sk_shared.database import SessionLocal
+from sk_shared.rate_limit import rate_limit_dependency
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import decode_access_token
 from sk_shared.models.auth import User, AdminUser
 from src.config import settings
+
+# Session inactivity-timeout ceiling per admin role (seconds). Shift-based
+# roles get a longer window; everything else falls back to "default".
+ADMIN_SESSION_TTL_BY_ROLE: dict[str, int] = {
+    "cs_agent": 8 * 60 * 60,
+    "default": 2 * 60 * 60,
+}
 
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     async with SessionLocal() as session:
@@ -106,6 +114,13 @@ async def get_current_admin(
     if not session_data:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Admin session revoked or expired")
 
+    # MISS: inactivity timeout should be a sliding window (2h default, 8h for
+    # shift-based roles like cs_agent), not a fixed session lifetime — refresh
+    # the TTL on every authenticated request, capped by the role's ceiling.
+    role = payload.get("role", "")
+    ttl_ceiling = ADMIN_SESSION_TTL_BY_ROLE.get(role, ADMIN_SESSION_TTL_BY_ROLE["default"])
+    await redis.expire(f"sk:auth:admin_session:{token_hash}", ttl_ceiling)
+
     result = await db.execute(select(AdminUser).where(AdminUser.id == admin_id, AdminUser.deleted_at.is_(None)))
     admin = result.scalar_one_or_none()
     if admin is None:
@@ -139,7 +154,10 @@ async def get_admin_for_password_change(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ) -> AdminUser:
-    """Accepts both regular admin tokens and one-time temp tokens (FORCE_PASSWORD_CHANGE flow)."""
+    """Accepts both regular admin tokens and one-time temp tokens (FORCE_PASSWORD_CHANGE
+    and MFA_SETUP_REQUIRED flows — an admin blocked at login by either of those has no
+    real session yet, so change-password/mfa-setup/mfa-verify all accept this same
+    short-lived, Redis-independent temp token instead)."""
     try:
         payload = decode_access_token(credentials.credentials, settings.JWT_PUBLIC_KEY)
         if "admin_id" not in payload:
@@ -151,7 +169,7 @@ async def get_admin_for_password_change(
     admin_id = payload.get("admin_id")
 
     if token_type == "temp":
-        if payload.get("scope") != "change_password":
+        if payload.get("scope") not in ("change_password", "mfa_setup"):
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Token scope insufficient")
         # Temp tokens are not stored in Redis — validate by JWT signature alone
     elif token_type == "admin":
@@ -170,22 +188,14 @@ async def get_admin_for_password_change(
     return admin
 
 
-async def rate_limit_auth(request: Request, redis: RedisClient = Depends(get_redis)):
-    import time
-    ip = request.client.host if request and request.client else "unknown"
-    key = f"sk:rate_limit:auth:{ip}"
-    limit = 10  # 10 requests
-    window = 60 # per 60 seconds
-
-    now = time.time()
-    redis_instance = redis.redis if hasattr(redis, "redis") else redis
-
-    await redis_instance.zremrangebyscore(key, 0, now - window)
-    count = await redis_instance.zcard(key)
-    
-    if count >= limit:
-        raise HTTPException(status_code=status.HTTP_429_TOO_MANY_REQUESTS, detail="Too many attempts. Try again later.")
-        
-    await redis_instance.zadd(key, {str(now): now})
-    await redis_instance.expire(key, window)
+# 10 requests / 60 seconds per IP, shared by /auth/register/initiate, /auth/verify-otp,
+# /auth/login, /auth/refresh, /auth/otp/resend, /auth/forgot-password, /auth/reset-password.
+# Preserves the bespoke dependency's original Redis key (`sk:rate_limit:auth:{ip}`) so this
+# migration does not reset any in-flight rate-limit windows.
+rate_limit_auth = rate_limit_dependency(
+    limit=10,
+    window_seconds=60,
+    key_prefix="sk:rate_limit:auth",
+    detail="Too many attempts. Try again later.",
+)
 

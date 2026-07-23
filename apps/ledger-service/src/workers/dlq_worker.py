@@ -76,18 +76,26 @@ class DLQConsumer:
         if exhausted:
             archived = await self._archive_exhausted(exhausted)
 
-        # Retry retryable messages with exponential back-off
+        # Retry retryable messages with exponential back-off. Messages that
+        # are retried successfully are dropped from the DLQ (they've been
+        # re-queued onto the main event bus); messages whose retry publish
+        # fails have their retry_count incremented and are kept so a later
+        # run can retry again, eventually reaching dlq_max_retries and being
+        # archived above.
+        still_pending: list[DeadLetterMessage] = []
         for msg in retryable:
             success = await self._retry_message(msg)
             if success:
                 retried += 1
             else:
                 skipped += 1
+                msg.retry_count += 1
+                still_pending.append(msg)
 
-        # Rebuild the DLQ file with only the unretried retryable messages
-        # (retried ones get re-queued into the main event bus; exhausted ones archived)
-        if retried > 0 or archived > 0:
-            await self._rebuild_dlq(messages, retried_events={m.event_name for m in retryable}, archived=exhausted)
+        # Rebuild the DLQ file with only the messages that still need a
+        # future retry (successfully-retried and archived messages are gone).
+        if retried > 0 or archived > 0 or skipped > 0:
+            await self._rebuild_dlq(still_pending)
 
         logger.info(
             "DLQ consumer run completed",
@@ -157,19 +165,14 @@ class DLQConsumer:
             logger.error("Failed to archive exhausted DLQ messages", extra={"error": str(exc)})
             return 0
 
-    async def _rebuild_dlq(
-        self,
-        all_messages: list[DeadLetterMessage],
-        retried_events: set[str],
-        archived: list[DeadLetterMessage],
-    ) -> None:
-        """Rewrite the DLQ file removing successfully retried and archived messages."""
-        archived_set = {id(m) for m in archived}
-        # Keep messages that were not successfully retried and not archived
-        # Since we retried ALL retryable messages (even if some failed to publish), we keep them
-        # with incremented retry_count on failure. For simplicity, clear & rewrite only archived ones.
-        remaining = [m for m in all_messages if id(m) not in archived_set]
+    async def _rebuild_dlq(self, remaining: list[DeadLetterMessage]) -> None:
+        """Rewrite the DLQ file to contain only `remaining` (still-pending) messages.
 
+        Successfully-retried messages (re-queued onto the event bus) and
+        exhausted/archived messages are both omitted -- only messages that
+        failed this round's retry attempt (with their retry_count already
+        incremented by the caller) are written back.
+        """
         dlq_file = self.dlq.dlq_file
         try:
             if remaining:

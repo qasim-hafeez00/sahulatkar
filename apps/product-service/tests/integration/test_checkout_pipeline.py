@@ -4,9 +4,10 @@ from sk_shared.constants import QueueName
 
 
 @pytest.mark.asyncio
-async def test_integration_checkout_queue_api_flow(client, db_session, redis_mock):
+async def test_integration_checkout_queue_api_flow(client, db_session, redis_mock, service_header):
     response = await client.post(
         "/api/v1/products/agent/queue-job",
+        headers=service_header,
         json={"order_id": 1201, "vcn_id": 2201},
     )
     assert response.status_code == 200

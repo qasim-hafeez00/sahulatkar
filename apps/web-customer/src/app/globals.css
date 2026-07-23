@@ -1,27 +1,636 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
 :root {
-  --background: #ffffff;
+  --background: #FFF7ED;
+  --background-image: linear-gradient(135deg, #FFF7ED 0%, #FFF7ED 45%, #ffedd5 100%);
   --foreground: #171717;
+  --muted: #6b6b6b;
+  --accent: #f97316;
+  --card-bg: rgba(255, 255, 255, 0.88);
+  --section-bg: rgba(255, 255, 255, 0.72);
+  --section-border: rgba(0, 0, 0, 0.06);
+  --header-bg: linear-gradient(
+    to right,
+    rgba(255, 247, 237, 0.92),
+    rgba(255, 247, 237, 0.72)
+  );
+  --shadow-soft: 0 8px 30px rgba(35, 30, 28, 0.08);
+  --shadow-hover: 0 18px 50px rgba(35, 30, 28, 0.12);
+  --site-photo-opacity: 0.18;
+  --site-overlay: linear-gradient(
+    135deg,
+    rgba(255, 247, 237, 0.92) 0%,
+    rgba(255, 247, 237, 0.88) 45%,
+    rgba(255, 237, 213, 0.78) 100%
+  );
+  --site-glow: radial-gradient(
+    ellipse at 20% 0%,
+    rgba(249, 115, 22, 0.16) 0%,
+    transparent 52%
+  ),
+  radial-gradient(
+    ellipse at 85% 15%,
+    rgba(236, 72, 153, 0.08) 0%,
+    transparent 48%
+  );
+  --site-vignette: radial-gradient(
+    ellipse at center,
+    transparent 40%,
+    rgba(255, 247, 237, 0.15) 100%
+  );
+  --site-vignette-opacity: 1;
+  --site-orb-1: rgba(249, 115, 22, 0.22);
+  --site-orb-2: rgba(236, 72, 153, 0.14);
+  --site-orb-opacity: 1;
+  --capture-panel: rgba(15, 23, 42, 0.88);
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+.dark {
+  --background: #161413;
+  --background-image: linear-gradient(90deg, #231e1c 0%, #1c1917 50%, #161413 100%);
+  --foreground: #faf3ee;
+  --muted: #c9bdb4;
+  --accent: #fb923c;
+  --card-bg: rgba(40, 35, 33, 0.92);
+  --section-bg: rgba(35, 30, 28, 0.65);
+  --section-border: rgba(255, 255, 255, 0.1);
+  --header-bg: linear-gradient(
+    to right,
+    rgba(35, 30, 28, 0.95),
+    rgba(22, 20, 19, 0.9)
+  );
+  --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.45);
+  --shadow-hover: 0 18px 50px rgba(0, 0, 0, 0.55);
+  --site-photo-opacity: 0.05;
+  --site-overlay: linear-gradient(
+    90deg,
+    rgba(35, 30, 28, 0.94) 0%,
+    rgba(30, 27, 25, 0.92) 45%,
+    rgba(22, 20, 19, 0.96) 100%
+  );
+  --site-glow: radial-gradient(
+    ellipse at 18% 8%,
+    rgba(249, 115, 22, 0.12) 0%,
+    transparent 50%
+  ),
+  radial-gradient(
+    ellipse at 88% 12%,
+    rgba(168, 85, 247, 0.1) 0%,
+    transparent 45%
+  ),
+  radial-gradient(
+    ellipse at 50% 95%,
+    rgba(251, 146, 60, 0.06) 0%,
+    transparent 55%
+  );
+  --site-vignette: radial-gradient(
+    ellipse at center,
+    transparent 35%,
+    rgba(0, 0, 0, 0.35) 100%
+  );
+  --site-vignette-opacity: 1;
+  --site-orb-1: rgba(249, 115, 22, 0.12);
+  --site-orb-2: rgba(168, 85, 247, 0.08);
+  --site-orb-opacity: 0.85;
+  --capture-panel: rgba(12, 10, 9, 0.94);
 }
 
 @media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+  :root:not(.theme-locked) {
+    --background: #161413;
+    --background-image: linear-gradient(90deg, #231e1c 0%, #1c1917 50%, #161413 100%);
+    --foreground: #faf3ee;
+    --muted: #c9bdb4;
+    --accent: #fb923c;
+    --card-bg: rgba(40, 35, 33, 0.92);
+    --section-bg: rgba(35, 30, 28, 0.65);
+    --section-border: rgba(255, 255, 255, 0.1);
+    --header-bg: linear-gradient(
+      to right,
+      rgba(35, 30, 28, 0.95),
+      rgba(22, 20, 19, 0.9)
+    );
+    --shadow-soft: 0 8px 30px rgba(0, 0, 0, 0.45);
+    --shadow-hover: 0 18px 50px rgba(0, 0, 0, 0.55);
+    --site-photo-opacity: 0.05;
+    --site-overlay: linear-gradient(90deg, rgba(35, 30, 28, 0.94) 0%, rgba(30, 27, 25, 0.92) 45%, rgba(22, 20, 19, 0.96) 100%);
+    --site-glow: radial-gradient(ellipse at 18% 8%, rgba(249, 115, 22, 0.12) 0%, transparent 50%), radial-gradient(ellipse at 88% 12%, rgba(168, 85, 247, 0.1) 0%, transparent 45%);
+    --site-vignette: radial-gradient(ellipse at center, transparent 35%, rgba(0, 0, 0, 0.35) 100%);
+    --site-vignette-opacity: 1;
+    --site-orb-1: rgba(249, 115, 22, 0.12);
+    --site-orb-2: rgba(168, 85, 247, 0.08);
+    --site-orb-opacity: 0.85;
+    --capture-panel: rgba(12, 10, 9, 0.94);
   }
 }
 
+html {
+  background-color: var(--background);
+  background-image: var(--background-image);
+  transition:
+    background-color 0.55s cubic-bezier(0.4, 0, 0.2, 1),
+    background-image 0.55s cubic-bezier(0.4, 0, 0.2, 1);
+}
+
+html,
 body {
+  background-color: transparent;
+  background-image: none;
   color: var(--foreground);
-  background: var(--background);
   font-family: Arial, Helvetica, sans-serif;
+  min-height: 100vh;
+  height: 100%;
+  transition: color 0.4s ease;
 }
 
-@layer utilities {
-  .text-balance {
-    text-wrap: balance;
+/* Full-page content canvas — always shows site background through */
+.page-canvas {
+  position: relative;
+  flex: 1;
+  width: 100%;
+  min-height: calc(100vh - 5rem);
+  background: transparent !important;
+  color: var(--foreground);
+}
+
+.page-canvas > * {
+  position: relative;
+  z-index: 0;
+}
+
+.link {
+  color: var(--foreground);
+}
+.link:hover {
+  color: var(--accent);
+}
+.link:focus {
+  outline: 2px solid rgba(249, 115, 22, 0.25);
+  outline-offset: 2px;
+}
+
+.text-theme {
+  color: var(--foreground);
+}
+.text-theme-muted {
+  color: var(--muted);
+}
+
+.section-surface {
+  background: var(--header-bg);
+  border-top: 1px solid var(--section-border);
+  border-bottom: 1px solid var(--section-border);
+  transition: background 0.55s ease, border-color 0.4s ease;
+}
+
+.glass-header {
+  background: var(--header-bg);
+}
+
+.card-surface {
+  background: var(--card-bg);
+  box-shadow: var(--shadow-soft);
+  border-radius: 12px;
+  border: 1px solid var(--section-border);
+  transition:
+    transform 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 280ms cubic-bezier(0.22, 1, 0.36, 1),
+    background 0.4s ease;
+  backdrop-filter: blur(12px);
+}
+.card-surface:hover {
+  transform: translateY(-6px);
+  box-shadow: var(--shadow-hover);
+}
+
+.fade-in {
+  animation: fadeIn 0.65s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.fade-in-up {
+  animation: fadeInUp 0.7s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+.fade-in-delay-1 {
+  animation-delay: 0.1s;
+}
+.fade-in-delay-2 {
+  animation-delay: 0.2s;
+}
+.fade-in-delay-3 {
+  animation-delay: 0.3s;
+}
+
+.page-enter {
+  animation: pageEnter 0.5s cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+.reveal-on-scroll {
+  opacity: 0;
+  transform: translateY(24px);
+  transition:
+    opacity 0.7s cubic-bezier(0.22, 1, 0.36, 1),
+    transform 0.7s cubic-bezier(0.22, 1, 0.36, 1);
+}
+.reveal-on-scroll.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.btn-smooth {
+  transition:
+    transform 200ms cubic-bezier(0.22, 1, 0.36, 1),
+    box-shadow 200ms ease,
+    background-color 200ms ease;
+}
+.btn-smooth:hover {
+  transform: translateY(-1px);
+}
+.btn-smooth:active {
+  transform: translateY(1px) scale(0.995);
+}
+
+.hover-lift {
+  transition: transform 280ms cubic-bezier(0.22, 1, 0.36, 1), box-shadow 280ms ease;
+}
+.hover-lift:hover {
+  transform: translateY(-4px);
+}
+
+.muted {
+  color: var(--muted);
+}
+.accent {
+  color: var(--accent);
+}
+
+.animate-spin-slow {
+  animation: spin-slow 1.6s linear infinite;
+}
+
+.underline-grow {
+  position: relative;
+}
+.underline-grow::after {
+  content: "";
+  position: absolute;
+  left: 0;
+  bottom: -2px;
+  height: 2px;
+  width: 0;
+  background: var(--accent);
+  transition: width 320ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+.underline-grow:hover::after {
+  width: 100%;
+}
+
+.theme-toggle-btn {
+  position: relative;
+  overflow: hidden;
+  border-radius: 0.5rem;
+  padding: 0.5rem;
+  transition: background-color 0.3s ease, transform 0.2s ease;
+}
+.theme-toggle-btn:hover {
+  background: rgba(249, 115, 22, 0.1);
+}
+.dark .theme-toggle-btn:hover {
+  background: rgba(251, 146, 60, 0.12);
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+    transform: translateY(8px);
   }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes fadeInUp {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes pageEnter {
+  from {
+    opacity: 0;
+    transform: translateY(14px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes spin-slow {
+  from {
+    transform: rotate(0deg);
+  }
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@keyframes shimmer {
+  0% {
+    background-position: -200% 0;
+  }
+  100% {
+    background-position: 200% 0;
+  }
+}
+
+.shimmer {
+  background: linear-gradient(
+    90deg,
+    transparent 0%,
+    rgba(249, 115, 22, 0.08) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 2.5s ease-in-out infinite;
+}
+
+/* ── Theme-aware panel utilities ── */
+.theme-panel {
+  background: var(--card-bg);
+  border: 1px solid var(--section-border);
+  color: var(--foreground);
+  backdrop-filter: blur(12px);
+  transition: background 0.4s ease, border-color 0.4s ease, color 0.3s ease;
+}
+
+.theme-section {
+  background: transparent !important;
+  color: var(--foreground);
+}
+
+.capture-panel {
+  background: var(--capture-panel);
+  border: 1px solid var(--section-border);
+  color: var(--foreground);
+  backdrop-filter: blur(16px);
+}
+
+.glass-surface {
+  background: var(--card-bg);
+  border: 1px solid var(--section-border);
+  backdrop-filter: blur(16px);
+}
+
+/* ── Site-wide dark mode ── */
+.dark {
+  color-scheme: dark;
+}
+
+/* Force every page root to stay transparent so full dark bg shows */
+.dark .page-canvas,
+.dark .min-h-screen,
+.dark .min-h-\[calc\(100vh-5rem\)\],
+.dark section,
+.dark .theme-section {
+  background-color: transparent !important;
+  background-image: none !important;
+}
+
+.dark .section-surface {
+  background-color: var(--section-bg) !important;
+  border-color: var(--section-border);
+}
+
+/* All white / light surfaces → dark glass */
+.dark
+  :is(div, section, aside, article, header, footer, nav, form, li, tr, td, th, label)[class*="bg-white"]:not(
+    :is(button, a, input, select, textarea, [role="button"])
+  ),
+.dark :is(div, section, aside, article).bg-white:not(:is(button, a, input, select, textarea)) {
+  background-color: var(--card-bg) !important;
+}
+
+.dark .bg-gray-50,
+.dark .bg-gray-100,
+.dark .bg-neutral-50,
+.dark .bg-neutral-100,
+.dark .bg-slate-50,
+.dark .bg-slate-100 {
+  background-color: var(--section-bg) !important;
+}
+
+.dark .bg-\[\#f7f0e6\],
+.dark .bg-\[\#f8f2ed\],
+.dark .bg-\[\#FFF7ED\] {
+  background-color: transparent !important;
+}
+
+.dark .bg-gradient-to-br.from-gray-50,
+.dark .bg-gradient-to-br.from-gray-50.to-orange-50,
+.dark .bg-gradient-to-r.from-orange-50,
+.dark .bg-gradient-to-r.from-orange-50.via-white,
+.dark .from-orange-50.via-white.to-orange-50 {
+  background: transparent !important;
+  background-image: none !important;
+}
+
+/* Typography */
+.dark .text-gray-900,
+.dark .text-neutral-900,
+.dark .text-slate-900 {
+  color: var(--foreground) !important;
+}
+
+.dark .text-gray-800,
+.dark .text-gray-700,
+.dark .text-gray-600,
+.dark .text-neutral-500,
+.dark .text-neutral-400,
+.dark .text-slate-600,
+.dark .text-slate-700,
+.dark .text-slate-500 {
+  color: var(--muted) !important;
+}
+
+/* Borders */
+.dark .border-gray-200,
+.dark .border-gray-300,
+.dark .border-neutral-100,
+.dark .border-slate-200,
+.dark .border-slate-300,
+.dark .border-orange-100,
+.dark .border-orange-200 {
+  border-color: var(--section-border) !important;
+}
+
+.dark .divide-neutral-100 > :not([hidden]) ~ :not([hidden]),
+.dark .divide-gray-200 > :not([hidden]) ~ :not([hidden]) {
+  border-color: var(--section-border) !important;
+}
+
+/* Hover states */
+.dark .hover\:bg-gray-50:hover,
+.dark .hover\:bg-gray-100:hover,
+.dark .hover\:bg-slate-50:hover,
+.dark .hover\:bg-slate-100:hover {
+  background-color: rgba(255, 255, 255, 0.06) !important;
+}
+
+/* Inputs on dark pages */
+.dark input:not([type="checkbox"]):not([type="radio"]),
+.dark textarea,
+.dark select {
+  background-color: var(--card-bg);
+  color: var(--foreground);
+  border-color: var(--section-border);
+}
+
+.dark input::placeholder,
+.dark textarea::placeholder {
+  color: var(--muted);
+}
+
+/* Badge / pill in dark mode */
+.dark .from-orange-50,
+.dark .to-amber-50,
+.dark .bg-orange-50,
+.dark .bg-red-100 {
+  background-color: rgba(249, 115, 22, 0.12) !important;
+  background-image: none !important;
+}
+
+.dark .text-orange-800,
+.dark .text-orange-800\/90 {
+  color: #fdba74 !important;
+}
+
+.dark .border-orange-200,
+.dark .border-orange-200\/70 {
+  border-color: rgba(249, 115, 22, 0.25) !important;
+}
+
+/* Fade overlays that used light colors */
+.dark .from-white {
+  --tw-gradient-from: transparent !important;
+}
+
+.dark .from-orange-50.via-orange-50\/90,
+.dark .via-orange-50\/90 {
+  --tw-gradient-from: transparent !important;
+  --tw-gradient-via: transparent !important;
+  --tw-gradient-to: transparent !important;
+}
+
+/* Headings & body text inherit theme in dark */
+.dark h1,
+.dark h2,
+.dark h3,
+.dark h4,
+.dark h5,
+.dark h6 {
+  color: var(--foreground);
+}
+
+.dark p {
+  color: inherit;
+}
+
+/* Slate text on dark backgrounds */
+.dark .text-slate-100,
+.dark .text-slate-200 {
+  color: #FAF3EE !important;
+}
+
+.dark .text-slate-300,
+.dark .text-slate-400 {
+  color: var(--muted) !important;
+}
+
+.dark .text-slate-500,
+.dark .text-slate-600 {
+  color: #A89F98 !important;
+}
+
+.dark .text-slate-700,
+.dark .text-slate-800 {
+  color: var(--foreground) !important;
+}
+
+/* Keep vibrant brand gradient text visible in dark */
+.dark .bg-clip-text.text-transparent {
+  -webkit-background-clip: text;
+  background-clip: text;
+}
+
+/* Theme panels readable in dark */
+.dark .theme-panel,
+.dark .card-surface {
+  color: var(--foreground);
+}
+
+.dark .capture-panel {
+  background: var(--capture-panel) !important;
+  border-color: var(--section-border);
+  color: var(--foreground);
+}
+
+.dark .capture-panel .text-white {
+  color: #faf3ee !important;
+}
+
+.dark .capture-panel .text-slate-300,
+.dark .capture-panel .text-slate-200 {
+  color: #e7ddd6 !important;
+}
+
+.dark .capture-panel .text-slate-400,
+.dark .capture-panel .text-slate-500 {
+  color: var(--muted) !important;
+}
+
+/* Hero typography — premium dark mode */
+.dark .hero-welcome-letter {
+  background: linear-gradient(
+    135deg,
+    #ffe8cc 0%,
+    #ffd6a8 25%,
+    #f0c4ff 55%,
+    #d4c4ff 100%
+  );
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent !important;
+  filter: drop-shadow(0 2px 12px rgba(249, 115, 22, 0.15));
+}
+
+.dark .hero-brand-title {
+  background: linear-gradient(
+    90deg,
+    #ffb86c 0%,
+    #ff8fa3 45%,
+    #d8b4fe 100%
+  ) !important;
+  -webkit-background-clip: text !important;
+  background-clip: text !important;
+  filter: drop-shadow(0 4px 24px rgba(249, 115, 22, 0.2));
+}
+
+.dark .hero-subtitle {
+  color: #e8ddd6 !important;
+}
+
+.dark .hero-badge-text {
+  color: #ffedd5 !important;
 }

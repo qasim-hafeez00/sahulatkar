@@ -1,22 +1,21 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query, Request, HTTPException, status
-from pydantic import BaseModel, Field
+from sqlalchemy.orm import selectinload
+from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-from typing import Optional
 
 from sk_shared.models.auth import AdminUser
 from src.core.dependencies import RequirePermission, get_db
-from src.core.audit import record_audit_event
+from src.services.rbac import RBACService
 
 router = APIRouter(prefix="/admin/admins", tags=["Admin Users Management"])
 
-class AdminCreateRequest(BaseModel):
-    email: str = Field(..., max_length=255)
-    password: str = Field(..., min_length=8)
-    role_id: Optional[int] = None
-    force_password_change: bool = True
+# Admin creation lives exclusively in admin_auth.py's POST /admin/auth/admins,
+# which resolves role by name against RBACService (matching how roles are
+# actually authorized) and reuses the same password hashing as admin login.
+# This router previously had its own divergent POST here — removed.
+
 
 @router.get("")
 async def list_admins(
@@ -27,16 +26,24 @@ async def list_admins(
 ) -> dict:
     """GW-GAP-17: Admin management list"""
     offset = (page - 1) * limit
-    q = select(AdminUser).where(AdminUser.deleted_at.is_(None)).order_by(AdminUser.created_at.desc()).offset(offset).limit(limit)
+    q = (
+        select(AdminUser)
+        .options(selectinload(AdminUser.role))
+        .where(AdminUser.deleted_at.is_(None))
+        .order_by(AdminUser.created_at.desc())
+        .offset(offset)
+        .limit(limit)
+    )
     rows = (await db.execute(q)).scalars().all()
     total = int(await db.scalar(select(func.count(AdminUser.id)).where(AdminUser.deleted_at.is_(None))) or 0)
-    
+
     return {
         "items": [
             {
                 "id": r.id,
                 "email": r.email,
                 "role_id": r.role_id,
+                "role_name": r.role.name if r.role else None,
                 "mfa_enabled": r.mfa_enabled,
                 "force_password_change": r.force_password_change,
                 "locked_until": r.locked_until.isoformat() if r.locked_until else None,
@@ -46,39 +53,15 @@ async def list_admins(
         "pagination": {"page": page, "limit": limit, "total": total},
     }
 
-@router.post("")
-async def create_admin(
-    payload: AdminCreateRequest,
-    request: Request,
+
+@router.get("/role-hierarchy")
+async def role_hierarchy(
     current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
-    db: AsyncSession = Depends(get_db),
 ) -> dict:
-    """GW-GAP-17: Admin management create"""
-    from passlib.context import CryptContext
-    pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
-    
-    existing = await db.scalar(select(AdminUser).where(AdminUser.email == payload.email))
-    if existing:
-        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="EMAIL_ALREADY_EXISTS")
-        
-    new_admin = AdminUser(
-        email=payload.email,
-        password_hash=pwd_context.hash(payload.password),
-        role_id=payload.role_id,
-        force_password_change=payload.force_password_change,
-        mfa_enabled=True,
-    )
-    db.add(new_admin)
-    await db.flush()
-    
-    await record_audit_event(
-        db=db,
-        request=request,
-        admin_user_id=current_admin.id,
-        module="admin_management",
-        action="admin_created",
-        target_id=new_admin.id,
-        changes={"email": payload.email, "role_id": payload.role_id},
-    )
-    await db.commit()
-    return {"id": new_admin.id, "email": new_admin.email}
+    """Reference table of the 8 canonical roles and their permission sets."""
+    return {
+        "roles": [
+            {"name": role, "permissions": RBACService.get_role_permissions(role)}
+            for role in RBACService.CANONICAL_ROLES
+        ]
+    }

@@ -11,11 +11,20 @@ from src.api.v1.admin_orders import router as admin_orders_router
 from src.api.v1.admin_payments import router as admin_payments_router
 from src.api.v1.admin_installments import router as admin_installments_router
 from src.api.v1.admin_risk import router as admin_risk_router
+from src.api.v1.admin_approvals import router as admin_approvals_router
+from src.api.v1.admin_finance import router as admin_finance_router
+from src.api.v1.admin_notifications import router as admin_notifications_router
+from src.api.v1.admin_documents import router as admin_documents_router
+from src.api.v1.admin_logs import router as admin_logs_router
+from src.api.v1.admin_reports import router as admin_reports_router
+from src.api.v1.admin_developer import router as admin_developer_router
+from src.api.v1.admin_marketing import router as admin_marketing_router
 from src.api.v1.admin_system import router as admin_system_router
 from src.api.v1.admin_compliance import router as admin_compliance_router, audit_router as admin_audit_router
 from src.api.v1.contracts import router as contracts_router
 from src.api.v1.payments import router as payments_router
 from src.api.v1.orders import router as orders_router
+from src.api.v1.cart import router as cart_router
 from src.api.v1.credit import router as credit_router
 from src.api.v1.webhooks import router as webhooks_router
 from src.api.v1.internal import router as internal_router
@@ -23,6 +32,8 @@ from src.api.v1.admin_partners import router as admin_partners_router
 from src.api.v1.admin_support import router as admin_support_router
 from src.api.v1.admin_admins import router as admin_admins_router
 from src.api.v1.profile import router as profile_router
+from src.api.v1.notifications import router as notifications_router
+from src.api.v1.support import router as support_router
 
 api_router = APIRouter()
 
@@ -44,12 +55,21 @@ api_router.include_router(admin_orders_router, prefix="/v1")
 api_router.include_router(admin_payments_router, prefix="/v1")
 api_router.include_router(admin_installments_router, prefix="/v1")
 api_router.include_router(admin_risk_router, prefix="/v1")
+api_router.include_router(admin_approvals_router, prefix="/v1")
+api_router.include_router(admin_finance_router, prefix="/v1")
+api_router.include_router(admin_notifications_router, prefix="/v1")
+api_router.include_router(admin_documents_router, prefix="/v1")
+api_router.include_router(admin_logs_router, prefix="/v1")
+api_router.include_router(admin_reports_router, prefix="/v1")
+api_router.include_router(admin_developer_router, prefix="/v1")
+api_router.include_router(admin_marketing_router, prefix="/v1")
 api_router.include_router(admin_system_router, prefix="/v1")
 api_router.include_router(admin_compliance_router, prefix="/v1")
 api_router.include_router(admin_audit_router, prefix="/v1")
 api_router.include_router(contracts_router, prefix="/v1")
 api_router.include_router(payments_router, prefix="/v1")
 api_router.include_router(orders_router, prefix="/v1")
+api_router.include_router(cart_router, prefix="/v1")
 api_router.include_router(credit_router, prefix="/v1")
 api_router.include_router(internal_router, prefix="/v1")
 api_router.include_router(webhooks_router, prefix="/v1")
@@ -57,3 +77,5 @@ api_router.include_router(admin_partners_router, prefix="/v1")
 api_router.include_router(admin_support_router, prefix="/v1")
 api_router.include_router(admin_admins_router, prefix="/v1")
 api_router.include_router(profile_router, prefix="/v1")
+api_router.include_router(notifications_router, prefix="/v1")
+api_router.include_router(support_router, prefix="/v1")

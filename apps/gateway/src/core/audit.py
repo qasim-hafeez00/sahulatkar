@@ -22,6 +22,7 @@ async def record_audit_event(
     action: str,
     target_id: int | None = None,
     changes: dict[str, Any] | None = None,
+    severity: str = "info",
 ) -> None:
     ip_address = request.client.host if request and request.client else None
     request_id = getattr(request.state, "request_id", None) if request else None
@@ -36,6 +37,7 @@ async def record_audit_event(
             changes=changes or {},
             ip_address=ip_address,
             request_id=request_id,
+            severity=severity,
         )
         db.add(audit_record)
         # Caller must call db.commit() explicitly.
@@ -55,6 +57,7 @@ async def record_audit_event(
                 "changes": changes or {},
                 "ip_address": ip_address,
                 "request_id": request_id,
+                "severity": severity,
                 "error": str(exc),
             })
             _redis = get_redis_client(settings.REDIS_URL)

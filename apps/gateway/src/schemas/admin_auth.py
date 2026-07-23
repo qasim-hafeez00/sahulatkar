@@ -18,21 +18,20 @@ class AdminLoginResponse(BaseModel):
     role: str
 
 
+# Module 12 — the canonical 8-role set (RBACService.CANONICAL_ROLES). Kept as a
+# literal duplicate rather than importing RBACService here to avoid a schemas
+# -> services import cycle; the two must be kept in sync by hand.
+_CanonicalRole = Literal[
+    "super_admin", "operations_manager", "risk_officer", "compliance_officer",
+    "finance_analyst", "cs_agent", "analyst", "marketing_manager",
+]
+
+
 class CreateAdminRequest(BaseModel):
     email: str = Field(..., min_length=5, max_length=255)
     password: str = Field(..., min_length=8, max_length=128)
-    # TASK-19: Sync with full RBAC role map
-    role: Literal[
-        "super_admin", "risk_officer", "kyc_reviewer", "analyst", "support",
-        "operations_manager", "credit_risk_analyst", "fraud_analyst", "cs_agent",
-        "finance_analyst", "compliance_officer", "marketing_manager"
-    ] = "analyst"
+    role: _CanonicalRole = "analyst"
 
 
 class AssignRoleRequest(BaseModel):
-    # TASK-19: Sync with full RBAC role map
-    role: Literal[
-        "super_admin", "risk_officer", "kyc_reviewer", "analyst", "support",
-        "operations_manager", "credit_risk_analyst", "fraud_analyst", "cs_agent",
-        "finance_analyst", "compliance_officer", "marketing_manager"
-    ] = "analyst"
+    role: _CanonicalRole = "analyst"

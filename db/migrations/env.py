@@ -16,7 +16,13 @@ target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url")))
 
 def do_run_migrations(connection: Connection) -> None:
-    context.configure(connection=connection, target_metadata=target_metadata)
+    from sqlalchemy import String
+    context.configure(
+        connection=connection,
+        target_metadata=target_metadata,
+        version_num_col_type=String(128),
+        transaction_per_migration=True,
+    )
     with context.begin_transaction():
         context.run_migrations()
 

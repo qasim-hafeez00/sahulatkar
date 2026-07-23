@@ -19,6 +19,14 @@ depends_on: Union[str, Sequence[str], None] = None
 
 
 def upgrade() -> None:
+    # Guard: skip if tables were already created by an earlier migration
+    conn = op.get_bind()
+    result = conn.execute(sa.text(
+        "SELECT 1 FROM information_schema.tables WHERE table_name='notification_templates'"
+    )).scalar()
+    if result:
+        return
+
     # notifications
     op.create_table('notifications',
         sa.Column('id', sa.BigInteger(), nullable=False),

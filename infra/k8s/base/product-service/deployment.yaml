@@ -1,0 +1,120 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: product-service
+  labels:
+    app: product-service
+    component: backend
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: product-service
+  template:
+    metadata:
+      labels:
+        app: product-service
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      serviceAccountName: sk-product-service
+      securityContext:
+        runAsNonRoot: true
+        fsGroup: 1000
+      containers:
+        - name: product-service
+          image: sk-product-service:latest
+          ports:
+            - name: http
+              containerPort: 8000
+          env:
+            - name: SERVICE_NAME
+              value: "product-service"
+            - name: ENVIRONMENT
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: environment
+            # AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md):
+            # gates src/config.py::get_settings()'s Secrets Manager attempt.
+            # Requires the sk-product-service ServiceAccount to be
+            # IRSA-annotated with the
+            # secrets_manager_irsa_role_arns["product-service"] Terraform output.
+            - name: AWS_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: aws_region
+            - name: LOG_LEVEL
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: log_level
+            - name: DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sk-db-credentials
+                  key: database_url
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: sk-redis-credentials
+                  key: product_service_url
+            - name: JWT_PUBLIC_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sk-jwt-keys
+                  key: jwt_public_key
+            - name: INTERNAL_SERVICE_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sk-internal-service-token
+                  key: internal_service_token
+          resources:
+            requests:
+              cpu: 250m
+              memory: 512Mi
+            limits:
+              cpu: 1000m
+              memory: 1536Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            runAsNonRoot: true
+            # Playwright/Chromium needs to write its browser profile, cache,
+            # and singleton lock files under $HOME at runtime — unlike the
+            # other backend services, this one can't run with a read-only
+            # root filesystem without significantly more Chromium flag
+            # tuning, so it's relaxed here specifically.
+            readOnlyRootFilesystem: false
+            capabilities:
+              drop: ["ALL"]
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 15
+            periodSeconds: 20
+            timeoutSeconds: 5
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: dshm
+              mountPath: /dev/shm
+      volumes:
+        - name: tmp
+          emptyDir: {}
+        - name: dshm
+          emptyDir:
+            medium: Memory
+            sizeLimit: 512Mi

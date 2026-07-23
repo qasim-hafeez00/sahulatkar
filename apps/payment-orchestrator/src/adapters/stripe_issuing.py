@@ -116,6 +116,23 @@ class StripeIssuingAdapter(PaymentAdapter):
             logger.error("Stripe card creation failed", extra={"error": str(exc)})
             raise
 
+    def get_card(self, issuer_card_id: str) -> Any:
+        """
+        Retrieve the current state of a Stripe Issuing card.
+
+        Used by StripePoller as a fallback status check (in case a webhook
+        was delayed or lost) — callers inspect the returned object's
+        ``.status`` field (e.g. "active", "inactive", "canceled").
+
+        Bug fix: this method did not exist even though StripePoller called
+        it on every polling cycle for every active VCN — the call always
+        raised AttributeError, which was silently swallowed by the poller's
+        per-card try/except, so the poller never actually detected any
+        Stripe-side card cancellations in production.
+        """
+        stripe.api_key = self.secret_key
+        return stripe.issuing.Card.retrieve(issuer_card_id)
+
     def cancel_card(self, issuer_card_id: str) -> bool:
         """
         Cancel (void) a Stripe Issuing card.

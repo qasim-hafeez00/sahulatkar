@@ -1,11 +1,19 @@
+import logging
+import os
 from typing import List, Literal
-from pydantic import Field
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from sk_shared.secrets_manager import SecretsManagerLoadError, load_secrets_manager_overrides
+
+logger = logging.getLogger(__name__)
 
 
 class Settings(BaseSettings):
     # ── Core ──────────────────────────────────────────────────────────────────
     SERVICE_NAME: str = "notification-service"
+    ENVIRONMENT: str = "local"
     DATABASE_URL: str = "postgresql+asyncpg://sk_app:password@localhost:5432/sahulatkar"
     REDIS_URL: str = "redis://localhost:6379/5"
     REDIS_DB: int = 5
@@ -19,6 +27,10 @@ class Settings(BaseSettings):
     AFTERSHIP_BASE_URL: str = "https://api.aftership.com/v4"
 
     # ── Internal Auth ─────────────────────────────────────────────────────────
+    # Shared secret with the Gateway: verifies X-Internal-Key on machine-to-machine
+    # calls (require_internal_key) AND signs/verifies the short-lived X-Admin-Assertion
+    # the Gateway mints to propagate an authenticated admin's role/permissions
+    # (see sk_shared.security.create_signed_assertion / verify_signed_assertion).
     INTERNAL_API_KEY: str = "test-key"
 
     # ── SMS — Jazz / Rozan ────────────────────────────────────────────────────
@@ -93,5 +105,76 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @model_validator(mode="after")
+    def _validate_runtime_constraints(self):
+        if self.ENVIRONMENT != "local" and self.INTERNAL_API_KEY == "test-key":
+            raise ValueError(
+                "INTERNAL_API_KEY must be changed outside local environment — "
+                "it is used both for X-Internal-Key auth and for signing/verifying "
+                "the admin assertion trusted by admin_notifications/admin_tracking."
+            )
+        return self
 
-settings = Settings()
+    @property
+    def cors_allow_origins_list(self) -> List[str]:
+        """Gate wildcard CORS to local development only (mirrors product-service)."""
+        if self.ENVIRONMENT == "local":
+            return ["*"]
+        return [self.CUSTOMER_WEB_URL, "https://admin.sahulatkar.pk"]
+
+
+# AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md): credential
+# fields only -- not rate limits, retry backoff, or the reminder-window list.
+# Keys are the dash-case Secrets Manager suffix under
+# "notification-service/<environment>/", values are the exact Settings field name.
+_SECRETS_MANAGER_FIELD_MAP = {
+    "database-url": "DATABASE_URL",
+    "redis-url": "REDIS_URL",
+    "internal-api-key": "INTERNAL_API_KEY",
+    "aftership-api-key": "AFTERSHIP_API_KEY",
+    "aftership-webhook-secret": "AFTERSHIP_WEBHOOK_SECRET",
+    "jazz-sms-username": "JAZZ_SMS_USERNAME",
+    "jazz-sms-password": "JAZZ_SMS_PASSWORD",
+    "twilio-account-sid": "TWILIO_ACCOUNT_SID",
+    "twilio-auth-token": "TWILIO_AUTH_TOKEN",
+    "jazz-whatsapp-api-key": "JAZZ_WHATSAPP_API_KEY",
+    "fcm-service-account-json": "FCM_SERVICE_ACCOUNT_JSON",
+    "sendgrid-api-key": "SENDGRID_API_KEY",
+    "sendgrid-webhook-secret": "SENDGRID_WEBHOOK_SECRET",
+    "jazz-sms-webhook-secret": "JAZZ_SMS_WEBHOOK_SECRET",
+    "jazz-whatsapp-webhook-secret": "JAZZ_WHATSAPP_WEBHOOK_SECRET",
+}
+
+
+def get_settings() -> Settings:
+    """Get settings, trying AWS Secrets Manager first, then env vars/.env.
+
+    Same fallback contract as every other service (see
+    docs/SECRETS_MANAGER_MIGRATION.md and gateway's src/config.py): only
+    attempts Secrets Manager when AWS_REGION is set, and falls back to plain
+    env vars/.env on any failure so local/test runs (no AWS_REGION) are
+    unaffected. notification-service has no standalone
+    validate_critical_settings() (its placeholder check lives directly in
+    the @model_validator above); that validator still runs unchanged for
+    both the Secrets-Manager-populated and the plain-env-var path, since both
+    go through Settings.__init__.
+    """
+    if os.getenv("AWS_REGION"):
+        try:
+            overrides = load_secrets_manager_overrides(
+                service_prefix="notification-service",
+                environment=os.getenv("ENVIRONMENT", "prod"),
+                secret_field_map=_SECRETS_MANAGER_FIELD_MAP,
+                region=os.getenv("AWS_REGION"),
+            )
+            return Settings(**overrides)
+        except SecretsManagerLoadError as exc:
+            logger.warning(
+                "Failed to load settings from AWS Secrets Manager, falling back to env vars/.env: %s",
+                exc,
+            )
+
+    return Settings()
+
+
+settings = get_settings()

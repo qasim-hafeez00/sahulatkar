@@ -1,0 +1,55 @@
+# pgbouncer: every backend service and the alembic migration Job connect to
+# it in-cluster (DATABASE_URL in every backend's Deployment points at
+# "pgbouncer:6432"); pgbouncer itself proxies to the real Postgres instance
+# via pgbouncer_upstream_url, which both overlays' secrets.yaml show as an
+# external host (postgres-staging.internal / postgres-production.internal —
+# not a resource in this k8s tree, matching docker-compose's Postgres being
+# a separate managed/external datastore in real deployments).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-pgbouncer
+spec:
+  podSelector:
+    matchLabels:
+      app: pgbouncer
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+        - podSelector:
+            matchLabels:
+              app: product-service
+        - podSelector:
+            matchLabels:
+              app: credit-engine
+        - podSelector:
+            matchLabels:
+              app: payment-orchestrator
+        - podSelector:
+            matchLabels:
+              app: ledger-service
+        - podSelector:
+            matchLabels:
+              app: notification-service
+        - podSelector:
+            matchLabels:
+              app: alembic-migrate
+      ports:
+        - protocol: TCP
+          port: 6432
+  egress:
+    # ASSUMPTION: Postgres is external to the cluster (RDS/self-hosted VM —
+    # secrets.yaml's pgbouncer_upstream_url uses a *.internal hostname, not
+    # an in-cluster Service). Real CIDR is not discoverable from this repo;
+    # scoped by port only. Tighten to the actual VPC/subnet CIDR once known.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 5432

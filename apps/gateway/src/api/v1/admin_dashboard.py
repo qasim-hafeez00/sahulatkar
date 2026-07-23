@@ -63,20 +63,22 @@ async def get_dashboard_summary(
         
         # Portable threshold calculation
         threshold_30d = datetime.now(timezone.utc) - timedelta(days=30)
-        
-        approved_risk_result = await db.execute(
-            text("SELECT COUNT(*) FROM risk_assessments WHERE decision = 'approved' AND created_at > :threshold"),
-            {"threshold": threshold_30d}
+
+        # BUG FIX: approval decisions live on credit_applications.status, not a
+        # nonexistent risk_assessments.decision column — the old query threw
+        # UndefinedColumnError on every request, and because it ran inside the
+        # same try block as every other KPI, the exception silently zeroed out
+        # GMV/active-users/orders too. Use _fetch_scalar (own try/except per
+        # query) so one broken metric can't blank out the rest of the page.
+        approved_apps = await _fetch_scalar(
+            db,
+            f"SELECT COUNT(*) FROM credit_applications WHERE status = 'approved' AND created_at > '{threshold_30d.isoformat()}'",
         )
-        approved_risk = int(approved_risk_result.scalar_one_or_none() or 0)
-        
-        total_risk_result = await db.execute(
-            text("SELECT COUNT(*) FROM risk_assessments WHERE created_at > :threshold"),
-            {"threshold": threshold_30d}
+        decided_apps = await _fetch_scalar(
+            db,
+            f"SELECT COUNT(*) FROM credit_applications WHERE status IN ('approved','rejected') AND created_at > '{threshold_30d.isoformat()}'",
         )
-        total_risk = int(total_risk_result.scalar_one_or_none() or 0)
-        
-        approval_rate = round((approved_risk / total_risk * 100), 2) if total_risk > 0 else 0.0
+        approval_rate = round((approved_apps / decided_apps * 100), 2) if decided_apps > 0 else 0.0
         
         default_rate = round((overdue_installments / total_finished * 100), 2) if total_finished > 0 else 0.0
 
@@ -118,3 +120,116 @@ async def get_dashboard_summary(
     )
 
     return response_payload
+
+
+@router.get("/order-funnel")
+async def order_funnel(
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                "SELECT status, COUNT(*) AS cnt FROM orders WHERE deleted_at IS NULL GROUP BY status"
+            )
+        )
+    ).mappings().all()
+    return {"steps": {r["status"]: int(r["cnt"]) for r in rows}}
+
+
+@router.get("/revenue-breakdown")
+async def revenue_breakdown(
+    months: int = 6,
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    TO_CHAR(created_at, 'YYYY-MM') AS month,
+                    COALESCE(SUM(platform_profit), 0) AS platform_profit,
+                    COALESCE(SUM(product_cost), 0) AS product_cost,
+                    COALESCE(SUM(total_amount), 0) AS gmv
+                FROM orders
+                WHERE deleted_at IS NULL
+                  AND status NOT IN ('cancelled', 'refunded')
+                  AND created_at >= NOW() - make_interval(months => :months)
+                GROUP BY month
+                ORDER BY month ASC
+                """
+            ),
+            {"months": months},
+        )
+    ).mappings().all()
+    return {
+        "series": [
+            {
+                "month": r["month"],
+                "platform_profit": float(r["platform_profit"] or 0),
+                "product_cost": float(r["product_cost"] or 0),
+                "gmv": float(r["gmv"] or 0),
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.get("/payment-status-distribution")
+async def payment_status_distribution(
+    days: int = 30,
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT status, COUNT(*) AS cnt, COALESCE(SUM(amount), 0) AS total_amount
+                FROM payment_transactions
+                WHERE created_at >= NOW() - make_interval(days => :days)
+                GROUP BY status
+                """
+            ),
+            {"days": days},
+        )
+    ).mappings().all()
+    return {
+        "statuses": {
+            r["status"]: {"count": int(r["cnt"]), "total_amount": float(r["total_amount"] or 0)} for r in rows
+        }
+    }
+
+
+@router.get("/acquisition-by-channel")
+async def acquisition_by_channel(
+    current_admin: AdminUser = Depends(RequirePermission("read_reports")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(
+            text(
+                """
+                SELECT
+                    COALESCE(a.first_touch_source, 'direct') AS channel,
+                    COUNT(DISTINCT a.user_id) AS acquired_users,
+                    COUNT(DISTINCT o.id) FILTER (WHERE o.id IS NOT NULL) AS orders_generated
+                FROM user_acquisition_attribution a
+                LEFT JOIN orders o ON o.user_id = a.user_id AND o.deleted_at IS NULL
+                GROUP BY channel
+                ORDER BY acquired_users DESC
+                """
+            )
+        )
+    ).mappings().all()
+    return {
+        "channels": [
+            {
+                "channel": r["channel"],
+                "acquired_users": int(r["acquired_users"]),
+                "orders_generated": int(r["orders_generated"]),
+            }
+            for r in rows
+        ]
+    }

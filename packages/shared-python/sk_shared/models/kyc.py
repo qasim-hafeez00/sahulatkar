@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Optional
 import enum
 
-from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, String, JSON
+from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin, UUIDMixin
@@ -24,7 +24,10 @@ class CustomerProfile(Base, UUIDMixin, TimestampMixin):
     
     first_name: Mapped[str] = mapped_column(String(100), nullable=False)
     last_name: Mapped[str] = mapped_column(String(100), nullable=False)
-    cnic: Mapped[str] = mapped_column(String(15), unique=True, nullable=False)
+    # KMS-encrypted at rest (see KycService.upsert_profile) — not unique-checkable
+    # since encryption isn't deterministic; a separate CNIC-hash column would be
+    # needed to enforce "one profile per real CNIC" without decrypting every row.
+    cnic: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     dob: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     address: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
 
@@ -37,7 +40,14 @@ class UserKycVerification(Base, UUIDMixin, TimestampMixin):
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("users.id", ondelete="CASCADE"), nullable=False)
     
-    status: Mapped[KycStatus] = mapped_column(Enum(KycStatus), default=KycStatus.PENDING, nullable=False)
+    # values_callable: the Postgres `kycstatus` enum type stores lowercase values
+    # (KycStatus.PENDING.value == "pending"); SQLAlchemy's default Enum binding
+    # sends the member NAME ("PENDING") instead, which the DB type rejects.
+    status: Mapped[KycStatus] = mapped_column(
+        Enum(KycStatus, name="kycstatus", values_callable=lambda enum_cls: [e.value for e in enum_cls]),
+        default=KycStatus.PENDING,
+        nullable=False,
+    )
     attempt_number: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
     cnic_front_image_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     cnic_back_image_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
@@ -48,7 +58,7 @@ class UserKycVerification(Base, UUIDMixin, TimestampMixin):
     
     rejection_reason: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     rejection_code: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
-    nadra_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    nadra_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     user: Mapped["User"] = relationship("User")
     

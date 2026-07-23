@@ -3,3 +3,14 @@ kind: Kustomization
 
 resources:
   - migration-job.yaml
+  - serviceaccounts.yaml
+  - network-policies
+  - gateway
+  - product-service
+  - credit-engine
+  - payment-orchestrator
+  - ledger-service
+  - notification-service
+  - web-admin
+  - web-customer
+  - pgbouncer

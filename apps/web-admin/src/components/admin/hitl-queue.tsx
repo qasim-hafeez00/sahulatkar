@@ -4,6 +4,7 @@ import { AlertCircle, CheckCircle, Clock } from 'lucide-react';
 import Link from 'next/link';
 import React, { useCallback, useEffect, useState } from 'react';
 import { DataTable, SortDirection } from '@/components/admin/data-table';
+import { ErrorBanner, toErrorMessage } from '@/components/ui/error-banner';
 import { adminApi } from '@/lib/api-client';
 
 interface HITLCase {
@@ -22,6 +23,12 @@ interface HITLCase {
 
 interface HITLResponse {
   items: HITLCase[];
+}
+
+interface HITLStats {
+  pending: number;
+  in_progress: number;
+  resolved_today: number;
 }
 
 const priorityStyles: Record<string, string> = {
@@ -47,6 +54,23 @@ export function HITLQueue() {
   const [loading, setLoading] = useState(false);
   const [sortKey, setSortKey] = useState<string | undefined>(undefined);
   const [sortDirection, setSortDirection] = useState<SortDirection>(null);
+  const [stats, setStats] = useState<HITLStats | null>(null);
+  const [statsError, setStatsError] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  const fetchStats = useCallback(async () => {
+    try {
+      const s = await adminApi.get<HITLStats>('/admin/hitl/stats');
+      setStats(s);
+      setStatsError(null);
+    } catch (error) {
+      setStatsError(toErrorMessage(error, 'Failed to load HITL stats.'));
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchStats();
+  }, [fetchStats]);
 
   const fetchCases = useCallback(async () => {
     setLoading(true);
@@ -63,8 +87,10 @@ export function HITLQueue() {
 
       setCases(response.items);
       setTotal(response.items.length);
+      setError(null);
     } catch (error) {
       console.error('Failed to fetch HITL cases:', error);
+      setError(toErrorMessage(error, 'Failed to load HITL cases.'));
     } finally {
       setLoading(false);
     }
@@ -155,27 +181,29 @@ export function HITLQueue() {
         </div>
       </div>
 
+      {statsError && <ErrorBanner message={statsError} onRetry={fetchStats} />}
+
       <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
         <div className="glass-panel rounded-xl p-4">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <AlertCircle className="h-4 w-4 text-amber-500" />
             Pending Resolution
           </div>
-          <p className="mt-2 text-2xl font-bold text-white">{total}</p>
+          <p className="mt-2 text-2xl font-bold text-white">{stats ? stats.pending : total}</p>
         </div>
         <div className="glass-panel rounded-xl p-4">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <Clock className="h-4 w-4 text-blue-500" />
             In Progress
           </div>
-          <p className="mt-2 text-2xl font-bold text-white">—</p>
+          <p className="mt-2 text-2xl font-bold text-white">{stats ? stats.in_progress : '—'}</p>
         </div>
         <div className="glass-panel rounded-xl p-4">
           <div className="flex items-center gap-2 text-sm text-slate-400">
             <CheckCircle className="h-4 w-4 text-emerald-500" />
             Resolved Today
           </div>
-          <p className="mt-2 text-2xl font-bold text-white">—</p>
+          <p className="mt-2 text-2xl font-bold text-white">{stats ? stats.resolved_today : '—'}</p>
         </div>
       </div>
 
@@ -187,6 +215,8 @@ export function HITLQueue() {
         sortKey={sortKey}
         sortDirection={sortDirection}
         loading={loading}
+        error={error}
+        onRetry={fetchCases}
       />
 
       <div className="flex items-center justify-between rounded-xl bg-slate-950/50 p-4">

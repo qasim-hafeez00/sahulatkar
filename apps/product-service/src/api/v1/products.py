@@ -83,12 +83,13 @@ async def extract_product(
 
 @router.get("/jobs/{job_id}", response_model=JobStatusResponse)
 async def get_job_status(
-    job_id: UUID, 
+    job_id: UUID,
     db: AsyncSession = Depends(get_db),
-    redis: RedisClient = Depends(get_redis)
+    redis: RedisClient = Depends(get_redis),
+    current_user_id: int = Depends(require_user_id),
 ):
     service = ProductExtractionService(db, redis)
-    return await service.get_job_status(job_id)
+    return await service.get_job_status(job_id, current_user_id)
 
 
 @router.get("", response_model=SearchResponse)

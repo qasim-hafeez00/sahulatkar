@@ -1,0 +1,55 @@
+# notification-service: consumes billing/overdue events via Redis pub/sub
+# from payment-orchestrator/ledger-service (no direct pod-to-pod HTTP caller
+# for that path), and gateway is wired (src/core/http_client.py's
+# notification_admin_headers) to call its admin_notifications/admin_tracking
+# routes with a signed X-Admin-Assertion header, over cluster DNS per
+# overlays/*/ingress.yaml's comment confirming gateway is the sole public
+# front door and this service is intentionally ClusterIP-only. It owns
+# apps/notification-service/src/api/v1/webhooks.py (SendGrid/AfterShip/
+# Jazz SMS+WhatsApp inbound webhooks) and dispatches outbound via SendGrid,
+# Twilio, Jazz SMS/WhatsApp, FCM, but per the Ingress design those webhook
+# routes are not currently reachable from outside the cluster — no ingress
+# rule targets this Service. No external ingress allowance here; add one
+# (scoped to the ingress-controller's namespace) if a route for this
+# service's webhooks is ever added to ingress.yaml.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-notification-service
+spec:
+  podSelector:
+    matchLabels:
+      app: notification-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432
+    # ASSUMPTION: Redis is external (see 10-gateway.yaml note).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6379
+    # SendGrid / Twilio / Jazz SMS+WhatsApp / FCM / AfterShip APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

@@ -141,13 +141,24 @@ async def require_internal_token(request: Request) -> None:
         )
 
 # ── Rate Limiting ─────────────────────────────────────────────────────────────
+#
+# Migrated onto sk_shared.rate_limit.SlidingWindowRateLimiter (Phase 2 —
+# adopting the shared-kernel rate limiter, replacing this service's bespoke
+# fixed-window counter in src/core/rate_limit.py, now deleted). The sliding-
+# window-log algorithm is strictly more correct than the old fixed-window
+# counter (no boundary where 2x the limit can slip through). Key format
+# ("ip:{host}") is preserved so existing callers of rate_limit(limit, window)
+# don't need to change.
 
 def rate_limit(limit: int, window: int):
-    async def _dep(request: Request, redis: RedisClient = Depends(get_redis)):
-        from src.core.rate_limit import RateLimiter
-        host = request.client.host if request.client else "unknown"
-        key = f"ip:{host}"
-        limiter = RateLimiter(redis)
-        if not await limiter.allow(key=key, limit=limit, window_seconds=window):
-            raise HTTPException(status_code=429, detail="RATE_LIMIT_EXCEEDED")
-    return _dep
+    from sk_shared.rate_limit import rate_limit_dependency
+
+    return rate_limit_dependency(
+        limit=limit,
+        window_seconds=window,
+        key_prefix="sk:ratelimit",
+        identity_fn=lambda request: f"ip:{request.client.host if request.client else 'unknown'}",
+        get_redis=get_redis,
+        fail_open=False,
+        detail="RATE_LIMIT_EXCEEDED",
+    )

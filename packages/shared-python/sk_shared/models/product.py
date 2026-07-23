@@ -26,6 +26,13 @@ class Merchant(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     scrape_config: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
 
+    # Commercial partnership fields (Module 10 — Admin Merchants)
+    partner_type: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    commission_rate_pct: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 2), nullable=True)
+    payment_terms_days: Mapped[Optional[int]] = mapped_column(SmallInteger, nullable=True)
+    min_volume_commitment_pkr: Mapped[Optional[Decimal]] = mapped_column(Numeric(14, 2), nullable=True)
+    onboarding_status: Mapped[str] = mapped_column(String(20), nullable=False, default="not_started")
+
     products: Mapped[list["Product"]] = relationship("Product", back_populates="merchant")
 
 

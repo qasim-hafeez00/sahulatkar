@@ -8,7 +8,7 @@ from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 from starlette.responses import Response
 
 from src.api.routes import api_router
-from src.config import settings
+from src.config import settings, validate_critical_settings
 from src.events.listener import run_ledger_event_listener
 from src.core.logging import configure_logging
 from src.core.middleware import RequestIDMiddleware
@@ -40,6 +40,14 @@ async def _watch_listener(app: FastAPI) -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    # Refuse to boot outside `local` with the internal_api_token still at its
+    # insecure "change-me" placeholder default.
+    try:
+        validate_critical_settings()
+    except RuntimeError as exc:
+        logger.critical("STARTUP_ABORTED: %s", exc)
+        raise
+
     app.state.redis = get_redis_client(settings.redis_url, db=settings.redis_db)
     app.state.ledger_event_task = _start_listener_task(app)
     app.state.ledger_event_watchdog_task = asyncio.create_task(_watch_listener(app))

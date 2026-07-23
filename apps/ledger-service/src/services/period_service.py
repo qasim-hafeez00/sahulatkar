@@ -63,22 +63,21 @@ class PeriodService:
         period = await self.get_or_create_period(period_key)
         if period.status == PeriodStatus.CLOSED:
             raise ValueError(f"Period {period_key} is already closed")
-            
-        period.status = PeriodStatus.CLOSED
-        period.closed_at = datetime.now(timezone.utc)
-        period.closed_by = closed_by
-        
-        # P2-08: If this is the last period of the year, zero out temporary accounts
+
+        # P2-08: If this is the last period of the year, zero out temporary accounts.
+        # This MUST run while the period is still OPEN — record_manual_entry posts
+        # the closing entry dated period.end_date, and ensure_period_open() would
+        # reject that as a backdated entry into a closed period otherwise.
         if period_key.endswith("-12"):
             from src.services.accounting_service import AccountingService
             from src.accounting.accounts import ACCOUNT_CODES
-            from sk_shared.models.ledger import PostingLine
+            from src.domain.posting_engine import PostingLine
             from decimal import Decimal
 
             accounting = AccountingService(self.db)
             # Fetch P&L report for the full year to know how much to close out
             pl = await accounting.build_profit_loss_report(period_key)
-            
+
             # For a proper close, we should ideally fetch balances of all individual revenue/expense accounts
             # and zero them out line by line. Here we aggregate to Retained Earnings based on Net Income.
             # Revenue accounts have credit balances (debit to close)
@@ -86,32 +85,32 @@ class PeriodService:
             net_income = Decimal(str(pl["net_income"]))
             revenue = Decimal(str(pl["revenue"]))
             expenses = Decimal(str(pl["costs"]))
-            
+
             if revenue > 0 or expenses > 0:
                 lines = []
-                # To balance the entry perfectly without individual account breakdown, 
-                # we just do a summary entry if net_income is non-zero. 
+                # To balance the entry perfectly without individual account breakdown,
+                # we just do a summary entry if net_income is non-zero.
                 # Actually, a real closing entry requires closing EACH temp account.
                 revenue_accounts = {ACCOUNT_CODES["murabaha_profit"], ACCOUNT_CODES["affiliate_commission"], ACCOUNT_CODES["late_fee_collections"]}
                 expense_accounts = {ACCOUNT_CODES["cogs_merchant_payment"], ACCOUNT_CODES["gateway_fees"], ACCOUNT_CODES["vcn_issuance"], ACCOUNT_CODES["loan_loss_provision"]}
-                
+
                 for acct in revenue_accounts:
-                    bal = await accounting.get_account_balance(acct, target_date=period.end_date)
+                    bal = await accounting.get_account_balance(acct, as_of=period.end_date.isoformat())
                     b = Decimal(str(bal["balance"]))
                     if b > 0:
                         lines.append(PostingLine(acct, debit_amount=b))
-                
+
                 for acct in expense_accounts:
-                    bal = await accounting.get_account_balance(acct, target_date=period.end_date)
+                    bal = await accounting.get_account_balance(acct, as_of=period.end_date.isoformat())
                     b = Decimal(str(bal["balance"]))
                     if b > 0:
                         lines.append(PostingLine(acct, credit_amount=b))
-                        
+
                 # The balancing figure goes to retained earnings
                 total_dr = sum(l.debit_amount for l in lines)
                 total_cr = sum(l.credit_amount for l in lines)
                 retained = total_dr - total_cr
-                
+
                 if retained > 0:
                     lines.append(PostingLine(ACCOUNT_CODES["retained_earnings"], credit_amount=retained))
                 elif retained < 0:
@@ -119,13 +118,22 @@ class PeriodService:
 
                 if lines:
                     await accounting.record_manual_entry(
-                        entry_type="closing_entry",
-                        source_type="period_close",
-                        source_id=period.fiscal_year,
-                        lines=lines,
+                        lines=[
+                            {
+                                "account_code": line.account_code,
+                                "debit_amount": line.debit_amount,
+                                "credit_amount": line.credit_amount,
+                            }
+                            for line in lines
+                        ],
                         description=f"Annual closing entry for fiscal year {period.fiscal_year}",
-                        target_date=period.end_date,
+                        entry_date=period.end_date,
+                        reference=f"period-close-{period_key}",
                     )
+
+        period.status = PeriodStatus.CLOSED
+        period.closed_at = datetime.now(timezone.utc)
+        period.closed_by = closed_by
 
         await self.db.flush()
         return period

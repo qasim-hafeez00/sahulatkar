@@ -1,9 +1,17 @@
-"""Redis-backed sliding window rate limiter for product-service endpoints.
+"""Rate limiting for product-service endpoints, built on the shared-kernel limiter.
 
 GAP-C Resolution: enforce per-user / per-IP extract rate limit independently
-of the global gateway limit.  On Redis failure the limiter degrades
-gracefully — it logs a warning and allows the request through so that a
-dead Redis shard never blocks the entire extract pipeline.
+of the global gateway limit. On Redis failure the limiter degrades
+gracefully -- it logs a warning and allows the request through so that a
+dead Redis shard never blocks the entire extract pipeline (``fail_open=True``
+below).
+
+This module used to hand-roll a fixed-window (INCR + EXPIRE) counter. It now
+delegates the actual limiting to ``sk_shared.rate_limit.SlidingWindowRateLimiter``
+(a superset Redis ZSET-backed sliding-window-log algorithm shared across the
+fleet), keeping only the product-service-specific bits: resolving the
+per-user/per-IP identity and attaching a ``Retry-After`` header to the 429
+response, which the shared ``enforce()`` helper does not do on its own.
 """
 from __future__ import annotations
 
@@ -11,9 +19,15 @@ import logging
 
 from fastapi import HTTPException, status
 
+from sk_shared.rate_limit import SlidingWindowRateLimiter
 from sk_shared.redis_client import RedisClient
 
 logger = logging.getLogger(__name__)
+
+# Matches the key prefix this limiter has always used
+# (``sk:ratelimit:extract:{identifier}``), so in-flight windows survive the
+# migration to the shared implementation.
+EXTRACT_RATE_LIMIT_KEY_PREFIX = "sk:ratelimit:extract"
 
 
 async def enforce_extract_rate_limit(
@@ -39,21 +53,26 @@ async def enforce_extract_rate_limit(
         HTTPException: 429 with ``Retry-After`` header when limit is exceeded.
     """
     identifier = str(user_id) if user_id is not None else ip
-    key = f"sk:ratelimit:extract:{identifier}"
-    try:
-        count = await redis.redis.incr(key)
-        if count == 1:
-            # First call in this window — set expiry
-            await redis.redis.expire(key, window_seconds)
-        if count > limit:
-            retry_after = await redis.redis.ttl(key)
-            raise HTTPException(
-                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
-                detail="EXTRACT_RATE_LIMIT_EXCEEDED",
-                headers={"Retry-After": str(max(retry_after, 1))},
-            )
-    except HTTPException:
-        raise
-    except Exception as exc:
-        # Never block on rate-limiter failure — degrade gracefully
-        logger.warning("Rate-limit check failed, allowing through: %s", exc)
+    limiter = SlidingWindowRateLimiter(
+        redis,
+        key_prefix=EXTRACT_RATE_LIMIT_KEY_PREFIX,
+        fail_open=True,
+    )
+
+    allowed = await limiter.allow(identifier, limit, window_seconds)
+    if not allowed:
+        retry_after = window_seconds
+        try:
+            conn = redis.redis if hasattr(redis, "redis") else redis
+            ttl = await conn.ttl(f"{EXTRACT_RATE_LIMIT_KEY_PREFIX}:{identifier}")
+            if ttl and ttl > 0:
+                retry_after = ttl
+        except Exception:
+            # Retry-After is best-effort; fall back to the configured window.
+            pass
+
+        raise HTTPException(
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+            detail="EXTRACT_RATE_LIMIT_EXCEEDED",
+            headers={"Retry-After": str(max(retry_after, 1))},
+        )

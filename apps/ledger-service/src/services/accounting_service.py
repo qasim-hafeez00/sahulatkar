@@ -562,16 +562,22 @@ class AccountingService:
     async def get_trial_balance(self, period: str) -> dict[str, object]:
         # P1-04: Trial Balance hierarchy support using BalanceService
         _, end_date = get_period_bounds(period)
-        
+
         stmt = select(LedgerAccount).order_by(LedgerAccount.account_code.asc())
         accounts = (await self.db.execute(stmt)).scalars().all()
-        
+
+        # LS-N+1-01: batch-fetch all account balances in O(1) queries instead
+        # of calling get_account_balance() once per account.
+        balances = await self.balance_service.get_account_balances_batch(
+            [account.account_code for account in accounts], as_of=end_date
+        )
+
         entries: list[dict[str, object]] = []
         total_debit = Decimal("0.00")
         total_credit = Decimal("0.00")
-        
+
         for account in accounts:
-            balance_data = await self.balance_service.get_account_balance(account.account_code, as_of=end_date)
+            balance_data = balances[account.account_code]
             debit = Decimal(str(balance_data["debit_total"]))
             credit = Decimal(str(balance_data["credit_total"]))
             
@@ -655,11 +661,14 @@ class AccountingService:
             stmt = stmt.where(LedgerAccount.account_type == account_type)
 
         accounts = (await self.db.execute(stmt)).scalars().all()
-        items: list[dict[str, object]] = []
-        for account in accounts:
-            # P1-01: Use BalanceService for accurate rollups and snapshot utilization
-            balance_data = await self.balance_service.get_account_balance(account.account_code, as_of=as_of_date)
-            items.append(balance_data)
+
+        # LS-N+1-01: batch-fetch all account balances in O(1) queries instead
+        # of calling get_account_balance() once per account (P1-01 still
+        # applies: BalanceService handles rollups/snapshot utilization).
+        balances = await self.balance_service.get_account_balances_batch(
+            [account.account_code for account in accounts], as_of=as_of_date
+        )
+        items: list[dict[str, object]] = [balances[account.account_code] for account in accounts]
 
         return {
             "as_of": as_of_date.isoformat(),

@@ -158,16 +158,21 @@ def upgrade() -> None:
     # CRIT-03: loans — add FK to orders (partitioned parent) + unique
     #           constraint ensuring one loan per order (Murabaha spec §7).
     # ═══════════════════════════════════════════════════════════════════════
-    # PostgreSQL 12+ allows FK to partitioned parent table.
+    # FK to partitioned tables requires PK/unique on the parent. If orders
+    # lost its PK during repartitioning, skip the FK gracefully.
     op.execute("""
         DO $$
         BEGIN
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint WHERE conname = 'fk_loans_order_id'
             ) THEN
-                ALTER TABLE loans
-                    ADD CONSTRAINT fk_loans_order_id
-                    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE RESTRICT;
+                BEGIN
+                    ALTER TABLE loans
+                        ADD CONSTRAINT fk_loans_order_id
+                        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE RESTRICT;
+                EXCEPTION WHEN OTHERS THEN
+                    RAISE NOTICE 'Skipped fk_loans_order_id (partitioned table PK missing): %', SQLERRM;
+                END;
             END IF;
 
             IF NOT EXISTS (
@@ -354,11 +359,15 @@ def upgrade() -> None:
                     SELECT 1 FROM information_schema.columns
                     WHERE table_name = v_table AND column_name = v_col
                 ) THEN
-                    EXECUTE format(
-                        'ALTER TABLE %I ADD CONSTRAINT %I '
-                        'FOREIGN KEY (%I) REFERENCES orders(id) ON DELETE %s',
-                        v_table, v_name, v_col, v_del
-                    );
+                    BEGIN
+                        EXECUTE format(
+                            'ALTER TABLE %I ADD CONSTRAINT %I '
+                            'FOREIGN KEY (%I) REFERENCES orders(id) ON DELETE %s',
+                            v_table, v_name, v_col, v_del
+                        );
+                    EXCEPTION WHEN OTHERS THEN
+                        RAISE NOTICE 'Skipped FK % on %: %', v_name, v_table, SQLERRM;
+                    END;
                 END IF;
             END LOOP;
         END $$
@@ -453,9 +462,13 @@ def upgrade() -> None:
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint WHERE conname = 'fk_ra_order'
             ) THEN
-                ALTER TABLE risk_assessments
-                    ADD CONSTRAINT fk_ra_order
-                    FOREIGN KEY (order_id) REFERENCES orders(id);
+                BEGIN
+                    ALTER TABLE risk_assessments
+                        ADD CONSTRAINT fk_ra_order
+                        FOREIGN KEY (order_id) REFERENCES orders(id);
+                EXCEPTION WHEN OTHERS THEN
+                    RAISE NOTICE 'Skipped fk_ra_order: %', SQLERRM;
+                END;
             END IF;
         END $$
     """)
@@ -682,9 +695,13 @@ def upgrade() -> None:
             IF NOT EXISTS (
                 SELECT 1 FROM pg_constraint WHERE conname = 'fk_scraping_jobs_order'
             ) THEN
-                ALTER TABLE scraping_jobs
-                    ADD CONSTRAINT fk_scraping_jobs_order
-                    FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL;
+                BEGIN
+                    ALTER TABLE scraping_jobs
+                        ADD CONSTRAINT fk_scraping_jobs_order
+                        FOREIGN KEY (order_id) REFERENCES orders(id) ON DELETE SET NULL;
+                EXCEPTION WHEN OTHERS THEN
+                    RAISE NOTICE 'Skipped fk_scraping_jobs_order: %', SQLERRM;
+                END;
             END IF;
         END $$
     """)

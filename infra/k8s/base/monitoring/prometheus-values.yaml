@@ -1,0 +1,199 @@
+# Helm values for the `kube-prometheus-stack` chart (Prometheus + Grafana +
+# Alertmanager + node-exporter + kube-state-metrics), installed into the
+# `monitoring` namespace of EACH cluster (staging and production are
+# separate EKS clusters per infra/terraform/environments/*, so this chart
+# is installed once per cluster — see README.md in this directory for the
+# exact commands).
+#
+# Grounding for the choices below (verified against the actual service
+# code, not assumed — see the audit notes in README.md):
+#   - gateway, product-service, payment-orchestrator, ledger-service and
+#     notification-service all already carry
+#       prometheus.io/scrape: "true"
+#       prometheus.io/port: "8000"
+#       prometheus.io/path: "/metrics"   (gateway is "/api/v1/metrics" —
+#                                          fixed a mismatched annotation in
+#                                          infra/k8s/base/gateway/deployment.yaml
+#                                          as part of this change)
+#     pod annotations in infra/k8s/base/*/deployment.yaml. Nothing needs to
+#     change in application code — this chart just needs to be told to
+#     honor those annotations, which kube-prometheus-stack does NOT do by
+#     default (it expects ServiceMonitor/PodMonitor CRDs). We use
+#     `additionalScrapeConfigs` below to reproduce the classic
+#     annotation-based discovery job instead of hand-writing 5+ near-
+#     identical ServiceMonitor objects.
+#   - web-admin, web-customer and pgbouncer carry NO prometheus.io
+#     annotations (verified) — they don't emit app-level Prometheus
+#     metrics, so they are correctly excluded by this job, not omitted by
+#     oversight.
+#   - credit-engine's deployment.yaml *does* carry the same annotations,
+#     but its source tree has no prometheus_client/instrumentator usage at
+#     all (verified — grep came back empty), so the /metrics endpoint
+#     doesn't exist yet. This job will pick it up passively like any other
+#     annotated pod (per the task's instructions, that's fine — it's
+#     generic infra hygiene, not credit-engine-specific work) and it will
+#     simply show up as a failing/absent scrape target until credit-engine
+#     adds its own instrumentation. Not fixed here — credit-engine is out
+#     of scope for this track.
+
+fullnameOverride: kube-prometheus-stack
+
+# EKS is a managed control plane — etcd, kube-scheduler and
+# kube-controller-manager are not reachable from inside the cluster, and
+# kube-proxy metrics aren't exposed either. Leaving these chart defaults on
+# produces permanently-failing scrape targets and noisy "target down"
+# alerts. Disable them explicitly.
+kubeEtcd:
+  enabled: false
+kubeControllerManager:
+  enabled: false
+kubeScheduler:
+  enabled: false
+kubeProxy:
+  enabled: false
+
+kubeStateMetrics:
+  enabled: true
+nodeExporter:
+  enabled: true
+
+prometheus:
+  prometheusSpec:
+    retention: 15d
+    # Don't restrict discovery to chart-installed ServiceMonitor/PodMonitor
+    # objects only — pick up any ServiceMonitor/PodMonitor/PrometheusRule
+    # created anywhere in the cluster (e.g. by a future ingress-nginx or
+    # cert-manager install), plus the alert rules we ship below.
+    serviceMonitorSelectorNilUsesHelmValues: false
+    podMonitorSelectorNilUsesHelmValues: false
+    ruleSelectorNilUsesHelmValues: false
+    resources:
+      requests:
+        cpu: 250m
+        memory: 512Mi
+      limits:
+        cpu: 1000m
+        memory: 1Gi
+    storageSpec:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 20Gi
+    # Reproduces the classic `prometheus.io/scrape` annotation-discovery
+    # job. Verified label/annotation names against
+    # infra/k8s/base/*/deployment.yaml — every backend service's pod
+    # template sets these three annotations already; nothing app-side
+    # needs to change.
+    additionalScrapeConfigs:
+      - job_name: "sahulatkar-annotated-pods"
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          # Only keep pods that opted in via prometheus.io/scrape: "true".
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          # Respect a custom scrape path (gateway uses /api/v1/metrics;
+          # everyone else uses /metrics).
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          # Respect the annotated port (8000 for every backend service
+          # today) instead of guessing from the container spec.
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+          # Carry all pod labels through as Prometheus labels (app,
+          # component, ...).
+          - action: labelmap
+            regex: __meta_kubernetes_pod_label_(.+)
+          - source_labels: [__meta_kubernetes_namespace]
+            action: replace
+            target_label: namespace
+          - source_labels: [__meta_kubernetes_pod_name]
+            action: replace
+            target_label: pod
+          # `job` = the pod's `app` label (gateway, product-service, ...) so
+          # dashboards/alerts can select a service with job="gateway".
+          - source_labels: [__meta_kubernetes_pod_label_app]
+            action: replace
+            target_label: job
+
+alertmanager:
+  alertmanagerSpec:
+    resources:
+      requests:
+        cpu: 50m
+        memory: 128Mi
+      limits:
+        cpu: 200m
+        memory: 256Mi
+    storage:
+      volumeClaimTemplate:
+        spec:
+          accessModes: ["ReadWriteOnce"]
+          resources:
+            requests:
+              storage: 2Gi
+  config:
+    global:
+      resolve_timeout: 5m
+    route:
+      receiver: "null-receiver"
+      group_by: ["alertname", "namespace", "job"]
+      group_wait: 30s
+      group_interval: 5m
+      repeat_interval: 4h
+      routes:
+        # kube-prometheus-stack ships a permanently-firing "Watchdog" alert
+        # used to verify the Alertmanager pipeline itself is alive — route
+        # it to the null receiver explicitly so it doesn't page anyone.
+        - receiver: "null-receiver"
+          matchers:
+            - alertname = "Watchdog"
+    receivers:
+      - name: "null-receiver"
+      # No real paging destination is wired up yet (no Slack/PagerDuty
+      # webhook exists anywhere else in this repo). Before relying on this
+      # in production, replace "null-receiver" above with something like:
+      #
+      # - name: "slack-oncall"
+      #   slack_configs:
+      #     - api_url: "<SLACK_WEBHOOK_URL>"
+      #       channel: "#sk-oncall"
+      #       send_resolved: true
+      #
+      # and point `route.receiver` (and the alert-specific routes you care
+      # about) at it. Keep the Watchdog route pinned to null-receiver.
+
+grafana:
+  # Chart auto-generates an admin password into a Secret
+  # (kube-prometheus-stack-grafana) if you don't set one. Override with
+  # `--set grafana.adminPassword=...` (or a separate, un-committed values
+  # file) at install time rather than editing this file.
+  defaultDashboardsEnabled: true
+  sidecar:
+    dashboards:
+      enabled: true
+      label: grafana_dashboard
+      labelValue: "1"
+      searchNamespace: ALL
+  additionalDataSources:
+    - name: Loki
+      type: loki
+      access: proxy
+      url: http://loki.logging.svc.cluster.local:3100
+      isDefault: false
+      editable: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi

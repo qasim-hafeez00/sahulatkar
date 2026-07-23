@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
+
+from sk_shared.models.audit import AuditTrail
 
 
 logger = logging.getLogger(__name__)
@@ -25,40 +25,22 @@ class AuditService:
         ip_address: Optional[str] = None,
     ) -> None:
         """Log an administrative or lifecycle action.
+
+        Uses the shared AuditTrail ORM model (gateway_audit_events table) —
+        a prior raw-SQL version targeted a nonexistent "audit_trail" table
+        name, so every call silently failed and no audit record was ever
+        persisted (caught by the blanket except below).
         """
         try:
-            await self.db.execute(
-                text(
-                    """
-                    INSERT INTO audit_trail (
-                        module,
-                        action,
-                        target_id,
-                        admin_user_id,
-                        ip_address,
-                        changes,
-                        created_at
-                    )
-                    VALUES (
-                        :module,
-                        :action,
-                        :target_id,
-                        :admin_user_id,
-                        :ip_address,
-                        :changes,
-                        :created_at
-                    )
-                    """
-                ),
-                {
-                    "module": module,
-                    "action": action,
-                    "target_id": target_id,
-                    "admin_user_id": admin_user_id,
-                    "ip_address": ip_address,
-                    "changes": changes if changes else {},
-                    "created_at": datetime.now(timezone.utc),
-                },
+            self.db.add(
+                AuditTrail(
+                    admin_user_id=admin_user_id,
+                    module=module,
+                    action=action,
+                    target_id=target_id,
+                    changes=changes if changes else {},
+                    ip_address=ip_address,
+                )
             )
             # We don't commit here; caller should commit as part of the transaction.
         except Exception as exc:

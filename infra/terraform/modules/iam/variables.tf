@@ -50,3 +50,9 @@ variable "irsa_role_name" {
   description = "Suffix for IRSA role name"
   default     = "workload-role"
 }
+
+variable "irsa_policy_json" {
+  type        = string
+  description = "Optional inline IAM policy document (JSON) to attach to the IRSA role. Ignored if enable_irsa_role is false or this is left empty."
+  default     = ""
+}

@@ -5,6 +5,7 @@ from typing import Optional
 from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint, event, func, JSON
 from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.orm.attributes import get_history
 
 from sk_shared.models.base import Base
 
@@ -220,8 +221,17 @@ class ScheduledNotification(Base):
 @event.listens_for(ScheduledNotification, "before_insert")
 @event.listens_for(ScheduledNotification, "before_update")
 def _validate_scheduled_notification_fire_at(mapper, connection, target: ScheduledNotification) -> None:  # type: ignore[misc]
-    """Reject scheduling notifications in the past."""
+    """Reject scheduling notifications in the past.
+
+    Only enforced when fire_at itself is being set/changed — not on every
+    incidental update to the row. Otherwise the scheduled_worker (which
+    updates fired_at once fire_at has legitimately elapsed) and the admin
+    cancel endpoint (which sets cancelled_at) would both raise this on
+    every row whose fire_at has already passed, i.e. every row they touch.
+    """
     if target.fire_at is None:
+        return
+    if not get_history(target, "fire_at").added:
         return
     fire_at = target.fire_at
     if fire_at.tzinfo is None:

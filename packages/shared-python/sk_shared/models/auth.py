@@ -1,8 +1,20 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, SmallInteger, String
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, SmallInteger, String, TypeDecorator
+from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+
+class InetType(TypeDecorator):
+    """INET for PostgreSQL, VARCHAR(45) for SQLite (tests)."""
+    impl = String(45)
+    cache_ok = True
+
+    def load_dialect_impl(self, dialect):
+        if dialect.name == "postgresql":
+            return dialect.type_descriptor(INET())
+        return dialect.type_descriptor(String(45))
 
 from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
 
@@ -101,7 +113,7 @@ class UserSession(Base, TimestampMixin):
     access_token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     refresh_token_hash: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
     device_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("user_devices.id", ondelete="SET NULL"), nullable=True)
-    ip: Mapped[Optional[str]] = mapped_column(String(45), nullable=True)  # IPv4/IPv6
+    ip: Mapped[Optional[str]] = mapped_column(InetType, nullable=True)
     expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 

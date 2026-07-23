@@ -67,8 +67,13 @@ async def test_circuit_breaker_failure_count_resets_on_success(redis_mock):
 
 @pytest.mark.asyncio
 async def test_audit_service_writes_audit_trails():
+    """AuditService.log_action must persist via the AuditTrail ORM model
+    (gateway_audit_events table) — a prior raw-SQL version targeted a
+    nonexistent "audit_trail" table name, so every call silently failed."""
+    from sk_shared.models.audit import AuditTrail
+
     fake_db = MagicMock()
-    fake_db.execute = AsyncMock()
+    fake_db.add = MagicMock()
 
     service = AuditService(fake_db)
     await service.log_action(
@@ -79,8 +84,14 @@ async def test_audit_service_writes_audit_trails():
         ip_address="203.0.113.5",
     )
 
-    executed_sql = str(fake_db.execute.await_args.args[0])
-    assert "INSERT INTO audit_trails" in executed_sql
+    fake_db.add.assert_called_once()
+    added = fake_db.add.call_args.args[0]
+    assert isinstance(added, AuditTrail)
+    assert added.admin_user_id == 7
+    assert added.action == "prohibit_product"
+    assert added.target_id == 99
+    assert added.changes == {"reason": "policy"}
+    assert added.ip_address == "203.0.113.5"
 
 
 @pytest.mark.asyncio

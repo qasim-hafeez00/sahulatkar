@@ -1,0 +1,34 @@
+# Every pod needs to resolve DNS (Service names, external API hostnames) or
+# it breaks immediately under default-deny egress. Two rules for portability
+# across CNI/cluster setups:
+#   1. Explicit allow to the kube-system namespace on 53/UDP+TCP — covers the
+#      common case where CoreDNS/kube-dns runs there (kube-system is
+#      auto-labeled `kubernetes.io/metadata.name: kube-system` since k8s
+#      1.21+, no dependency on the cluster's CoreDNS pod labels).
+#   2. A fallback allow of port 53 to any destination — covers node-local-dns
+#      or a VPC/link-local resolver (e.g. 169.254.x.x on AWS) that isn't a
+#      cluster pod at all. DNS-only (port 53) egress is low-risk to leave
+#      unscoped by destination.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-egress
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53

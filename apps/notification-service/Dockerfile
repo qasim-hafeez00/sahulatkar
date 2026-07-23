@@ -36,6 +36,9 @@ COPY apps/notification-service/src/ /app/src/
 RUN useradd -m appuser && chown -R appuser:appuser /app
 USER appuser
 
+HEALTHCHECK --interval=30s --timeout=10s --start-period=15s --retries=3 \
+    CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8000/health', timeout=5)"
+
 EXPOSE 8000
 
 ENV PYTHONPATH=/app

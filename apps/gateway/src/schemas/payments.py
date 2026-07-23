@@ -21,6 +21,7 @@ class DownPaymentResponse(BaseModel):
 
 
 class InstallmentDetail(BaseModel):
+    id: int
     number: int
     due_date: date
     amount: Decimal
@@ -42,3 +43,25 @@ class VcnIssueRequest(BaseModel):
 class VcnIssueResponse(BaseModel):
     status: str
     order_id: int
+
+
+class PaymentMethodCreateRequest(BaseModel):
+    provider: str = Field(..., pattern="^(jazzcash|easypaisa|safepay|raast|card)$")
+    method_type: str = Field(..., pattern="^(wallet|card|bank)$")
+    account_identifier: str = Field(..., min_length=4, max_length=34, description="Wallet mobile number, masked card PAN, or IBAN")
+    expiry_month: Optional[str] = Field(default=None, pattern=r"^(0[1-9]|1[0-2])$")
+    expiry_year: Optional[str] = Field(default=None, pattern=r"^\d{4}$")
+
+
+class PaymentMethodResponse(BaseModel):
+    id: int
+    provider: str
+    method_type: str
+    masked_pan: Optional[str] = None
+    expiry_month: Optional[str] = None
+    expiry_year: Optional[str] = None
+    is_default: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True

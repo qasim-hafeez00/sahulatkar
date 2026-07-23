@@ -1,0 +1,54 @@
+# credit-engine: generic, non-invasive baseline only (per instruction, its
+# internal engineering/config is out of scope for this track). Mirrors the
+# other backend services' shape: gateway can call it, and it posts credit
+# assessment results back to gateway's /internal/users/{id}/credit-result
+# and /internal/credit/update-result callbacks
+# (apps/gateway/src/api/v1/internal.py).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-credit-engine
+spec:
+  podSelector:
+    matchLabels:
+      app: credit-engine
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    - to:
+        - podSelector:
+            matchLabels:
+              app: gateway
+      ports:
+        - protocol: TCP
+          port: 8000
+    - to:
+        - podSelector:
+            matchLabels:
+              app: pgbouncer
+      ports:
+        - protocol: TCP
+          port: 6432
+    # ASSUMPTION: Redis is external (see 10-gateway.yaml note).
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Generic HTTPS egress headroom for external scoring/bureau APIs.
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - protocol: TCP
+          port: 443

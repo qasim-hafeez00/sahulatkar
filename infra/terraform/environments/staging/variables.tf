@@ -58,3 +58,9 @@ variable "db_password_secret_arn" {
   description = "Secrets Manager ARN containing DB password for PgBouncer"
   default     = ""
 }
+
+variable "root_domain_name" {
+  type        = string
+  description = "Apex domain name whose Route53 hosted zone is used for ingress TLS (cert-manager DNS-01). Assumes the zone already exists / is delegated - see infra/terraform/modules/dns."
+  default     = "sahulatkar.com"
+}

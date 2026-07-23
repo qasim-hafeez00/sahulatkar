@@ -128,3 +128,41 @@ def test_stripe_adapter_verify_signature_returns_true():
     """verify_signature always returns True — actual verification done upstream."""
     adapter = StripeIssuingAdapter(secret_key="sk_test")
     assert adapter.verify_signature(b"body", "sig") is True
+
+
+def test_stripe_adapter_get_card_calls_stripe_retrieve_and_sets_api_key():
+    """
+    Regression test for a production bug: StripePoller calls
+    ``self.stripe.get_card(issuer_card_id)`` on every polling cycle, but
+    StripeIssuingAdapter had no `get_card` method at all — every call raised
+    AttributeError, silently swallowed by the poller's per-card try/except,
+    so the Stripe poller never detected any card cancellations in production.
+
+    get_card must call stripe.issuing.Card.retrieve with the given id and
+    set stripe.api_key first (matching every other adapter method).
+    """
+    adapter = StripeIssuingAdapter(secret_key="sk_test_xxx")
+    fake_card = MagicMock(status="canceled")
+
+    with patch("src.adapters.stripe_issuing.stripe") as mock_stripe:
+        mock_stripe.issuing.Card.retrieve.return_value = fake_card
+        result = adapter.get_card("ic_test_abc123")
+
+    assert result is fake_card
+    assert result.status == "canceled"
+    mock_stripe.issuing.Card.retrieve.assert_called_once_with("ic_test_abc123")
+    assert mock_stripe.api_key == "sk_test_xxx"
+
+
+def test_stripe_adapter_get_card_propagates_stripe_errors():
+    """
+    get_card must NOT swallow Stripe API errors itself — StripePoller relies
+    on catching the exception per-card so one failing card doesn't stop the
+    rest of the polling sweep.
+    """
+    adapter = StripeIssuingAdapter(secret_key="sk_test_xxx")
+
+    with patch("src.adapters.stripe_issuing.stripe") as mock_stripe:
+        mock_stripe.issuing.Card.retrieve.side_effect = Exception("Stripe API timeout")
+        with pytest.raises(Exception, match="Stripe API timeout"):
+            adapter.get_card("ic_test_fail")

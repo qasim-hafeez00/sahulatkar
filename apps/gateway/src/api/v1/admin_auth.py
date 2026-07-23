@@ -78,7 +78,7 @@ async def admin_logout(
 
 @router.post("/mfa/setup", response_model=AdminMfaSetupResponse)
 async def setup_mfa(
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(get_admin_for_password_change),
     db: AsyncSession = Depends(get_db),
 ):
     secret = pyotp.random_base32()
@@ -96,7 +96,7 @@ async def setup_mfa(
 @router.post("/mfa/verify")
 async def verify_mfa(
     payload: AdminMfaVerifyRequest,
-    current_admin: AdminUser = Depends(get_current_admin),
+    current_admin: AdminUser = Depends(get_admin_for_password_change),
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
@@ -266,23 +266,149 @@ async def admin_change_password(
 async def list_roles(
     current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
 ) -> dict:
-    all_roles = [
-        "super_admin",
-        "risk_officer",
-        "kyc_reviewer",
-        "analyst",
-        "support",
-        "operations_manager",
-        "credit_risk_analyst",
-        "fraud_analyst",
-        "cs_agent",
-        "finance_analyst",
-        "compliance_officer",
-        "marketing_manager",
-    ]
     return {
         "roles": [
             {"name": role, "permissions": RBACService.get_role_permissions(role)}
-            for role in all_roles
+            for role in RBACService.CANONICAL_ROLES
         ]
     }
+
+
+# ============================================================================
+# Module 12 — active session management, session policy
+# ============================================================================
+
+from sqlalchemy import text as _text
+
+
+@router.get("/sessions")
+async def list_admin_sessions(
+    admin_id: int | None = None,
+    active_only: bool = True,
+    current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    where_clauses = []
+    params: dict = {}
+    if admin_id is not None:
+        where_clauses.append("s.admin_user_id = :admin_id")
+        params["admin_id"] = admin_id
+    if active_only:
+        where_clauses.append("s.revoked_at IS NULL AND s.expires_at > NOW()")
+    where_sql = f"WHERE {' AND '.join(where_clauses)}" if where_clauses else ""
+
+    rows = (
+        await db.execute(
+            _text(
+                f"""
+                SELECT s.id, s.admin_user_id, a.email, s.ip, s.device_info,
+                       s.created_at, s.expires_at, s.revoked_at
+                FROM admin_sessions s
+                JOIN admin_users a ON a.id = s.admin_user_id
+                {where_sql}
+                ORDER BY s.created_at DESC
+                LIMIT 200
+                """
+            ),
+            params,
+        )
+    ).mappings().all()
+
+    return {
+        "items": [
+            {
+                "id": r["id"],
+                "admin_id": r["admin_user_id"],
+                "admin_email": r["email"],
+                "ip": str(r["ip"]) if r["ip"] else None,
+                "device_info": r["device_info"],
+                "created_at": r["created_at"].isoformat(),
+                "expires_at": r["expires_at"].isoformat(),
+                "revoked_at": r["revoked_at"].isoformat() if r["revoked_at"] else None,
+                "is_active": r["revoked_at"] is None,
+            }
+            for r in rows
+        ]
+    }
+
+
+@router.post("/sessions/{session_id}/revoke")
+async def revoke_admin_session(
+    session_id: int,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    row = (
+        await db.execute(
+            _text("SELECT admin_user_id, token_hash, revoked_at FROM admin_sessions WHERE id = :id"),
+            {"id": session_id},
+        )
+    ).mappings().one_or_none()
+    if not row:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="SESSION_NOT_FOUND")
+    if row["revoked_at"] is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="SESSION_ALREADY_REVOKED")
+
+    await db.execute(
+        _text("UPDATE admin_sessions SET revoked_at = NOW() WHERE id = :id"), {"id": session_id}
+    )
+    await redis.delete(f"sk:auth:admin_session:{row['token_hash']}")
+    if hasattr(redis, "redis"):
+        await redis.redis.srem(f"sk:auth:admin_sessions:{row['admin_user_id']}", row["token_hash"])
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_rbac",
+        action="session_revoked",
+        target_id=session_id,
+        changes={"target_admin_id": row["admin_user_id"]},
+        severity="critical",
+    )
+    await db.commit()
+    return {"session_id": session_id, "status": "revoked"}
+
+
+class SessionPolicyRequest(BaseModel):
+    role: str
+    timeout_seconds: int = Field(..., gt=0, le=86400)
+
+
+@router.put("/session-policy")
+async def update_session_policy(
+    payload: SessionPolicyRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_admins")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    if payload.role not in RBACService.CANONICAL_ROLES:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="UNKNOWN_ROLE")
+
+    from sk_shared.models.admin import SystemParameter
+
+    param_key = f"admin_session_timeout_{payload.role}_seconds"
+    row = await db.scalar(
+        select(SystemParameter).where(SystemParameter.param_key == param_key, SystemParameter.deleted_at.is_(None))
+    )
+    if row is None:
+        row = SystemParameter(param_key=param_key, param_value=str(payload.timeout_seconds))
+        db.add(row)
+    else:
+        row.param_value = str(payload.timeout_seconds)
+
+    await redis.incr("sk:admin:system:parameters:version")
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_rbac",
+        action="session_policy_updated",
+        target_id=None,
+        changes={"role": payload.role, "timeout_seconds": payload.timeout_seconds},
+    )
+    await db.commit()
+    return {"role": payload.role, "timeout_seconds": payload.timeout_seconds}

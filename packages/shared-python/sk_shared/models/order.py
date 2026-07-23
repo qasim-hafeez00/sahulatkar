@@ -18,6 +18,9 @@ class Order(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     down_payment_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
     installment_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Set once a Murabaha contract is signed. Multiple orders (a cart's line items) may
+    # share the same loan_id for unified financing — see ContractSignerService.sign_murabaha.
+    loan_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("loans.id", ondelete="SET NULL"), nullable=True)
 
     status_history: Mapped[list["OrderStatusHistory"]] = relationship(
         "OrderStatusHistory",
@@ -28,6 +31,7 @@ class Order(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_orders_user_id_created_at", "user_id", "created_at"),
         Index("ix_orders_status", "status"),
+        Index("ix_orders_loan_id", "loan_id"),
     )
 
 

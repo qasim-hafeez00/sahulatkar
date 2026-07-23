@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+from typing import Literal, Optional
+
 from fastapi import APIRouter, Depends, Query
 from fastapi import HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sk_shared.models.admin import AdminApprovalRequest
 from sk_shared.models.auth import AdminUser
 from sk_shared.models.credit import CreditLimitHistory, RiskAssessment
 from sk_shared.models.payment import Installment, Loan
+from sk_shared.security import get_password_hash
 from src.core.logging import logger
 
 from src.core.dependencies import get_current_admin, get_current_admin_token_payload, get_db, get_redis, RequirePermission
@@ -18,6 +22,9 @@ from sk_shared.constants import QueueName
 import json
 
 router = APIRouter(prefix="/admin/users", tags=["Admin Users"])
+
+CREDIT_LIMIT_APPROVAL_THRESHOLD_PKR = 100_000
+CLOSURE_COOLING_OFF_DAYS = 30
 
 
 class UpdateUserStatusRequest(BaseModel):
@@ -68,8 +75,10 @@ async def list_admin_users(
 
     query = text(
         """
-        SELECT id, phone, status, created_at, failed_login_attempts, locked_until
-        FROM users
+        SELECT u.id, u.phone, u.status, u.created_at, u.failed_login_attempts, u.locked_until,
+               u.credit_limit, u.available_credit, u.risk_band,
+               (SELECT COUNT(*) FROM orders o WHERE o.user_id = u.id) AS total_orders
+        FROM users u
         WHERE {where_clause}
         ORDER BY {sort_column} {sort_order}
         LIMIT :limit OFFSET :offset
@@ -77,7 +86,7 @@ async def list_admin_users(
     )
 
     count_query = text(
-        "SELECT COUNT(*) FROM users WHERE {where_clause}".format(where_clause=" AND ".join(where_clauses))
+        "SELECT COUNT(*) FROM users u WHERE {where_clause}".format(where_clause=" AND ".join(where_clauses))
     )
 
     try:
@@ -100,6 +109,10 @@ async def list_admin_users(
                 "created_at": row["created_at"],
                 "failed_login_attempts": row["failed_login_attempts"],
                 "locked_until": row["locked_until"],
+                "credit_limit": float(row["credit_limit"] or 0),
+                "available_credit": float(row["available_credit"] or 0),
+                "risk_band": row["risk_band"],
+                "total_orders": int(row["total_orders"] or 0),
             }
             for row in rows
         ],
@@ -108,6 +121,58 @@ async def list_admin_users(
             "limit": limit,
             "total": total,
         },
+    }
+
+
+@router.get("/closure-requests")
+async def list_closure_requests(
+    status_filter: Optional[str] = None,
+    page: int = 1,
+    limit: int = 50,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    offset = (page - 1) * limit
+    where_sql = "WHERE d.status = :status_filter" if status_filter else ""
+    params: dict = {"limit": limit, "offset": offset}
+    if status_filter:
+        params["status_filter"] = status_filter
+
+    rows = (
+        await db.execute(
+            text(
+                f"""
+                SELECT d.id, d.user_id, d.request_type, d.status, d.verification_method,
+                       d.verified_at, d.executed_at, d.created_at,
+                       u.first_name, u.last_name, u.phone
+                FROM data_deletion_requests d
+                LEFT JOIN users u ON u.id = d.user_id
+                {where_sql}
+                ORDER BY d.created_at DESC
+                LIMIT :limit OFFSET :offset
+                """
+            ),
+            params,
+        )
+    ).mappings().all()
+
+    return {
+        "items": [
+            {
+                "id": r["id"],
+                "user_id": r["user_id"],
+                "user_name": " ".join(filter(None, [r["first_name"], r["last_name"]])) or None,
+                "user_phone": r["phone"],
+                "request_type": r["request_type"],
+                "status": r["status"],
+                "verification_method": r["verification_method"],
+                "verified_at": r["verified_at"].isoformat() if r["verified_at"] else None,
+                "executed_at": r["executed_at"].isoformat() if r["executed_at"] else None,
+                "created_at": r["created_at"].isoformat() if r["created_at"] else None,
+            }
+            for r in rows
+        ],
+        "pagination": {"page": page, "limit": limit},
     }
 
 
@@ -367,6 +432,7 @@ async def update_user_status(
         action="update_status",
         target_id=user_id,
         changes={"status": payload.status},
+        severity="critical" if payload.status in ("suspended", "blocked") else "info",
     )
 
     # SEC-05: Immediately revoke all active sessions when suspending or blocking
@@ -412,6 +478,36 @@ async def update_user_credit_limit(
         user_obj = await db.scalar(select(UserModel).where(UserModel.id == user_id, UserModel.deleted_at.is_(None)))
         if user_obj is None:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+        if payload.new_limit > CREDIT_LIMIT_APPROVAL_THRESHOLD_PKR:
+            approval = AdminApprovalRequest(
+                request_type="credit_limit_increase",
+                entity_type="user",
+                entity_id=user_id,
+                requested_by=current_admin.id,
+                payload={"new_limit": payload.new_limit, "previous_limit": float(user_obj.credit_limit)},
+                reason=payload.reason,
+            )
+            db.add(approval)
+            await db.flush()
+            await record_audit_event(
+                db=db,
+                request=request,
+                admin_user_id=current_admin.id,
+                module="admin_users",
+                action="credit_limit_approval_requested",
+                target_id=user_id,
+                changes={"new_limit": payload.new_limit, "reason": payload.reason, "approval_request_id": approval.id},
+                severity="critical",
+            )
+            await db.commit()
+            return {
+                "user_id": user_id,
+                "approval_required": True,
+                "approval_request_id": approval.id,
+                "status": "pending_approval",
+            }
+
         user_obj.credit_limit = payload.new_limit
         user_obj.available_credit = payload.new_limit
         row = {"id": user_obj.id}
@@ -430,7 +526,7 @@ async def update_user_credit_limit(
         changes={"new_limit": payload.new_limit, "reason": payload.reason},
     )
     await db.commit()
-    return {"user_id": row["id"], "new_limit": payload.new_limit}
+    return {"user_id": row["id"], "new_limit": payload.new_limit, "approval_required": False}
 
 
 @router.get("/{user_id}/orders")
@@ -835,3 +931,247 @@ async def reset_user_failed_attempts(
     
     await db.commit()
     return {"user_id": user.id, "status": "reset_successful"}
+
+
+# ============================================================================
+# Module 2 — create, bulk actions, closure workflow
+# ============================================================================
+
+
+class CreateUserRequest(BaseModel):
+    phone: str = Field(..., pattern=r"^\+92[0-9]{10}$")
+    first_name: Optional[str] = Field(default=None, max_length=100)
+    last_name: Optional[str] = Field(default=None, max_length=100)
+    initial_status: Literal["active", "pending_kyc"] = "pending_kyc"
+    initial_credit_limit: float = Field(default=0, ge=0)
+
+
+@router.post("", status_code=status.HTTP_201_CREATED)
+async def create_admin_user(
+    payload: CreateUserRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from sk_shared.models.auth import User as UserModel
+    import secrets
+    import string
+
+    existing = await db.scalar(select(UserModel).where(UserModel.phone == payload.phone))
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="PHONE_ALREADY_REGISTERED")
+
+    temp_password = "".join(secrets.choice(string.ascii_letters + string.digits) for _ in range(12))
+    user = UserModel(
+        phone=payload.phone,
+        first_name=payload.first_name,
+        last_name=payload.last_name,
+        password_hash=get_password_hash(temp_password),
+        status=payload.initial_status,
+        credit_limit=payload.initial_credit_limit,
+        available_credit=payload.initial_credit_limit,
+    )
+    db.add(user)
+    await db.flush()
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="create_user",
+        target_id=user.id,
+        changes={"phone": payload.phone, "initial_status": payload.initial_status},
+    )
+    await db.commit()
+    return {
+        "id": user.id,
+        "phone": user.phone,
+        "status": user.status,
+        "temp_password": temp_password,
+    }
+
+
+class BulkUserActionRequest(BaseModel):
+    user_ids: list[int] = Field(..., min_length=1, max_length=200)
+    action: Literal["suspend", "activate", "block"]
+    reason: str = Field(..., min_length=3, max_length=255)
+
+
+@router.post("/bulk")
+async def bulk_user_action(
+    payload: BulkUserActionRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    status_map = {"suspend": "suspended", "activate": "active", "block": "blocked"}
+    new_status = status_map[payload.action]
+
+    result = await db.execute(
+        text(
+            """
+            UPDATE users SET status = :new_status
+            WHERE id = ANY(:user_ids) AND deleted_at IS NULL
+            RETURNING id
+            """
+        ),
+        {"new_status": new_status, "user_ids": payload.user_ids},
+    )
+    updated_ids = [row[0] for row in result.fetchall()]
+
+    if payload.action in ("suspend", "block"):
+        for uid in updated_ids:
+            await _revoke_all_user_sessions(uid, redis)
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="bulk_status_update",
+        target_id=None,
+        changes={"user_ids": updated_ids, "new_status": new_status, "reason": payload.reason},
+        severity="critical" if new_status in ("suspended", "blocked") else "info",
+    )
+    await db.commit()
+    return {"updated_count": len(updated_ids), "updated_ids": updated_ids, "new_status": new_status}
+
+
+class ClosureRequestBody(BaseModel):
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+@router.post("/{user_id}/closure-request", status_code=status.HTTP_201_CREATED)
+async def request_user_closure(
+    user_id: int,
+    payload: ClosureRequestBody,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    from datetime import timedelta
+
+    from sk_shared.models.auth import User as UserModel
+
+    user = await db.scalar(select(UserModel).where(UserModel.id == user_id, UserModel.deleted_at.is_(None)))
+    if user is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="USER_NOT_FOUND")
+
+    existing = (
+        await db.execute(
+            text(
+                "SELECT id FROM data_deletion_requests WHERE user_id = :uid AND status IN ('pending','verified','in_progress')"
+            ),
+            {"uid": user_id},
+        )
+    ).one_or_none()
+    if existing is not None:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="CLOSURE_ALREADY_PENDING")
+
+    row = (
+        await db.execute(
+            text(
+                """
+                INSERT INTO data_deletion_requests (user_id, request_type, verification_method, status)
+                VALUES (:uid, 'erasure', 'admin_initiated', 'pending')
+                RETURNING id, created_at
+                """
+            ),
+            {"uid": user_id},
+        )
+    ).mappings().one()
+
+    user.status = "suspended"
+    sessions_revoked = await _revoke_all_user_sessions(user_id, redis)
+    eligible_at = row["created_at"] + timedelta(days=CLOSURE_COOLING_OFF_DAYS)
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="closure_requested",
+        target_id=user_id,
+        changes={"reason": payload.reason, "eligible_execution_at": eligible_at.isoformat()},
+        severity="critical",
+    )
+    await db.commit()
+    return {
+        "closure_request_id": row["id"],
+        "user_id": user_id,
+        "status": "pending",
+        "cooling_off_days": CLOSURE_COOLING_OFF_DAYS,
+        "eligible_execution_at": eligible_at.isoformat(),
+        "sessions_revoked": sessions_revoked,
+    }
+
+
+@router.post("/closure-requests/{request_id}/execute")
+async def execute_closure_request(
+    request_id: int,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_users")),
+    payload: dict = Depends(get_current_admin_token_payload),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    from datetime import datetime, timedelta, timezone
+
+    row = (
+        await db.execute(
+            text("SELECT id, user_id, status, created_at FROM data_deletion_requests WHERE id = :id"),
+            {"id": request_id},
+        )
+    ).mappings().one_or_none()
+    if row is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="CLOSURE_REQUEST_NOT_FOUND")
+    if row["status"] != "pending":
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="CLOSURE_REQUEST_ALREADY_DECIDED")
+
+    eligible_at = row["created_at"] + timedelta(days=CLOSURE_COOLING_OFF_DAYS)
+    is_super_admin = payload.get("role") == "super_admin"
+    if datetime.now(timezone.utc).replace(tzinfo=None) < eligible_at and not is_super_admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=f"COOLING_OFF_PERIOD_ACTIVE: eligible at {eligible_at.isoformat()}",
+        )
+
+    # Anonymize rather than hard-delete — preserves referential integrity for
+    # historical orders/ledger entries while satisfying the erasure request.
+    anon_phone = f"deleted-{row['user_id']}"
+    await db.execute(
+        text(
+            """
+            UPDATE users
+            SET phone = :anon_phone, first_name = NULL, last_name = NULL,
+                password_hash = NULL, status = 'closed'
+            WHERE id = :user_id
+            """
+        ),
+        {"anon_phone": anon_phone, "user_id": row["user_id"]},
+    )
+    await db.execute(
+        text(
+            """
+            UPDATE data_deletion_requests
+            SET status = 'completed', executed_at = NOW(), tables_cleared = ARRAY['users']
+            WHERE id = :id
+            """
+        ),
+        {"id": request_id},
+    )
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_users",
+        action="closure_executed",
+        target_id=row["user_id"],
+        changes={"closure_request_id": request_id},
+        severity="critical",
+    )
+    await db.commit()
+    return {"closure_request_id": request_id, "user_id": row["user_id"], "status": "completed"}
