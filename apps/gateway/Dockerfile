@@ -1,5 +1,5 @@
 # STAGE 1: Builder
-FROM python:3.12-slim AS builder
+FROM python:3.14-slim AS builder
 
 WORKDIR /build
 
@@ -17,7 +17,7 @@ COPY apps/gateway/pyproject.toml /tmp/gateway.toml
 RUN python3 -c "import tomllib,subprocess,sys; cfg=tomllib.load(open('/tmp/gateway.toml','rb')); deps=[d for d in cfg['project']['dependencies'] if not d.startswith('sk-')]; subprocess.run([sys.executable,'-m','pip','install','--no-cache-dir','--prefix=/install']+deps,check=True)"
 
 # STAGE 2: Runtime
-FROM python:3.12-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 WORKDIR /app
 
