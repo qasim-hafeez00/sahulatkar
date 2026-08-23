@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON, LargeBinary
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, JSON, LargeBinary
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin, UUIDMixin, SoftDeleteMixin
@@ -35,9 +35,18 @@ class WakalahAgreement(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     merchant_name: Mapped[str] = mapped_column(String(255), nullable=True)
     product_url: Mapped[str] = mapped_column(String(2048), nullable=True)
     price_variance_pct: Mapped[float] = mapped_column(Numeric(4, 2), default=5.00, nullable=False)
-    
+
     signed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     valid_until: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # The physical table already had these (DB has them, model didn't map
+    # them) — src/services/delivery_events.py's apply_delivery_confirmed_
+    # envelope sets wakalah.is_executed/.executed_at on delivery, but as
+    # unmapped attributes those assignments were silently dropped on
+    # commit; is_executed stayed false forever regardless of delivery
+    # status. Live-tested: fixed once these were added as real columns.
+    is_executed: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    executed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
 
     signatures: Mapped[list["ContractDigitalSignature"]] = relationship(
         "ContractDigitalSignature",

@@ -1,5 +1,4 @@
 import pytest
-from sqlalchemy import select, update
 from sk_shared.models.payment import Installment, Loan
 from src.billing.overdue_processor import OverdueProcessor
 

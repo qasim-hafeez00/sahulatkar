@@ -1,15 +1,13 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import random
 import re
-from datetime import datetime
 from decimal import Decimal
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, Optional
 
 from playwright.async_api import async_playwright, Page, FrameLocator
-from playwright_stealth import stealth
+from playwright_stealth import Stealth
 
 from src.config import settings
 from src.services.self_healing import SelfHealingService
@@ -70,7 +68,13 @@ class CheckoutFormFiller:
 
                 page = await context.new_page()
                 self._page = page
-                await stealth(page)
+                # playwright-stealth 2.x replaced the old top-level
+                # `stealth(page)` coroutine with a Stealth class — `stealth`
+                # itself is now a submodule (playwright_stealth.stealth),
+                # not callable, so this 500'd every real checkout job before
+                # Playwright ever navigated anywhere. Live-tested against the
+                # installed 2.0.3.
+                await Stealth().apply_stealth_async(page)
 
                 for reentry in range(2):
                     try:

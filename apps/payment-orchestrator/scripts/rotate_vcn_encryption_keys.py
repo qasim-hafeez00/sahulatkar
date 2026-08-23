@@ -59,11 +59,13 @@ logger = logging.getLogger("rotate_vcn_encryption_keys")
 
 
 async def rotate(batch_size: int = 200, dry_run: bool = False) -> int:
-    key_provider = VcnKeyProvider()
-    current_version = key_provider.current_version
+    current_version = VcnKeyProvider().current_version
     rotated_count = 0
 
     async with SessionLocal() as session:
+        # Bound to this session so the production-KMS path (if active) can
+        # persist/rehydrate per-version data keys via vcn_kms_key_versions.
+        key_provider = VcnKeyProvider(db=session)
         offset = 0
         while True:
             result = await session.execute(
@@ -86,11 +88,11 @@ async def rotate(batch_size: int = 200, dry_run: bool = False) -> int:
                     rotated_count += 1
                     continue
 
-                plaintext_pan = key_provider.decrypt(card.encrypted_pan, card.encryption_key_version)
-                plaintext_cvv = key_provider.decrypt(card.encrypted_cvv, card.encryption_key_version)
+                plaintext_pan = await key_provider.decrypt(card.encrypted_pan, card.encryption_key_version)
+                plaintext_cvv = await key_provider.decrypt(card.encrypted_cvv, card.encryption_key_version)
 
-                new_encrypted_pan, new_version = key_provider.encrypt(plaintext_pan)
-                new_encrypted_cvv, _ = key_provider.encrypt(plaintext_cvv)
+                new_encrypted_pan, new_version = await key_provider.encrypt(plaintext_pan)
+                new_encrypted_cvv, _ = await key_provider.encrypt(plaintext_cvv)
 
                 card.encrypted_pan = new_encrypted_pan
                 card.encrypted_cvv = new_encrypted_cvv

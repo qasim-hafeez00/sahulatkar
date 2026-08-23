@@ -1,7 +1,6 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { useEffect, useState } from "react"
 import { ShoppingBag, Smartphone, Laptop, Watch, Headphones, Camera, Gamepad2, Tablet } from "lucide-react"
 
 interface ProductItem {
@@ -71,14 +70,10 @@ const products: ProductItem[] = [
   },
 ]
 
+// Duplicated for a seamless scrolling loop.
+const duplicatedProducts: ProductItem[] = [...products, ...products, ...products]
+
 export function MovingBanner() {
-  const [duplicatedProducts, setDuplicatedProducts] = useState<ProductItem[]>([])
-
-  useEffect(() => {
-    // Duplicate products for seamless loop
-    setDuplicatedProducts([...products, ...products, ...products])
-  }, [])
-
   return (
     <div className="theme-section relative w-full overflow-hidden py-8">
       <div className="absolute inset-0 bg-gradient-to-r from-transparent via-orange-100/20 dark:via-orange-500/5 to-transparent pointer-events-none" />

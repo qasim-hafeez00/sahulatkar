@@ -15,9 +15,10 @@ from __future__ import annotations
 import asyncio
 import logging
 from typing import Optional
-from uuid import uuid4
 
 import httpx
+
+from sk_shared.correlation import get_correlation_id
 
 from src.config import settings
 
@@ -43,9 +44,13 @@ async def stop() -> None:
 
 
 def _signed_headers(request_id: Optional[str] = None) -> dict[str, str]:
+    # INF-GAP-04: fall back to the inbound request's correlation ID (set by
+    # sk_shared.middleware.RequestIdMiddleware) instead of minting an
+    # unrelated UUID, so this callback stays traceable to the Gateway
+    # request that triggered the credit decision.
     return {
         "X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN,
-        "X-Request-ID": request_id or str(uuid4()),
+        "X-Request-ID": request_id or get_correlation_id(),
         "Content-Type": "application/json",
     }
 

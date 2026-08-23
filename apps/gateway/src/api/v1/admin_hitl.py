@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.auth import AdminUser
 from sk_shared.models.hitl import HitlQueue
 
-from src.core.dependencies import get_current_admin, get_db, RequirePermission
+from src.core.dependencies import get_db, RequirePermission
 from src.schemas.hitl import HitlListResponse, HitlQueueItemResponse, HitlResolveRequest, HitlStatusResponse
 from src.services.hitl_queue import HitlQueueService
 

@@ -168,6 +168,61 @@ async def get_order_tracking(
     }
 
 
+@router.get("/{order_id}/agent-status")
+async def get_agent_status_stream(
+    order_id: int,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Streams live checkout-agent progress (Server-Sent Events) for an order —
+    e.g. "navigating to merchant", "filling cart", "entering payment" — by
+    proxying Product Service's internal SSE endpoint.
+
+    Product Service's stream is keyed by a PurchaseExecution job_id (a UUID),
+    but the browser only knows the order_id, so this first resolves the
+    latest execution for the order, then re-streams
+    GET {PRODUCT_SERVICE_BASE_URL}/api/products/agent/job/{job_id}/stream.
+
+    Ownership is checked here (order.user_id == current_user.id) because the
+    downstream Product Service endpoint is authenticated by internal service
+    token only — it has no concept of which customer is allowed to see which
+    execution.
+    """
+    import httpx
+    from fastapi.responses import StreamingResponse
+
+    from src.config import settings
+
+    order = await db.scalar(
+        select(Order).where(Order.id == order_id, Order.user_id == current_user.id, Order.deleted_at.is_(None))
+    )
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    service_headers = {"x-internal-service-token": settings.INTERNAL_SERVICE_TOKEN}
+    base_url = settings.PRODUCT_SERVICE_BASE_URL
+
+    async with httpx.AsyncClient(timeout=10.0) as client:
+        lookup = await client.get(f"{base_url}/api/products/agent/order/{order_id}/latest", headers=service_headers)
+    if lookup.status_code == status.HTTP_404_NOT_FOUND:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="AGENT_JOB_NOT_STARTED")
+    lookup.raise_for_status()
+    job_id = lookup.json()["job_id"]
+
+    async def event_source():
+        async with httpx.AsyncClient(timeout=None) as client:
+            async with client.stream(
+                "GET",
+                f"{base_url}/api/products/agent/job/{job_id}/stream",
+                headers=service_headers,
+            ) as upstream:
+                async for chunk in upstream.aiter_bytes():
+                    yield chunk
+
+    return StreamingResponse(event_source(), media_type="text/event-stream")
+
+
 @router.post("/{order_id}/cancel")
 async def cancel_order(
     order_id: int,
@@ -346,7 +401,6 @@ async def get_order_receipt(
     db: AsyncSession = Depends(get_db),
 ) -> dict:
     """MISS-12: Generate a real order receipt PDF and return a pre-signed download URL."""
-    import hashlib
     import io
     import uuid as _uuid
     from datetime import datetime, timezone

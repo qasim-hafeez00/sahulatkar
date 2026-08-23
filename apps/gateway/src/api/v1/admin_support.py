@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 from src.core.audit import record_audit_event
-from src.core.dependencies import RequirePermission, get_current_admin, get_db
+from src.core.dependencies import RequirePermission, get_db
 
 router = APIRouter(prefix="/admin/support", tags=["Admin Support"])
 

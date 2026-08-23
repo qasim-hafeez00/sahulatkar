@@ -73,3 +73,9 @@ test_all_final.txt
 
 # Claude Code local session state
 .claude/
+
+# Dev-only seeded credentials (scripts/seed_dev_users.py)
+SEEDED_ACCOUNTS.md
+
+# Generated cryptographic secrets — never commit real key material
+GENERATED_SECRETS.md

@@ -1,5 +1,4 @@
 import pytest
-from sqlalchemy import select
 
 from src.models.payment_mandate import PaymentMandate
 from tests.conftest import TestingSessionLocal

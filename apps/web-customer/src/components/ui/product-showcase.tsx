@@ -1,7 +1,6 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { useEffect, useState } from "react"
 import { ShoppingCart, Heart, Star, TrendingUp, Package, Zap, Shield, Truck } from "lucide-react"
 
 interface ShowcaseProduct {
@@ -104,14 +103,10 @@ const showcaseProducts: ShowcaseProduct[] = [
   }
 ]
 
+// Duplicated for a seamless scrolling loop.
+const duplicatedProducts: ShowcaseProduct[] = [...showcaseProducts, ...showcaseProducts, ...showcaseProducts]
+
 export function ProductShowcase() {
-  const [duplicatedProducts, setDuplicatedProducts] = useState<ShowcaseProduct[]>([])
-
-  useEffect(() => {
-    // Duplicate products for seamless loop
-    setDuplicatedProducts([...showcaseProducts, ...showcaseProducts, ...showcaseProducts])
-  }, [])
-
   const getCategoryIcon = (category: string) => {
     switch (category) {
       case "Smartphones": return <Zap className="w-4 h-4" />
@@ -172,7 +167,7 @@ export function ProductShowcase() {
             </span>
           </h2>
           <p className="text-xl text-gray-300 max-w-3xl mx-auto">
-            From smartphones to gaming consoles, we've got all your favorite products with instant financing
+            From smartphones to gaming consoles, we&apos;ve got all your favorite products with instant financing
           </p>
         </motion.div>
 

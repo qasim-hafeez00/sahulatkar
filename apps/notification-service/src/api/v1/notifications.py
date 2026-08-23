@@ -1,5 +1,5 @@
-from fastapi import APIRouter, Depends, Query, HTTPException, status, BackgroundTasks
-from typing import Optional, List
+from fastapi import APIRouter, Depends, Query, HTTPException, BackgroundTasks
+from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.redis_client import RedisClient

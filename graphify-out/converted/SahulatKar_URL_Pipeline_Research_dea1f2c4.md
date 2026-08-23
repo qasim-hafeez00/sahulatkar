@@ -1,0 +1,897 @@
+<!-- converted from SahulatKar_URL_Pipeline_Research.docx -->
+
+
+SahulatKar
+Your Ethical Financial Partner
+
+
+Technical Research Report
+URL-to-Purchase Automation Pipeline
+URL Parsing  |  Product Extraction  |  Agentic Checkout  |  API Comparisons
+
+FYP Team | NUCES Chiniot | 2026
+
+# Executive Summary
+This report provides an exhaustive technical blueprint for building the core "Paste URL → Extract Product → Automated Purchase" pipeline for SahulatKar — the vendor-agnostic BNPL platform for Pakistan. It covers every stage from URL validation and platform detection, through product data extraction methods (free and paid APIs), to the agentic checkout automation engine, virtual card payment injection, and post-purchase tracking.
+
+
+
+# 1. URL Input, Validation & Platform Detection
+## 1.1 The URL Ingestion Problem
+When a SahulatKar user pastes a URL, that URL could come in dozens of forms — a clean product URL, a mobile deep link, a URL shortener redirect, an affiliate-tagged URL with tracking parameters, or a social media share link. The first stage of the pipeline must normalize and classify the URL before any data extraction begins.
+
+## 1.2 Step-by-Step URL Processing Pipeline
+- Receive raw input (text field paste or mobile Share Sheet integration).
+- Expand shortened URLs (bit.ly, tinyurl, amzn.to, etc.) by following HTTP redirects.
+- Strip tracking parameters (utm_source, ref, affid, clickid) to get the canonical URL.
+- Validate URL structure — must be HTTP/HTTPS, must resolve to a real page (200 OK).
+- Detect the e-commerce platform from URL pattern and domain signature.
+- Classify as: Product Page | Category Page | Search Results | Non-Product (reject).
+
+### Python Implementation: URL Normalization
+
+## 1.3 URL Pattern Reference Table
+
+## 1.4 Handling Edge Cases
+
+# 2. Product Data Extraction — All Methods
+## 2.1 The Waterfall Architecture (Recommended)
+No single method works for 100% of e-commerce sites. SahulatKar uses a tiered "Waterfall" architecture: try the fastest/cheapest method first, fall back to the next if it fails. This maximizes reliability while minimizing cost.
+
+
+## 2.2 Tier 1: Rye API V2 — The Gold Standard
+### Overview
+Rye (rye.com) is purpose-built for agentic commerce. Its V2 "Sell Anything API" accepts any product URL and returns structured product data plus provides a checkout execution endpoint. This is the closest thing to a turnkey solution for SahulatKar's core pipeline.
+
+### Pricing (Current as of 2026)
+- Developer Plan: $149/month — includes $50 free credits per month.
+- Product Fetch: $0.02 per product data API call.
+- Order Placed: $0.05 per order successfully executed.
+- 30-day free trial with no credit card required.
+- Enterprise: Custom pricing with volume discounts and dedicated support.
+- Note: Third-party platform costs (e.g., Amazon seller fees) are passed through at cost with NO Rye markup.
+
+### Technical Capabilities
+- Product Data API: Single GET request returns normalized schema — title, price, availability (5-state enum: in_stock / out_of_stock / preorder / backorder / unknown), images, description, SKUs.
+- Universal Coverage: Uses tiered retrieval — direct Shopify/Amazon APIs first, then intelligent browser-based extraction (their own agent system) for unknown merchants.
+- Checkout Intent API: POST /api/v1/checkout-intents with the URL and buyer identity → Rye's agent executes the purchase autonomously.
+- Latency: <5 seconds for Amazon/Shopify; <35 seconds for universal browser-based stores.
+- Reliability: 99.9% order reliability (V2 claim).
+- Fresh Data: Product data is NOT long-term cached — cache window is measured in minutes, ensuring live stock/price accuracy.
+
+### Rye API Workflow Code (Python)
+
+## 2.3 Tier 2: Violet.io — Multi-Platform Write-Back API
+Violet.io provides a "Unified Commerce API" that integrates directly with merchant backend systems (not scraping). This gives it a significant reliability advantage for supported platforms.
+
+### Supported Platforms
+- Shopify — Full write-back capability.
+- WooCommerce (WordPress) — Full integration.
+- Magento / Adobe Commerce — Full integration.
+- BigCommerce — Full integration.
+- Salesforce Commerce Cloud — Integration available.
+- Wix eCommerce — Integration available.
+- Over 5 million merchants reachable via combined platform coverage.
+
+### How Violet Works (Technical)
+- Violet Connect: Merchants authenticate their store via OAuth — their data syncs into Violet's unified schema.
+- Prism API: SahulatKar sends a product URL; Violet identifies the merchant's platform, connects to their backend, and returns normalized catalog data including real-time inventory.
+- Checkout Writeback: Order creation writes DIRECTLY into the merchant's backend (Shopify order system, WooCommerce order system, etc.) — not a "fake" order via bot. This means better reliability and official order numbers.
+- Pricing: Contact sales (custom). Violet raised $14M and is enterprise-focused — expect custom contracts for volume use cases.
+
+## 2.4 Tier 3A: Free Structured Data Extraction (JSON-LD / Schema.org)
+Before spinning up expensive headless browsers, always try parsing the page's structured data first. JSON-LD (JavaScript Object Notation for Linked Data) is an embedded machine-readable format that many e-commerce sites include specifically for search engine optimization. This is FREE and fast.
+
+### How Common Is It?
+- Approximately 40% of e-commerce websites use schema.org/Product markup in their HTML.
+- When present, it provides a clean, standardized product data extract with no scraping complexity.
+- The data appears inside <script type="application/ld+json"> tags embedded in the page HTML.
+
+### JSON-LD Product Extraction — Python Implementation
+
+## 2.5 Tier 3B: Playwright + LLM Parsing — Universal Fallback
+For sites without structured data (the remaining ~60% of the long tail), SahulatKar must use headless browser automation to load the rendered page and then use an LLM to intelligently extract product fields from the DOM.
+### Why Not Just CSS Selectors?
+Traditional scrapers use hardcoded CSS selectors like .price-class or #product-title. These break every time a merchant updates their website theme — which happens frequently. The LLM-based approach interprets the page's meaning regardless of the specific HTML structure, creating a resilient, self-healing scraper.
+
+### Playwright + LLM Extraction Flow
+- Playwright launches a headless Chromium browser with stealth patches applied.
+- Browser navigates to the product URL using a residential proxy IP.
+- Page is rendered completely (including JavaScript-driven content, SPAs, dynamic pricing).
+- Page HTML is extracted and "distilled" — navbars, footers, ads, and sidebars are stripped.
+- The distilled DOM is converted to markdown or condensed HTML text.
+- This text is sent to an LLM (LangChain + Llama-3-70B via Groq, or GPT-4o-mini) with a structured extraction prompt.
+- LLM returns a JSON object matching the Universal Product Object schema.
+- A heuristic validation layer checks for anomalies (e.g., price = $1 for a laptop → flag).
+
+### Playwright + LLM Extraction Code
+
+## 2.6 Anti-Bot Evasion (Stealth Layer)
+Merchants use tools like Cloudflare Turnstile, Akamai Bot Manager, and DataDome to detect and block bots. SahulatKar's automation pipeline must defeat these with a multi-layer stealth strategy:
+
+
+
+# 3. Universal Product Object (UPO) & User Display
+## 3.1 The Universal Product Object Schema
+Regardless of which extraction method succeeds (Rye, Violet, JSON-LD, or Playwright), the data must be normalized into a single standardized schema — the "Universal Product Object" (UPO). The frontend always receives the same JSON shape.
+
+
+## 3.2 What to Show the User — Product Preview Screen
+The product preview screen is shown BEFORE the user confirms the purchase. It must inspire confidence and provide complete information. Based on Klarna and KalPay UX patterns:
+
+### Essential Information (Must Show)
+- Product image (carousel if multiple images).
+- Product title — full, not truncated.
+- Current price with currency (Rs. 12,500).
+- Merchant name and domain (e.g., "From: nike.com").
+- Stock status — prominent "In Stock" / "Out of Stock" badge.
+- Selected variant (size/color) — user must confirm before purchase.
+### Financing Breakdown (Must Show — SECP/Shariah Requirement)
+- Service fee (4%): Rs. 500.
+- Estimated tax/shipping: Rs. 350 (from geo-based tax API).
+- Total loan amount: Rs. 13,350.
+- Today's down payment: Rs. 3,338 (25% upfront via JazzCash/Easypaisa).
+- Installment 2: Rs. 3,337 (2 weeks later).
+- Installment 3: Rs. 3,337 (4 weeks later).
+- Installment 4: Rs. 3,338 (6 weeks later).
+### Important (Should Show)
+- Return policy summary (scraped from merchant return policy page or standardized fallback).
+- Estimated delivery: "Approx. 7-14 business days (international) or 3-5 days (local)".
+- Wakalah Agreement checkbox — user must acknowledge before proceeding.
+
+### Variant Selector UX
+Variants (Size, Color, etc.) must be selectable within the SahulatKar UI — the user should never need to visit the merchant's website. Implementation:
+- Show variants as native button groups, NOT dropdowns (better mobile UX).
+- Unavailable variants shown grayed out with a strikethrough.
+- Selected variant confirmation shown in summary before checkout: "You selected: Size M, Color: Red".
+- If variant selection is required but user hasn't chosen, disable the "Confirm & Finance" button.
+
+# 4. Automated Purchase / Checkout Execution
+## 4.1 Method A: Rye Checkout Intent API (Preferred)
+When using Rye API, the checkout is entirely handled server-side by Rye's own agentic system. SahulatKar just sends the product URL + buyer info + payment token and Rye executes the purchase.
+
+### Full Rye V2 Checkout Workflow
+- SahulatKar backend receives user confirmation + down payment.
+- Virtual card generated (Stripe Issuing or local bank) loaded with exact order amount + 5% buffer.
+- Card PAN and expiry tokenized via Rye's secure tokenization endpoint (SahulatKar never handles raw PAN in its own database — PCI DSS scope reduction).
+- POST /api/v1/checkout-intents with productUrl, quantity, buyer, paymentToken.
+- Rye's agentic system navigates to merchant site, selects variant, adds to cart, fills address, injects virtual card, places order.
+- Rye sends webhook to SahulatKar: { checkoutIntentId, status: "COMPLETED", merchantOrderId, totalCharged }.
+- SahulatKar stores merchantOrderId in database, starts installment schedule.
+
+
+## 4.2 Method B: SahulatKar Custom Playwright Checkout Agent
+For sites not covered by Rye or Violet, SahulatKar deploys its own Playwright-based "Headless Shopper" agent. This is more complex but gives complete control.
+### Checkout Script Step-by-Step
+- Navigate to product page URL with stealth configuration.
+- Wait for page load (domcontentloaded + 2 second settling time).
+- Select user's chosen variant (size/color): find dropdown or button group using LLM-guided selector inference.
+- Click "Add to Cart" button (identified by text match or aria-label).
+- Navigate to cart page, then click "Proceed to Checkout".
+- Detect and select "Guest Checkout" option to avoid account creation.
+- Fill shipping address fields using heuristic label matching.
+- Detect payment iframe (Stripe Elements, Braintree, etc.).
+- Switch to iframe context using page.frame_locator() API.
+- Inject virtual card PAN, expiry, CVV into payment fields using page.keyboard.type() (NOT direct value injection — trusted event simulation required).
+- Click "Place Order" / "Complete Purchase" button.
+- Screenshot order confirmation page, extract merchant order ID.
+- Return {success: true, merchantOrderId, screenshot_url} to backend.
+
+
+## 4.3 Self-Healing: Visual Recovery with Vision-Language Model
+When the checkout bot encounters an unexpected element (a popup, newsletter modal, "Out of Stock" notification, or unexpected page layout), it uses a Vision-Language Model (VLM) to understand what it sees and adapt:
+
+## 4.4 Error Handling — Complete Failure Mode Matrix
+
+# 5. Virtual Card Payment Injection
+## 5.1 Virtual Card Issuing APIs — Comparison
+
+
+## 5.2 Virtual Card Generation Workflow
+
+## 5.3 Payment Form Field Detection
+When injecting the virtual card into a merchant's checkout form, the bot must reliably identify the correct input fields. Payment processors load their forms inside iframes for security. Here is how to handle both cases:
+- Standard HTML fields: Match by name attribute (cardnumber, cc-number, card_number), placeholder text, or aria-label.
+- Stripe Elements iframe: Use page.frame_locator('iframe[name*="__privateStripeFrame"]') to switch context.
+- Braintree iframe: Similar pattern — look for iframe with src containing braintree or paypal.
+- Adyen: Look for iframe with src containing adyen.com.
+- PayFast (Pakistan): Look for iframe with src containing payfast.pk — or redirect-based, requiring screenshot capture of confirmation.
+- 3D Secure pop-up: Handle as a separate browser popup window; switch to page.context.wait_for_page() to capture new tab/popup.
+
+# 6. Order Tracking & Post-Purchase
+## 6.1 Capturing the Merchant Order ID
+After checkout completes, the bot must extract the Merchant Order ID from the confirmation page before closing. This is the critical link between SahulatKar's loan record and the merchant's order system.
+
+## 6.2 Order Tracking Integration
+After the purchase, SahulatKar tracks delivery using AfterShip — a multi-carrier tracking aggregator that supports 700+ carriers globally.
+
+# 7. Cost-Benefit Analysis Per Transaction
+## 7.1 Detailed Cost Breakdown per Rs. 10,000 Order
+
+
+## 7.2 Free vs Paid: What You Get For Free
+
+# 8. System Architecture & Implementation Roadmap
+## 8.1 Microservices Architecture
+The URL-to-Purchase pipeline maps to three independent microservices that can be scaled independently:
+
+## 8.2 Temporal.io — Durable Workflow Orchestration
+Temporal.io is the critical infrastructure component that ensures checkout workflows are fault-tolerant. If the Playwright browser crashes mid-purchase, Temporal automatically resumes from the last checkpoint — preventing both double-charges and lost orders. This is non-negotiable for a financial application.
+### Why Temporal?
+- Durable execution: Workflows survive server crashes, network failures, and container restarts.
+- Compensation logic: If checkout fails after card is charged, Temporal triggers the refund workflow automatically.
+- Retry policies: Configurable exponential backoff for transient failures (network timeout, bot detection).
+- Visibility: Full audit trail of every step of every checkout — required for financial compliance.
+
+## 8.3 Phase-by-Phase Implementation Roadmap
+### Phase 1 — MVP (Weeks 1-6): Shopify Only via Rye API
+- Week 1-2: URL validation, NADRA KYC integration, Rye API account setup.
+- Week 3-4: Rye product fetch API integration, Universal Product Object schema, frontend product card UI.
+- Week 5-6: Rye checkout intent integration, Stripe Issuing virtual card issuance, installment schedule computation.
+- Scope: Shopify merchants only. Fallback: 100% manual HITL for non-Shopify.
+- Target: 10 test orders completed end-to-end with real cards.
+### Phase 2 — Hybrid Automation (Weeks 7-16)
+- Week 7-10: Build Playwright executor, stealth layer, Bright Data proxy integration.
+- Week 11-13: LLM-based DOM parsing (Llama-3 via Groq), Temporal.io workflow setup.
+- Week 14-16: JSON-LD fast-path extraction, self-healing VLM recovery, CAPTCHA solving.
+- Target: Top 20 Pakistani merchants automated (Daraz, Shophive, iStyle, etc.), 60%+ automation rate.
+### Phase 3 — Scale (Weeks 17+)
+- Universal automation (Playwright) for any URL — target >85% automation rate.
+- Browser extension for desktop users (React Extension + side-cart injection).
+- Kubernetes auto-scaling for Playwright worker pods.
+- Migrate to Lithic for MCC-locked cards.
+- Local Pakistan bank BIN partnership for PKR-native virtual cards.
+- Target: <$0.20 all-in cost per successful transaction at 10K orders/month.
+
+## 8.4 Database Schema — Core Tables
+
+
+SahulatKar — Your Ethical Financial Partner | NUCES Chiniot | FYP 2026
+| Core Feasibility Finding
+A hybrid "Waterfall Architecture" is the recommended approach: use Rye API (paid) as Tier 1 for Amazon and Shopify, Violet.io for other API-connected merchants as Tier 2, and a custom Playwright + LLM parsing engine as the universal fallback (Tier 3). This delivers 80%+ automation coverage with an estimated cost of $0.07–$0.15 per successful product extraction and $0.05–$0.15 per completed checkout. MVP can be built in 6–8 weeks targeting Shopify only via Rye API. |
+| --- |
+| Solution | Best For | Cost/Request | Success Rate | Speed |
+| --- | --- | --- | --- | --- |
+| Rye API (V2) | Amazon + Shopify + Universal | $0.05/order + $0.02/fetch | 99.9% | <5s |
+| Violet.io | Shopify, WooCommerce, Magento, BigCommerce | Custom (contact) | >95% | Fast |
+| Playwright + Proxies | Any website (long tail) | $0.05–0.15 proxy cost | 70–90% | 20–90s |
+| Bright Data Scraper API | Hosted scraping (no infra) | $1.50/1K requests | 98% | 3–15s |
+| Apify Scrapers | Ready-made actors for top sites | $5/1M results (free tier) | 80–95% | 10–30s |
+| from urllib.parse import urlparse, urlencode, parse_qs, urlunparse
+import requests
+
+TRACKING_PARAMS = {'utm_source','utm_medium','utm_campaign','ref','affid',
+                   'tag','clickid','fbclid','gclid','msclkid','aff_id'}
+
+def expand_url(raw_url: str) -> str:
+    """Follow all redirects to get final canonical URL."""
+    resp = requests.head(raw_url, allow_redirects=True, timeout=10)
+    return resp.url
+
+def strip_tracking(url: str) -> str:
+    """Remove known tracking/affiliate query parameters."""
+    parsed = urlparse(url)
+    params = parse_qs(parsed.query)
+    clean = {k: v for k, v in params.items() if k not in TRACKING_PARAMS}
+    return urlunparse(parsed._replace(query=urlencode(clean, doseq=True)))
+
+def detect_platform(url: str) -> str:
+    """Detect e-commerce platform from URL structure."""
+    parsed = urlparse(url)
+    domain = parsed.netloc.lower()
+    path = parsed.path.lower()
+
+    if 'amazon.' in domain:
+        return 'AMAZON'           # amazon.com/dp/ASIN, /gp/product/ASIN
+    if '/products/' in path:
+        return 'SHOPIFY'          # store.com/products/product-handle
+    if 'ebay.' in domain:
+        return 'EBAY'             # ebay.com/itm/ITEM_NUMBER
+    if '/p/' in path or 'daraz.' in domain:
+        return 'DARAZ'            # daraz.pk/products/...
+    if 'aliexpress.' in domain:
+        return 'ALIEXPRESS'
+    if '/product/' in path:
+        return 'WOOCOMMERCE_LIKELY'
+    return 'CUSTOM'               # fallback — use Rye/Playwright
+
+def validate_product_url(url: str) -> dict:
+    final_url = expand_url(url)
+    clean_url = strip_tracking(final_url)
+    platform = detect_platform(clean_url)
+
+    # Validate the page actually loads
+    resp = requests.get(clean_url, timeout=15,
+                        headers={'User-Agent': 'Mozilla/5.0'})
+    if resp.status_code == 404:
+        return {'valid': False, 'reason': 'Product not found (404)'}
+
+    return {
+        'valid': True,
+        'original_url': url,
+        'canonical_url': clean_url,
+        'platform': platform,
+        'status_code': resp.status_code
+    } |
+| --- |
+| Platform | URL Pattern | Extraction Tier |
+| --- | --- | --- |
+| Amazon | amazon.com/dp/{ASIN} or /gp/product/{ASIN} | Tier 1: Rye API |
+| Shopify | store.com/products/{handle} | Tier 1: Rye API or Violet.io |
+| eBay | ebay.com/itm/{item_id} | Tier 3: Playwright |
+| Daraz (PK) | daraz.pk/products/{slug}-{id}.html | Tier 3: Playwright (priority) |
+| WooCommerce | store.com/product/{slug}/ | Tier 2: Violet.io |
+| BigCommerce | store.com/{slug}/ | Tier 2: Violet.io |
+| Magento | store.com/catalog/product/view/id/{id} | Tier 2: Violet.io |
+| AliExpress | aliexpress.com/item/{id}.html | Tier 3: Playwright |
+| Custom/Unknown | Any other URL | Tier 3: Playwright + LLM |
+| Edge Case | How It Appears | Resolution |
+| --- | --- | --- |
+| URL Shorteners | bit.ly/abc123, amzn.to/xyz, t.co/... | Follow HTTP 301/302 redirects to final URL |
+| Mobile Deep Links | app.example.com/product/123 | Detect app:// scheme → reject; ask for web URL |
+| Affiliate/Referral URLs | amazon.com/dp/B001?tag=affiliate-20 | Strip tracking params; preserve ASIN/product ID |
+| Region-Locked Products | Only ships to US/EU, not Pakistan | Detect at checkout stage; notify user pre-purchase |
+| Category / Search Page | amazon.com/s?k=laptop | Reject: not a product page; ask user to pick a specific item |
+| Dead Product Link (404) | Product removed from merchant | Show error: "Product unavailable"; prompt for new URL |
+| HTTPS vs HTTP | Mixed protocols | Always normalize to HTTPS; reject plain HTTP |
+| Tier | Method | Trigger Condition | Cost | Speed |
+| --- | --- | --- | --- | --- |
+| 1 | Rye API V2 | Amazon + Shopify URLs, or any URL | $0.02/fetch | <5 seconds |
+| 2 | Violet.io | WooCommerce / BigCommerce / Magento | Custom quote | 2–8 seconds |
+| 3A | JSON-LD / Schema.org Parse | Any site — try before browser automation | Free (just HTTP) | <2 seconds |
+| 3B | Playwright + LLM Parse | JavaScript-heavy or schema-less sites | $0.05–0.15 proxy | 15–60 seconds |
+| 4 | Human-in-the-Loop (HITL) | All automation failed | $1.50–2.00 BPO | <15 minutes |
+| import requests
+
+RYE_API_KEY = "your_rye_api_key"
+BASE_URL = "https://api.rye.com/v1"
+HEADERS = {"Authorization": f"Bearer {RYE_API_KEY}", "Content-Type": "application/json"}
+
+# STEP 1: Fetch product data from URL
+def fetch_product(product_url: str) -> dict:
+    resp = requests.get(
+        f"{BASE_URL}/products",
+        params={"url": product_url},
+        headers=HEADERS,
+        timeout=40
+    )
+    resp.raise_for_status()
+    return resp.json()
+    # Returns: {id, url, sku, name, brand, description,
+    #           images, price:{amountSubunits, currencyCode},
+    #           availability, isPurchasable, variants}
+
+# STEP 2: Create checkout intent (triggers agentic purchase)
+def create_checkout_intent(product_url: str, buyer: dict, quantity: int = 1) -> dict:
+    payload = {
+        "productUrl": product_url,
+        "quantity": quantity,
+        "buyer": {
+            "firstName": buyer["first_name"],
+            "lastName": buyer["last_name"],
+            "email": buyer["email"],
+            "phone": buyer["phone"],
+            "address": {
+                "line1": buyer["address_line1"],
+                "city": buyer["city"],
+                "province": buyer["province"],
+                "country": buyer["country"],     # "PK" for Pakistan
+                "postalCode": buyer["postal_code"]
+            }
+        },
+        # Payment token (virtual card PAN tokenized by Rye)
+        "paymentToken": buyer["virtual_card_token"]
+    }
+    resp = requests.post(
+        f"{BASE_URL}/checkout-intents",
+        json=payload, headers=HEADERS, timeout=60
+    )
+    resp.raise_for_status()
+    return resp.json()
+    # Returns: {checkoutIntentId, status, merchantOrderId, totalAmount} |
+| --- |
+| Key Violet Limitation
+Violet requires merchants to have voluntarily connected their store to Violet's network. If a merchant has NOT opted in, Violet has no data for them. This makes Violet excellent as a Tier 2 complement but not a universal fallback. The merchant needs to be in Violet's connected ecosystem. |
+| --- |
+| import requests
+from bs4 import BeautifulSoup
+import json
+
+def extract_json_ld_product(url: str) -> dict | None:
+    """
+    Try to extract product data from JSON-LD/Schema.org structured data.
+    Returns None if no product schema found (fall back to next tier).
+    """
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    resp = requests.get(url, headers=headers, timeout=15)
+
+    soup = BeautifulSoup(resp.content, 'html.parser')
+    scripts = soup.find_all('script', type='application/ld+json')
+
+    for script in scripts:
+        try:
+            data = json.loads(script.string)
+            # Handle both single object and list
+            items = data if isinstance(data, list) else [data]
+            for item in items:
+                if item.get('@type') == 'Product':
+                    return parse_schema_product(item)
+        except (json.JSONDecodeError, AttributeError):
+            continue
+    return None  # No product schema found
+
+def parse_schema_product(schema: dict) -> dict:
+    """Normalize schema.org/Product into Universal Product Object."""
+    offers = schema.get('offers', {})
+    # Offers can be a single dict or a list
+    if isinstance(offers, list):
+        offers = offers[0] if offers else {}
+
+    return {
+        "title": schema.get("name", ""),
+        "description": schema.get("description", ""),
+        "brand": schema.get("brand", {}).get("name", ""),
+        "images": _extract_images(schema.get("image", [])),
+        "price": {
+            "amount": float(offers.get("price", 0)),
+            "currency": offers.get("priceCurrency", "PKR"),
+        },
+        "availability": _parse_availability(offers.get("availability", "")),
+        "sku": schema.get("sku", offers.get("sku", "")),
+        "variants": _extract_variants(schema),
+        "source": "json-ld"
+    }
+
+def _parse_availability(avail_str: str) -> str:
+    mapping = {
+        "InStock": "in_stock", "OutOfStock": "out_of_stock",
+        "PreOrder": "preorder", "Discontinued": "out_of_stock",
+        "LimitedAvailability": "in_stock"
+    }
+    for key, val in mapping.items():
+        if key.lower() in avail_str.lower():
+            return val
+    return "unknown"
+
+def _extract_images(image_data) -> list:
+    if isinstance(image_data, str): return [image_data]
+    if isinstance(image_data, list): return image_data
+    if isinstance(image_data, dict): return [image_data.get("url", "")]
+    return [] |
+| --- |
+| from playwright.async_api import async_playwright
+from langchain_groq import ChatGroq
+from langchain.prompts import PromptTemplate
+import asyncio, json
+
+LLM = ChatGroq(model="llama-3-70b-8192", temperature=0)
+
+EXTRACTION_PROMPT = PromptTemplate.from_template("""
+You are an e-commerce data extraction engine. Analyze the following HTML/text
+from a product page and extract product information STRICTLY as JSON.
+
+HTML Content:
+{html_content}
+
+Return ONLY valid JSON with this exact structure (no preamble, no explanation):
+{{
+  "title": "Product name",
+  "price": {{"amount": 0.00, "currency": "USD"}},
+  "availability": "in_stock|out_of_stock|preorder|unknown",
+  "brand": "Brand name or empty string",
+  "description": "Short description (max 200 chars)",
+  "images": ["url1", "url2"],
+  "variants": [
+    {{"name": "Size", "options": ["S", "M", "L"]}},
+    {{"name": "Color", "options": ["Red", "Blue"]}}
+  ],
+  "sku": "SKU or empty string"
+}}
+""")
+
+async def playwright_llm_extract(url: str, proxy_url: str = None) -> dict:
+    async with async_playwright() as p:
+        browser_args = {
+            "headless": True,
+            "args": [
+                "--disable-blink-features=AutomationControlled",
+                "--no-sandbox",
+            ]
+        }
+        if proxy_url:
+            browser_args["proxy"] = {"server": proxy_url}
+
+        browser = await p.chromium.launch(**browser_args)
+        context = await browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML) Chrome/120.0.0.0",
+            viewport={"width": 1366, "height": 768},
+            java_script_enabled=True,
+        )
+
+        # Stealth: override navigator.webdriver
+        await context.add_init_script("""
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            Object.defineProperty(navigator, 'plugins', {get: () => [1, 2, 3, 4, 5]});
+        """)
+
+        page = await context.new_page()
+
+        # Block unnecessary resources (images, fonts, trackers)
+        await page.route("**/*.{png,jpg,gif,webp,woff,woff2,svg}", lambda r: r.abort())
+
+        await page.goto(url, wait_until="domcontentloaded", timeout=30000)
+        await page.wait_for_timeout(2000)  # Let JS settle
+
+        # Extract and distill page content
+        html = await page.evaluate("""() => {
+            // Remove non-content elements
+            ['nav','header','footer','aside','.ad','#cookie-banner'].forEach(sel => {
+                document.querySelectorAll(sel).forEach(el => el.remove());
+            });
+            return document.body.innerText.substring(0, 4000);  // Limit tokens
+        }""")
+
+        await browser.close()
+
+    # Send to LLM for extraction
+    prompt = EXTRACTION_PROMPT.format(html_content=html)
+    response = await LLM.ainvoke(prompt)
+    raw_json = response.content.strip()
+
+    try:
+        return json.loads(raw_json)
+    except json.JSONDecodeError:
+        # Strip any markdown fences if present
+        clean = raw_json.replace("```json","").replace("```","").strip()
+        return json.loads(clean) |
+| --- |
+| Technique | What It Does | Tool / Implementation |
+| --- | --- | --- |
+| WebDriver Flag Removal | Sets navigator.webdriver = undefined (bot indicator) | playwright-stealth or add_init_script() |
+| Browser Fingerprint Spoofing | Randomizes Canvas hash, WebGL vendor, AudioContext, screen resolution | playwright-extra + stealth plugin, Kameleo |
+| Residential Proxies | Routes traffic through real home IP addresses | Bright Data ($5/GB), Oxylabs, SmartProxy |
+| Bezier Curve Mouse Moves | Simulates natural curved human mouse movements not linear bot patterns | Custom JS: page.mouse.move() with Bezier easing |
+| Typing Delays | Types characters with Gaussian-distributed delays (50-300ms) | page.keyboard.type() with delay parameter |
+| CAPTCHA Solving | Solves reCAPTCHA v2/v3, hCAPTCHA, Turnstile | 2Captcha ($1.50/1000), CapSolver, Anti-Captcha |
+| Cookie Persistence | Maintains session cookies to appear as returning user | browser.new_context(storage_state=...) |
+| User-Agent Rotation | Rotates between realistic Chrome/Windows UA strings | fake-useragent Python library |
+| User Timing Variance | Random 500-3000ms waits between actions | asyncio.sleep(random.uniform(0.5, 3.0)) |
+| Advanced: Patchright / undetected-playwright
+For heavily protected sites (Cloudflare-protected), use Patchright — a drop-in Playwright replacement that patches CDP-level automation leaks, removes HeadlessChrome UA flags, and deactivates pop-up blocking signatures. Also consider Browserless.io's managed browser service ($49+/month) which includes built-in Cloudflare Turnstile bypass and fingerprint randomization — 95%+ success rate against Cloudflare with no setup required. |
+| --- |
+| // Universal Product Object — TypeScript Interface
+interface UniversalProductObject {
+  // Core identity
+  product_id: string;          // uuid v4
+  source_url: string;          // Canonical, tracking-stripped URL
+  platform: string;            // AMAZON | SHOPIFY | DARAZ | CUSTOM | etc.
+  extraction_method: string;   // rye_api | violet | json_ld | playwright_llm | hitl
+  extracted_at: string;        // ISO 8601 timestamp
+
+  // Product info
+  meta: {
+    title: string;             // Full product name
+    brand: string;
+    description: string;       // Max 500 chars for display
+    images: Array<{
+      url: string;
+      is_featured: boolean;    // Main product image
+      alt_text: string;
+    }>;
+  };
+
+  // Pricing
+  pricing: {
+    amount: number;            // In smallest currency unit (paisas/cents)
+    currency: string;          // ISO 4217: PKR, USD, etc.
+    display_price: string;     // "Rs. 12,500"
+    tax_inclusive: boolean;
+    original_price?: number;   // If discounted
+  };
+
+  // Availability
+  availability: 'in_stock' | 'out_of_stock' | 'preorder' | 'backorder' | 'unknown';
+  is_purchasable: boolean;     // Can SahulatKar actually buy this?
+
+  // Variants (size, color, material, etc.)
+  variants: Array<{
+    option_name: string;       // "Size" | "Color" | "Material"
+    options: Array<{
+      label: string;           // "Large" | "Red"
+      value: string;           // "L" | "#FF0000"
+      is_available: boolean;
+    }>;
+  }>;
+
+  // Shipping estimate
+  shipping: {
+    estimated_cost: number;    // 0 if free shipping
+    estimated_days: string;    // "3-5 business days"
+    ships_to_pakistan: boolean;
+  };
+
+  // SahulatKar financing data (computed by backend)
+  financing: {
+    loan_amount: number;
+    service_fee: number;       // 4% service fee
+    down_payment: number;      // 25-33% of total
+    installments: Array<{
+      number: number;
+      amount: number;
+      due_date: string;
+    }>;
+  };
+} |
+| --- |
+| Rye Checkout Latency
+Amazon and Shopify: typically <5 seconds end-to-end. Universal browser-based stores: typically 10-35 seconds. Rye's system targets >90% success rate with <10s checkout latency on the near-term roadmap (Aug 2025 whitepaper data). Current production SLO: 99.9% reliability on major surfaces. |
+| --- |
+| # Checkout script core — heuristic form filling
+from playwright.async_api import Page
+import asyncio, random
+
+async def fill_address_form(page: Page, address: dict):
+    """Heuristically fill checkout address fields."""
+    field_mappings = {
+        # (label patterns to match) → value
+        ('first name', 'firstname', 'given-name'): address['first_name'],
+        ('last name', 'lastname', 'family-name'): address['last_name'],
+        ('email',): address['email'],
+        ('phone', 'telephone', 'mobile'): address['phone'],
+        ('address', 'street', 'line1', 'address1'): address['line1'],
+        ('city', 'town'): address['city'],
+        ('zip', 'postal', 'postcode'): address['postal_code'],
+        ('country',): address['country'],
+    }
+    inputs = await page.query_selector_all('input, select')
+    for input_el in inputs:
+        label = await get_field_label(page, input_el)
+        for patterns, value in field_mappings.items():
+            if any(p in label.lower() for p in patterns):
+                await human_type(page, input_el, value)
+                break
+
+async def human_type(page: Page, element, text: str):
+    """Type text with human-like delays."""
+    await element.click()
+    await asyncio.sleep(random.uniform(0.2, 0.6))
+    await element.fill('')  # Clear first
+    for char in text:
+        await element.type(char, delay=random.gauss(100, 40))  # ~100ms ±40ms
+
+async def inject_virtual_card(page: Page, card: dict):
+    """Find payment iframe and inject card details."""
+    # Most payment processors load an iframe
+    frame = page.frame_locator('iframe[name*="card"], iframe[src*="stripe"]')
+    await frame.locator('[name="cardnumber"], [data-elements-stable-field-name="cardNumber"]'
+                        ).type(card['pan'], delay=80)
+    await frame.locator('[name="exp-date"], [placeholder*="MM"]'
+                        ).type(card['expiry'], delay=80)
+    await frame.locator('[name="cvc"], [placeholder*="CVV"]'
+                        ).type(card['cvv'], delay=80) |
+| --- |
+| async def self_heal_checkout(page: Page, error_context: str) -> bool:
+    """
+    On failure, take screenshot → send to GPT-4o-mini → execute instruction.
+    Returns True if recovery succeeded.
+    """
+    screenshot = await page.screenshot(type='jpeg', quality=70)
+    screenshot_b64 = base64.b64encode(screenshot).decode()
+
+    # Send to vision model
+    response = openai_client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "user",
+            "content": [
+                {"type": "text", "text": f"Error: {error_context}. What CSS selector should I click to proceed? Return ONLY the selector."},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{screenshot_b64}"}}
+            ]
+        }],
+        max_tokens=100
+    )
+    selector = response.choices[0].message.content.strip()
+    try:
+        await page.click(selector, timeout=5000)
+        return True
+    except:
+        return False |
+| --- |
+| Failure Mode | Detection Method | Resolution Strategy |
+| --- | --- | --- |
+| Product Out of Stock | Availability = out_of_stock at extraction; or "OOS" at checkout | Cancel checkout; notify user; offer alternative; cancel virtual card |
+| Price Increased >5% | Compare extracted price vs actual cart total | Alert user with new price; require re-confirmation before proceeding |
+| CAPTCHA Encountered | Page screenshot contains CAPTCHA widget | Try 2Captcha/CapSolver API; if fails → escalate to HITL |
+| Guest Checkout Unavailable | No guest option detected on checkout page | Create throwaway account with unique email alias (user+orderID@relay.sahulatkar.com) |
+| Payment Declined | Virtual card rejected by merchant | Check card balance vs actual total; reissue card with updated amount; retry once |
+| Shipping Not Available | Merchant cannot ship to Pakistan address | Cancel; notify user; cancel virtual card; refund down payment immediately |
+| Bot Detection / IP Block | HTTP 403, Cloudflare challenge, session reset | Retry with different residential proxy IP; switch stealth technique; escalate to HITL after 3 attempts |
+| Cart Expiration (Timeout) | Merchant cart expires mid-checkout | Re-start cart from scratch; re-add items; use Temporal.io workflow recovery |
+| 3D Secure (3DS) Required | Payment requires bank OTP/authentication | Route to HITL; notify user to pre-authorize with bank; use virtual card with 3DS enrollment |
+| Automation Total Failure | Multiple retries exhausted | Route to Human-in-the-Loop queue; SLA: 15 minutes; if not fulfilled in 15 min → auto-cancel |
+| Provider | Key Advantage | Pakistan/MVP Suitability | Pricing |
+| --- | --- | --- | --- |
+| Stripe Issuing | Easy integration, well-documented, sandbox testing, inline with Stripe Payments | BEST for MVP — straightforward setup, sandbox available immediately | ~$0.10 per card issued + revenue share on interchange |
+| Lithic (formerly Privacy.com) | Granular MCC locking per card, JIT funding-like control, merchant-URL restrictions | BEST for fraud control — issue card that only works at one specific merchant | $0.10-$0.15 per card + net interchange share |
+| Marqeta | Just-in-Time (JIT) funding — $0 balance card, funds only released when charge is authorized | BEST at scale — prevents any overcharge; webhook-based approval | Enterprise pricing only; requires sales engagement |
+| Local Pakistan Bank (HBL/MCB/UBL) | Issuing under local BIN; regulatory alignment; Raast integration; PKR-native | BEST long-term — requires bank partnership MOU; BIN sponsorship agreement | Negotiated revenue share; typically lower than international |
+| Recommended Progression
+MVP: Stripe Issuing (fastest to integrate, global sandbox available). Scale Phase (6+ months): Migrate to Lithic for MCC-locking fraud control. Long-term: Negotiate BIN sponsorship with HBL or MCB for PKR-native virtual cards and Raast integration. |
+| --- |
+| import stripe
+
+stripe.api_key = "sk_live_..."
+
+def issue_virtual_card_for_order(order: dict) -> dict:
+    """
+    Issue a single-use virtual card for a specific order.
+    Card is locked to exact amount + 5% buffer for tax/shipping variance.
+    """
+    order_amount_cents = int(order['total_price_pkr'] * 100)
+    buffer_amount = int(order_amount_cents * 1.05)  # 5% buffer
+
+    # Create the cardholder (SahulatKar's corporate identity)
+    # In production, use a pre-created cardholder
+    card = stripe.issuing.Card.create(
+        cardholder="ich_sahulatkar_corporate",
+        currency="pkr",  # or "usd" for international
+        type="virtual",
+        spending_controls={
+            "spending_limits": [{
+                "amount": buffer_amount,
+                "interval": "all_time"   # Single-use: one total spend
+            }],
+            # MCC restriction: only allow e-commerce categories
+            "allowed_categories": [
+                "5940", "5942", "5947", "5999", "5300",  # retail
+                "5732", "5734", "5945", "7622"             # electronics, toys, etc.
+            ],
+            "blocked_categories": [
+                "6010", "6011", "6012",  # cash advance / ATM
+                "7995", "7800",          # gambling
+                "5912"                   # drug stores (for fraud prevention)
+            ]
+        },
+        metadata={
+            "sahulatkar_order_id": order['id'],
+            "merchant_url": order['merchant_url'],
+            "user_cnic": order['user_cnic_hash']  # Hashed for privacy
+        }
+    )
+
+    return {
+        "card_id": card.id,
+        "pan": card.number,           # 16-digit card number
+        "expiry_month": card.exp_month,
+        "expiry_year": card.exp_year,
+        "cvv": card.cvc,
+        "amount_limit": buffer_amount / 100,
+        "status": card.status
+    } |
+| --- |
+| async def extract_order_confirmation(page: Page) -> dict:
+    """Extract order ID from confirmation page after successful checkout."""
+    # Wait for confirmation signals
+    confirmation_signals = [
+        'text=Order Confirmed',
+        'text=Thank you for your purchase',
+        'text=Your order #',
+        '[class*="confirmation"]',
+        '[class*="success"]'
+    ]
+    for signal in confirmation_signals:
+        try:
+            await page.wait_for_selector(signal, timeout=10000)
+            break
+        except:
+            continue
+
+    # Extract page content for order ID
+    content = await page.content()
+
+    # Common patterns for order IDs
+    import re
+    patterns = [
+        r'order[#s]+([A-Z0-9-]{6,20})',   # "Order #ABC123"
+        r'confirmation[:s]+([A-Z0-9-]{6,20})',
+        r'#([A-Z0-9]{6,12})',
+        r'order_id["s:=]+([A-Z0-9-]{6,20})'
+    ]
+    merchant_order_id = None
+    for pattern in patterns:
+        match = re.search(pattern, content, re.IGNORECASE)
+        if match:
+            merchant_order_id = match.group(1)
+            break
+
+    screenshot = await page.screenshot(type='jpeg', quality=85)
+    return {
+        "merchant_order_id": merchant_order_id,
+        "confirmation_url": page.url,
+        "screenshot_b64": base64.b64encode(screenshot).decode()
+    } |
+| --- |
+| Service | Coverage | Pricing |
+| --- | --- | --- |
+| AfterShip API | 1,100+ carriers worldwide. DHL, FedEx, UPS, TCS (Pakistan), Leopards Courier, Trax | Free: 50 trackings/month. Essential: $11/month (200). Pro: $119/month (2,000) |
+| TCS API (Pakistan) | Pakistan-specific courier — largest domestic carrier | Free API for business accounts |
+| Leopards Courier API | Pakistan domestic shipping | Free API with Leopards business account |
+| EasyPost | US/global carriers + label generation | Pay-per-shipment; starts at $0.05/API call |
+| Cost Item | Via Rye API | Via Playwright (Own) | Notes |
+| --- | --- | --- | --- |
+| Product Data Fetch | Rs. 6 ($0.02) | Rs. 0 (own server) | Rye charges per fetch; own infra amortized |
+| Checkout Execution | Rs. 15 ($0.05) | Rs. 15-45 (proxy) | Rye flat fee; proxy = ~15-150MB per checkout |
+| Virtual Card Issuance | Rs. 30 ($0.10) | Rs. 30 ($0.10) | Stripe Issuing fee |
+| LLM Token Cost | Rs. 0 (included) | Rs. 3-10 ($0.01) | Groq Llama-3 free tier or Groq paid |
+| CAPTCHA Solving | Rs. 0 (handled by Rye) | Rs. 0.45 ($0.0015) | 2Captcha: $1.50/1000 solves |
+| Infrastructure (K8s) | Rs. 0 | Rs. 6 ($0.02/order) | At 10K orders/month amortized |
+| TOTAL per Order | ~Rs. 51 ($0.17) | ~Rs. 54-101 ($0.18-0.34) |  |
+| Revenue vs Cost
+At a 4% service fee on Rs. 10,000 order = Rs. 400 revenue + Rs. 450 interchange (1.5%). Total revenue = Rs. 850. Total tech cost = Rs. 51-101. Tech margin before loan defaults and processing: Rs. 749-799 per order. The pipeline cost is NOT the constraint — credit default risk and payment processing inbound costs are the main margin drivers. |
+| --- |
+| Component | FREE Options | PAID Options |
+| --- | --- | --- |
+| URL Parsing | Python urllib.parse + requests (free) | N/A — no need to pay for this |
+| JSON-LD Extraction | BeautifulSoup + extruct (both free/open source) | N/A — no need to pay for this |
+| Browser Automation | Playwright (free, Microsoft-maintained) | Browserless.io ($49+/mo) for managed stealth |
+| Stealth Plugins | playwright-stealth, patchright (free/open source) | Kameleo anti-detect browser ($49+/mo) |
+| Product Data API | Rye 30-day free trial; Apify free 5 USD credits | Rye $149/mo; Apify pay-as-you-go |
+| Checkout API | Rye free trial includes checkout | Rye $0.05 per order executed |
+| Residential Proxies | No reliable free proxies for production | Bright Data $5/GB, SmartProxy $4/GB |
+| CAPTCHA Solving | No reliable free solving | 2Captcha $1.50/1000; CapSolver $1/1000 |
+| LLM for Parsing | Groq free tier (generous); Ollama local models | OpenAI GPT-4o-mini ($0.01/1K tokens) |
+| Order Tracking | AfterShip free 50/month; TCS/Leopards free API | AfterShip $11/month for 200 trackings |
+| Microservice | Responsibilities | Technology Stack |
+| --- | --- | --- |
+| Ingestion Service | URL validation, platform detection, structured data extraction (JSON-LD), Rye/Violet API calls | Python + FastAPI, BeautifulSoup, extruct, Rye SDK |
+| Execution Service | Playwright automation, stealth layer, LLM form inference, CAPTCHA solving, HITL queue management | Python + Playwright, playwright-stealth, Groq SDK, Temporal.io orchestration |
+| Financial Service | Virtual card generation, loan ledger, installment scheduling, repayment via Raast/JazzCash | Python + FastAPI, Stripe Issuing SDK, PostgreSQL, Redis |
+| -- Core pipeline database schema
+CREATE TABLE product_extractions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    user_id UUID REFERENCES users(id),
+    raw_url TEXT NOT NULL,
+    canonical_url TEXT NOT NULL,
+    platform VARCHAR(50),             -- AMAZON | SHOPIFY | DARAZ | CUSTOM
+    extraction_method VARCHAR(50),    -- rye_api | violet | json_ld | playwright_llm
+    product_data JSONB NOT NULL,      -- Universal Product Object
+    confidence_score FLOAT,           -- 0-1, LLM confidence
+    extracted_at TIMESTAMP DEFAULT NOW(),
+    status VARCHAR(20) DEFAULT 'pending',  -- pending|confirmed|failed
+    INDEX idx_canonical_url (canonical_url),
+    INDEX idx_platform (platform)
+);
+
+CREATE TABLE checkout_executions (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    extraction_id UUID REFERENCES product_extractions(id),
+    loan_id UUID REFERENCES loans(id),
+    virtual_card_id VARCHAR(100),     -- Stripe Issuing card ID
+    temporal_workflow_id VARCHAR(200),
+    merchant_order_id VARCHAR(100),
+    execution_method VARCHAR(50),     -- rye | playwright | hitl
+    status VARCHAR(30),               -- queued|in_progress|completed|failed|cancelled
+    total_charged DECIMAL(12,2),
+    confirmation_screenshot_url TEXT,
+    error_reason TEXT,
+    created_at TIMESTAMP DEFAULT NOW(),
+    completed_at TIMESTAMP,
+    INDEX idx_loan_id (loan_id),
+    INDEX idx_status (status)
+);
+
+CREATE TABLE tracking_events (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    checkout_id UUID REFERENCES checkout_executions(id),
+    carrier VARCHAR(50),
+    tracking_number VARCHAR(100),
+    event_status VARCHAR(50),         -- shipped|in_transit|out_for_delivery|delivered
+    event_timestamp TIMESTAMP,
+    location TEXT,
+    raw_event JSONB,                  -- Full AfterShip event payload
+    created_at TIMESTAMP DEFAULT NOW()
+); |
+| --- |
+| Final Technical Assessment
+The URL → Product Data → Automated Purchase pipeline is technically feasible with available tools. The Rye API V2 provides the most complete turnkey solution ($149/month base + per-use fees) and is the correct starting point for MVP. Custom Playwright automation adds universal coverage at higher operational cost and complexity. The combination delivers 80%+ automation coverage at an all-in pipeline cost of well under Rs. 100 per transaction — well within the revenue model's acceptable range. |
+| --- |

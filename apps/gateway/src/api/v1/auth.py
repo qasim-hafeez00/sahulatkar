@@ -1,7 +1,6 @@
 import hashlib
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
@@ -113,6 +112,12 @@ async def resend_otp(
     await redis.set(f"sk:auth:token:{otp_token}", raw_payload, settings.OTP_TTL)
     await redis.delete(f"sk:auth:token:{req.otp_token}")
 
+    if settings.NOTIFICATION_SMS_ENABLED:
+        from src.core.http_client import InternalServiceClient
+        await InternalServiceClient.send_otp(
+            phone=phone, otp_code=otp, purpose="registration", expires_in_seconds=settings.OTP_TTL,
+        )
+
     masked_phone = phone[:5] + "******" + phone[-2:] if len(phone) >= 11 else "******"
     return RegisterInitiateResponse(otp_token=otp_token, masked_phone=masked_phone)
 
@@ -221,14 +226,13 @@ async def revoke_all_sessions(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ):
-    from sqlalchemy import update as sql_update
     current_token = None
     auth_header = request.headers.get("Authorization")
     if auth_header and auth_header.startswith("Bearer "):
         current_token = auth_header.split(" ")[1]
-        current_hash = hashlib.sha256(current_token.encode()).hexdigest()
+        hashlib.sha256(current_token.encode()).hexdigest()
     else:
-        current_hash = None
+        pass
 
     sessions = (
         await db.execute(
@@ -320,7 +324,6 @@ async def delete_account(
     db: AsyncSession = Depends(get_db),
     redis: RedisClient = Depends(get_redis),
 ) -> dict:
-    from sqlalchemy import update as sql_update, text
     from sk_shared.security import verify_password
     from sk_shared.models.payment import Loan
 
@@ -343,7 +346,6 @@ async def delete_account(
         )
 
     # Revoke all sessions
-    from sqlalchemy import update
     sessions = (
         await db.execute(
             select(UserSession).where(UserSession.user_id == user.id, UserSession.revoked_at.is_(None))

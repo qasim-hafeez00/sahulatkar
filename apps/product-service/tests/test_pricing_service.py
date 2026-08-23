@@ -1,6 +1,25 @@
 from decimal import Decimal
 
+from src.config import settings
 from src.services.pricing_service import PricingService
+
+
+def test_is_shariah_approved_false_without_configured_reference(monkeypatch):
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_REFERENCE", "")
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_DATE", "")
+    assert PricingService().is_shariah_approved is False
+
+
+def test_is_shariah_approved_true_with_configured_reference_and_date(monkeypatch):
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_REFERENCE", "SB-RES-2026-014")
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_DATE", "2026-08-01")
+    assert PricingService().is_shariah_approved is True
+
+
+def test_is_shariah_approved_false_with_only_reference_no_date(monkeypatch):
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_REFERENCE", "SB-RES-2026-014")
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_DATE", "")
+    assert PricingService().is_shariah_approved is False
 
 
 def test_calculate_offer_for_three_month_plan():

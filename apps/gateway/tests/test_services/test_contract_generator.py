@@ -1,6 +1,5 @@
 import pytest
-from datetime import datetime, timezone
-from sqlalchemy import select
+from datetime import datetime
 from sk_shared.models.kyc import CustomerProfile
 from sk_shared.models.order import Order
 from src.services.contract_generator import ContractGeneratorService

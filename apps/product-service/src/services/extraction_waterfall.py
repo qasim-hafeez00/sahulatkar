@@ -114,8 +114,34 @@ class ExtractionWaterfallService:
         # Respect runtime global threshold if it is stricter than tier default.
         return max(base, tier_default)
 
-    async def extract(self, canonical_url: str, platform: str) -> ExtractionResult:
+    async def extract(self, canonical_url: str, platform: str, scrape_config: dict | None = None) -> ExtractionResult:
         normalized_platform = (platform or "CUSTOM").upper()
+
+        # Social-commerce storefronts (Instagram, etc.) have no structured
+        # product page or checkout to automate — ordering happens via DM
+        # negotiation with the seller. Every automated tier would just waste
+        # an attempt, so route straight to manual/HITL fulfillment instead.
+        if normalized_platform == "SOCIAL_COMMERCE":
+            if settings.FEATURE_HITL_ESCALATION:
+                return ExtractionResult(
+                    status="hitl_required",
+                    method="hitl",
+                    confidence=Decimal("0.000"),
+                    title="",
+                    price=Decimal("0.00"),
+                    error_code="SOCIAL_COMMERCE_MANUAL_ONLY",
+                    error_message="This is a social-commerce storefront — our team will purchase this manually.",
+                )
+            return ExtractionResult(
+                status="failed",
+                method="waterfall",
+                confidence=Decimal("0.000"),
+                title="",
+                price=Decimal("0.00"),
+                error_code="SOCIAL_COMMERCE_MANUAL_ONLY",
+                error_message="Social-commerce storefronts aren't supported for automated purchase.",
+            )
+
         failures: list[str] = []
         # Best price seen from any earlier tier attempt (even one that didn't
         # meet its confidence threshold) — used to sanity-check Tier 3's
@@ -190,7 +216,7 @@ class ExtractionWaterfallService:
             elif tier == "tier2b":
                 candidate = await _run_tier("tier2b", domain, lambda: self._tier2b_html(canonical_url))
             else:
-                candidate = await _run_tier("tier3", domain, lambda: self.run_tier3(canonical_url, platform))
+                candidate = await _run_tier("tier3", domain, lambda: self.run_tier3(canonical_url, platform, scrape_config))
 
             accepted = await _accept_or_none(tier, domain, candidate)
             if accepted is not None:
@@ -217,9 +243,11 @@ class ExtractionWaterfallService:
             error_message=f"All extraction tiers failed: {' | '.join(failures) if failures else 'unknown'}",
         )
 
-    async def run_tier3(self, canonical_url: str, platform: str) -> ExtractionResult:
+    async def run_tier3(self, canonical_url: str, platform: str, scrape_config: dict | None = None) -> ExtractionResult:
         start_time = time.perf_counter()
-        
+        from urllib.parse import urlparse
+        domain = urlparse(canonical_url).netloc.lower().replace("www.", "")
+
         if not settings.FEATURE_GROQ_ENABLED and not settings.FEATURE_OPENAI_FALLBACK:
             res = ExtractionResult(
                 status="failed",
@@ -230,14 +258,14 @@ class ExtractionWaterfallService:
                 error_code="EXTRACTION_FAILED",
                 error_message="Tier3 providers are disabled",
             )
-            EXTRACTION_LATENCY.labels(tier="tier3", status=res.status).observe(time.perf_counter() - start_time)
+            EXTRACTION_LATENCY.labels(tier="tier3", domain=domain, status=res.status).observe(time.perf_counter() - start_time)
             return res
 
         from src.extractors.playwright_agent import PlaywrightExtractionAgent
         agent = PlaywrightExtractionAgent()
-        
+
         try:
-            data = await agent.extract(canonical_url)
+            data = await agent.extract(canonical_url, scrape_config=scrape_config)
             res = ExtractionResult(
                 status="completed",
                 method="playwright_llm",
@@ -254,7 +282,7 @@ class ExtractionWaterfallService:
                 debug_screenshot_b64=data.get("debug_screenshot_b64"),
             )
             res = self._validate_extraction(res)
-            EXTRACTION_LATENCY.labels(tier="tier3", status=res.status).observe(time.perf_counter() - start_time)
+            EXTRACTION_LATENCY.labels(tier="tier3", domain=domain, status=res.status).observe(time.perf_counter() - start_time)
             return res
         except Exception as e:
             res = ExtractionResult(
@@ -266,7 +294,7 @@ class ExtractionWaterfallService:
                 error_code="EXTRACTION_ERROR",
                 error_message=str(e),
             )
-            EXTRACTION_LATENCY.labels(tier="tier3", status=res.status).observe(time.perf_counter() - start_time)
+            EXTRACTION_LATENCY.labels(tier="tier3", domain=domain, status=res.status).observe(time.perf_counter() - start_time)
             return res
 
     async def _tier1_rye(self, canonical_url: str, platform: str) -> ExtractionResult | None:

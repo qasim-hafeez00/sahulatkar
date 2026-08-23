@@ -75,6 +75,21 @@ def test_factory_returns_stripe_adapter():
     assert isinstance(adapter, StripeIssuingAdapter)
 
 
+def test_factory_returns_lithic_adapter():
+    """Factory must return a LithicAdapter for 'lithic' gateway."""
+    from src.adapters.lithic import LithicAdapter
+
+    mock_settings = MagicMock()
+    mock_settings.LITHIC_API_KEY = "test_key"
+    mock_settings.LITHIC_BASE_URL = "https://sandbox.lithic.com/v1"
+    mock_settings.LITHIC_CARD_PROGRAM_TOKEN = "prog_test"
+    mock_settings.FX_PKR_TO_USD_RATE = 0.0036
+    mock_settings.FX_BUFFER_PCT = 2.0
+
+    adapter = GatewayAdapterFactory.get("lithic", settings=mock_settings)
+    assert isinstance(adapter, LithicAdapter)
+
+
 def test_factory_raises_value_error_for_unknown_gateway():
     """Factory must raise ValueError for an unrecognized gateway name."""
     mock_settings = MagicMock()
@@ -166,3 +181,94 @@ def test_stripe_adapter_get_card_propagates_stripe_errors():
         mock_stripe.issuing.Card.retrieve.side_effect = Exception("Stripe API timeout")
         with pytest.raises(Exception, match="Stripe API timeout"):
             adapter.get_card("ic_test_fail")
+
+
+# ── LithicAdapter Unit Tests ──────────────────────────────────────────────────
+# Lithic is the second VCN issuer (gated off by default behind
+# FEATURE_LITHIC_ENABLED — see src/services/vcn.py). These mirror the
+# StripeIssuingAdapter tests above since both implement the same interface.
+
+def test_lithic_adapter_pkr_to_usd_cents_conversion():
+    """Same FX formula as StripeIssuingAdapter — PKR to USD cents with buffer."""
+    from src.adapters.lithic import LithicAdapter
+
+    adapter = LithicAdapter(
+        api_key="test_key",
+        base_url="https://sandbox.lithic.com/v1",
+        card_program_token="prog_test",
+        fx_pkr_to_usd=0.0036,
+        fx_buffer_pct=2.0,
+    )
+    cents = adapter._pkr_to_usd_cents(Decimal("1000.00"))
+    assert cents == 367  # same math as the Stripe adapter test above
+
+
+def test_lithic_adapter_cancel_card_calls_patch_closed():
+    """cancel_card must PATCH the card with state=CLOSED and return True on success."""
+    from src.adapters.lithic import LithicAdapter
+
+    adapter = LithicAdapter(
+        api_key="test_key", base_url="https://sandbox.lithic.com/v1", card_program_token="prog_test"
+    )
+
+    with patch("src.adapters.lithic.httpx") as mock_httpx:
+        mock_httpx.patch.return_value = MagicMock(raise_for_status=MagicMock())
+        result = adapter.cancel_card("card_tok_abc123")
+
+    assert result is True
+    mock_httpx.patch.assert_called_once()
+    call_kwargs = mock_httpx.patch.call_args
+    assert call_kwargs.args[0] == "https://sandbox.lithic.com/v1/cards/card_tok_abc123"
+    assert call_kwargs.kwargs["json"] == {"state": "CLOSED"}
+
+
+def test_lithic_adapter_cancel_card_returns_false_on_error():
+    """cancel_card must return False (not raise) on Lithic API errors, matching
+    StripeIssuingAdapter's contract so callers (VcnExpiryWorker) don't need
+    issuer-specific error handling."""
+    from src.adapters.lithic import LithicAdapter
+
+    adapter = LithicAdapter(
+        api_key="test_key", base_url="https://sandbox.lithic.com/v1", card_program_token="prog_test"
+    )
+
+    with patch("src.adapters.lithic.httpx") as mock_httpx:
+        import httpx as real_httpx
+        mock_httpx.HTTPError = real_httpx.HTTPError
+        mock_httpx.patch.side_effect = real_httpx.HTTPError("Lithic API timeout")
+        result = adapter.cancel_card("card_tok_fail")
+
+    assert result is False
+
+
+def test_lithic_adapter_create_card_sends_merchant_domain_lock():
+    """create_card must include the merchant-domain-lock field when a domain
+    is provided — this is the real advantage Lithic has over Stripe Issuing's
+    MCC-only lock, and the reason this adapter exists at all."""
+    from src.adapters.lithic import LithicAdapter
+
+    adapter = LithicAdapter(
+        api_key="test_key", base_url="https://sandbox.lithic.com/v1", card_program_token="prog_test"
+    )
+
+    fake_card = {"token": "card_tok_new", "exp_month": 12, "exp_year": 2030}
+    fake_secrets = {"pan": "4111111111111111", "cvv": "123"}
+
+    with patch("src.adapters.lithic.httpx") as mock_httpx:
+        create_resp = MagicMock(raise_for_status=MagicMock())
+        create_resp.json.return_value = fake_card
+        secrets_resp = MagicMock(raise_for_status=MagicMock())
+        secrets_resp.json.return_value = fake_secrets
+        mock_httpx.post.return_value = create_resp
+        mock_httpx.get.return_value = secrets_resp
+
+        result = adapter.create_card(
+            cardholder_id="ch_test",
+            authorized_amount_cents=1500,
+            merchant_domain="daraz.pk",
+        )
+
+    assert result["pan"] == "4111111111111111"
+    assert result["issuer_card_id"] == "card_tok_new"
+    post_call_kwargs = mock_httpx.post.call_args
+    assert post_call_kwargs.kwargs["json"]["auth_rule_merchant_lock"] == "daraz.pk"

@@ -43,11 +43,19 @@
   --site-orb-2: rgba(236, 72, 153, 0.14);
   --site-orb-opacity: 1;
   --capture-panel: rgba(15, 23, 42, 0.88);
+  --success: #15803d;
+  --success-bg: rgba(21, 128, 61, 0.1);
+  --danger: #dc2626;
+  --danger-bg: rgba(220, 38, 38, 0.1);
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-success: var(--success);
+  --color-success-bg: var(--success-bg);
+  --color-danger: var(--danger);
+  --color-danger-bg: var(--danger-bg);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -100,6 +108,10 @@
   --site-orb-2: rgba(168, 85, 247, 0.08);
   --site-orb-opacity: 0.85;
   --capture-panel: rgba(12, 10, 9, 0.94);
+  --success: #4ade80;
+  --success-bg: rgba(74, 222, 128, 0.12);
+  --danger: #f87171;
+  --danger-bg: rgba(248, 113, 113, 0.12);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -128,6 +140,10 @@
     --site-orb-2: rgba(168, 85, 247, 0.08);
     --site-orb-opacity: 0.85;
     --capture-panel: rgba(12, 10, 9, 0.94);
+    --success: #4ade80;
+    --success-bg: rgba(74, 222, 128, 0.12);
+    --danger: #f87171;
+    --danger-bg: rgba(248, 113, 113, 0.12);
   }
 }
 

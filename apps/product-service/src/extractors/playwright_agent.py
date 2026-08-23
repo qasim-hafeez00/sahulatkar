@@ -5,11 +5,10 @@ import base64
 import json
 import logging
 from decimal import Decimal
-import re
 
 from src.config import settings
 from src.middleware.metrics import EXTRACTION_PROXY_USED
-from playwright_stealth import stealth
+from playwright_stealth import Stealth
 
 logger = logging.getLogger(__name__)
 
@@ -18,15 +17,24 @@ class PlaywrightExtractionAgent:
         self.groq_api_key = settings.GROQ_API_KEY
         self.openai_api_key = settings.OPENAI_API_KEY
 
-    async def extract(self, url: str) -> dict:
+    async def extract(self, url: str, scrape_config: dict | None = None) -> dict:
         """
         Main entry point for Playwright-based extraction.
         1. Launches Playwright
         2. Navigates to URL with stealth
         3. Extracts distilled DOM
         4. Calls LLM to parse into JSON
+
+        `scrape_config` is the merchant's `merchants.scrape_config` JSONB
+        override (looked up by domain in ExtractionWaterfallService.extract)
+        — e.g. `{"wait_selector": ".pdp-product-title", "content_selector":
+        "[class*='pdp']"}`. When present it takes priority over the hardcoded
+        per-platform heuristics below, which stay as the fallback for
+        merchants without a tuned config yet.
         """
         from playwright.async_api import async_playwright
+
+        scrape_config = scrape_config or {}
 
         async with async_playwright() as p:
             launch_kwargs: dict[str, object] = {"headless": True}
@@ -40,7 +48,7 @@ class PlaywrightExtractionAgent:
             )
             
             page = await context.new_page()
-            await stealth(page)
+            await Stealth().apply_stealth_async(page)
             try:
                 async def _route(route):
                     req = route.request
@@ -57,13 +65,13 @@ class PlaywrightExtractionAgent:
                 
                 await page.goto(url, wait_until="domcontentloaded", timeout=settings.EXTRACTION_TIMEOUT_SECONDS * 1000)
                 platform = self._detect_platform(url)
-                await self._platform_wait(page, platform)
+                await self._platform_wait(page, platform, scrape_config)
 
-                distilled_text = await self._distill_product_text(page)
+                distilled_text = await self._distill_product_text(page, scrape_config)
                 parsed = await self._parse_with_llm(distilled_text, url, platform)
                 if not self._is_valid(parsed):
                     await self._retry_with_scroll(page)
-                    distilled_text = await self._distill_product_text(page)
+                    distilled_text = await self._distill_product_text(page, scrape_config)
                     parsed = await self._parse_with_llm(distilled_text, url, platform)
                     if not self._is_valid(parsed):
                         raise ValueError("EXTRACTION_VALIDATION_FAILED")
@@ -178,8 +186,16 @@ class PlaywrightExtractionAgent:
             logger.error(f"OpenAI call failed: {str(e)}")
             raise
 
-    async def _platform_wait(self, page, platform: str) -> None:
-        if platform == "DARAZ":
+    async def _platform_wait(self, page, platform: str, scrape_config: dict | None = None) -> None:
+        wait_selector = (scrape_config or {}).get("wait_selector")
+        if wait_selector:
+            try:
+                if await page.locator(wait_selector).count():
+                    return
+                return
+            except Exception:
+                pass
+        elif platform == "DARAZ":
             try:
                 if await page.locator(".pdp-product-title").count():
                     return
@@ -195,8 +211,10 @@ class PlaywrightExtractionAgent:
                 pass
         await asyncio.sleep(2)
 
-    async def _distill_product_text(self, page) -> str:
-        selectors = ["main", "article", "[class*='product']", "[class*='item']", "[class*='pdp']", "[class*='detail']"]
+    async def _distill_product_text(self, page, scrape_config: dict | None = None) -> str:
+        content_selector = (scrape_config or {}).get("content_selector")
+        selectors = [content_selector] if content_selector else []
+        selectors += ["main", "article", "[class*='product']", "[class*='item']", "[class*='pdp']", "[class*='detail']"]
         for selector in selectors:
             locator = page.locator(selector)
             if await locator.count():

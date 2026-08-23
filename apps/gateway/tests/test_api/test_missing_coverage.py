@@ -29,7 +29,7 @@ from sqlalchemy import select
 
 from sk_shared.constants import OrderState, RedisNS
 from sk_shared.models.auth import AdminUser, User, UserSession
-from sk_shared.models.contracts import MurabahaContract, WakalahAgreement
+from sk_shared.models.contracts import MurabahaContract
 from sk_shared.models.order import Order
 from sk_shared.models.payment import Installment, Loan
 from sk_shared.models.product import Merchant, Product
@@ -113,8 +113,15 @@ def _uid(token: str) -> str:
 # 1. Password reset full flow
 # ─────────────────────────────────────────────────────────────────────────────
 
-async def test_password_reset_full_flow(client, redis_mock):
+async def test_password_reset_full_flow(client, redis_mock, monkeypatch):
     """Forgot → store OTP → reset → login with new password succeeds."""
+    from unittest.mock import AsyncMock
+    from src.core.http_client import InternalServiceClient
+
+    mock_send = AsyncMock(return_value=True)
+    monkeypatch.setattr(InternalServiceClient, "send_otp", mock_send)
+    monkeypatch.setattr(settings, "NOTIFICATION_SMS_ENABLED", True)
+
     phone = "+923019876543"
     pw_old = "OldPass123!"
     pw_new = "NewPass456@"
@@ -133,6 +140,11 @@ async def test_password_reset_full_flow(client, redis_mock):
     data = resp.json()
     assert "reset_token" in data
     reset_token = data["reset_token"]
+
+    # P1-10: the reset OTP must actually be dispatched for delivery.
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.kwargs["phone"] == phone
+    assert mock_send.await_args.kwargs["purpose"] == "password_reset"
 
     # 2. Simulate OTP delivery: overwrite Redis with known OTP
     await redis_mock.set(f"sk:auth:otp:{phone}:reset", hash_otp("112233"), settings.OTP_TTL)
@@ -220,7 +232,7 @@ async def test_installment_amounts_exclude_down_payment(client, test_user, redis
 
         insts = (
             await s.execute(
-                select(Installment).where(Installment.loan_id == loan.id, Installment.is_down_payment == False,
+                select(Installment).where(Installment.loan_id == loan.id, not Installment.is_down_payment,
                                           Installment.deleted_at.is_(None))
             )
         ).scalars().all()

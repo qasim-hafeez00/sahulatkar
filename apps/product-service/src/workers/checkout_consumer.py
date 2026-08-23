@@ -136,8 +136,21 @@ class CheckoutConsumer:
 
 async def _amain() -> None:
     logging.basicConfig(level=settings.LOG_LEVEL)
-    consumer = CheckoutConsumer()
-    await consumer.run()
+    # CheckoutAgentService._fetch_vcn_credentials calls src.core.http_client's
+    # module-level singleton, only ever initialized by main.py's FastAPI
+    # lifespan (init_http_client()). This worker is a separate standalone
+    # process (see docker-compose's product-service-checkout-worker) that
+    # never runs that lifespan — every real checkout job failed immediately
+    # with "Internal HTTP client is not initialized" before ever reaching
+    # Playwright. Same init/teardown the API does, just done here instead.
+    from src.core.http_client import init_http_client, close_http_client
+
+    await init_http_client()
+    try:
+        consumer = CheckoutConsumer()
+        await consumer.run()
+    finally:
+        await close_http_client()
 
 
 def main() -> None:

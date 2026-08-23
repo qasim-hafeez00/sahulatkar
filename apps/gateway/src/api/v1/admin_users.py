@@ -10,12 +10,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.admin import AdminApprovalRequest
 from sk_shared.models.auth import AdminUser
-from sk_shared.models.credit import CreditLimitHistory, RiskAssessment
-from sk_shared.models.payment import Installment, Loan
 from sk_shared.security import get_password_hash
 from src.core.logging import logger
 
-from src.core.dependencies import get_current_admin, get_current_admin_token_payload, get_db, get_redis, RequirePermission
+from src.core.dependencies import get_current_admin_token_payload, get_db, get_redis, RequirePermission
 from src.core.audit import record_audit_event
 from sk_shared.redis_client import RedisClient
 from sk_shared.constants import QueueName
@@ -276,7 +274,7 @@ async def get_user_financial_summary(
         )
     ).mappings().one_or_none()
     outstanding = float(active_loan_rows["outstanding"] if active_loan_rows else 0)
-    available_credit = max(credit_limit - outstanding, 0.0)
+    max(credit_limit - outstanding, 0.0)
 
     from sk_shared.models.auth import User
     user = await db.scalar(select(User).where(User.id == user_id, User.deleted_at.is_(None)))
@@ -388,7 +386,6 @@ async def get_user_activity(
 
 async def _revoke_all_user_sessions(user_id: int, redis: RedisClient) -> int:
     """Revoke all active Redis session keys for a user. Returns count revoked."""
-    from sk_shared.models.auth import UserSession
     if not hasattr(redis, "redis"):
         return 0
     sessions_key = f"sk:auth:user_sessions:{user_id}"
@@ -833,7 +830,6 @@ async def get_user_devices(
     current_admin: AdminUser = Depends(RequirePermission("read_user")),
     db: AsyncSession = Depends(get_db),
 ) -> dict:
-    from sk_shared.models.auth import UserDevice
     
     q = text("""
         SELECT id, device_token, platform, is_active, last_used_at, created_at

@@ -5,9 +5,10 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "start": "next start",
+    "start": "node .next/standalone/apps/web-customer/server.js",
     "lint": "eslint",
-    "type-check": "tsc --noEmit"
+    "type-check": "tsc --noEmit",
+    "test": "echo \"web-customer: no test suite yet\" && exit 0"
   },
   "dependencies": {
     "@radix-ui/react-dialog": "^1.1.15",

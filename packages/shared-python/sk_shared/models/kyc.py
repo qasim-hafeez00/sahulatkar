@@ -1,11 +1,14 @@
 from datetime import datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 import enum
 
 from sqlalchemy import BigInteger, DateTime, Enum, ForeignKey, Index, Integer, LargeBinary, String, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin, UUIDMixin
+
+if TYPE_CHECKING:
+    from .auth import AdminUser, User
 
 
 class KycStatus(str, enum.Enum):

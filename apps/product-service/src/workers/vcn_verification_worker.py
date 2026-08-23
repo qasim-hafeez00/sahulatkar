@@ -2,7 +2,6 @@ import asyncio
 import json
 import logging
 import signal
-import socket
 from datetime import datetime, timezone
 from uuid import UUID
 
@@ -63,7 +62,7 @@ class VcnVerificationWorker:
         ):
             execution_id = payload.get("execution_id")
             vcn_id = payload.get("vcn_id")
-            order_id = payload.get("order_id")
+            payload.get("order_id")
             correlation_id = payload.get("correlation_id")
 
             if not execution_id or not vcn_id:
@@ -91,7 +90,7 @@ class VcnVerificationWorker:
                     logger.info("Charge verified for execution %s", execution_id)
                     execution.status = "succeeded"
                     execution.step_reached = "order_confirmed"
-                    execution.completed_at = datetime.now(timezone.utc)
+                    execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                     
                     # Update merchant success rate
                     from sk_shared.models.order import Order
@@ -136,7 +135,7 @@ class VcnVerificationWorker:
                         execution.status = "failed"
                         execution.failure_type = "verification_timeout"
                         execution.error_detail = f"VCN verification timed out for VCN {vcn_id}"
-                        execution.completed_at = datetime.now(timezone.utc)
+                        execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
                         
                         # Update merchant success rate
                         from sk_shared.models.order import Order

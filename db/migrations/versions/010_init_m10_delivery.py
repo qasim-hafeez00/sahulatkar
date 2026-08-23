@@ -91,7 +91,10 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
         sa.ForeignKeyConstraint(["shipment_id"], ["shipments.id"], ondelete="CASCADE"),
-        sa.PrimaryKeyConstraint("id"),
+        # TimescaleDB requires the partitioning column (event_time) to be part
+        # of every unique/primary-key constraint before create_hypertable()
+        # below will accept this table.
+        sa.PrimaryKeyConstraint("id", "event_time"),
     )
     op.create_index("ix_tracking_events_shipment_id", "tracking_events", ["shipment_id"], unique=False)
     op.create_index("ix_tracking_events_event_time", "tracking_events", ["event_time"], unique=False)
@@ -103,6 +106,11 @@ def upgrade() -> None:
         BEGIN
             IF EXISTS (SELECT 1 FROM pg_extension WHERE extname = 'timescaledb') THEN
                 PERFORM create_hypertable('tracking_events', 'event_time', if_not_exists => TRUE);
+                ALTER TABLE tracking_events SET (
+                    timescaledb.compress,
+                    timescaledb.compress_segmentby = 'shipment_id',
+                    timescaledb.compress_orderby = 'event_time'
+                );
                 PERFORM add_compression_policy('tracking_events', INTERVAL '7 days', if_not_exists => TRUE);
                 PERFORM add_retention_policy('tracking_events', INTERVAL '2 years', if_not_exists => TRUE);
             END IF;

@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.core.database import get_db
 from src.core.dependencies import RequestContext, get_redis, require_admin_role, require_internal_request
+from src.core.rate_limit import rate_limit_admin_writes
 from src.events.dlq import EventDeadLetterQueue
 from src.schemas.finance import (
     ARAgingResponse,
@@ -470,8 +471,6 @@ async def get_charity_report(
             raise HTTPException(status_code=422, detail="INVALID_PERIOD_FORMAT") from exc
         raise
 
-
-from src.core.rate_limit import rate_limit_admin_writes
 
 @router.post("/admin/finance/charity-disbursement", response_model=CharityDisbursementResponse)
 async def post_charity_disbursement(

@@ -14,11 +14,45 @@ from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.redis_client import RedisClient
 
 from src.core.dependencies import get_db, get_redis, require_service_token
-from src.schemas.products import AgentQueueRequest, AgentQueueResponse
+from src.schemas.products import AgentLatestExecutionResponse, AgentQueueRequest, AgentQueueResponse
 from src.services.checkout import CheckoutAgentService
 
 
 router = APIRouter(prefix="/products/agent", tags=["checkout-agent"])
+
+
+@router.get("/order/{order_id}/latest", response_model=AgentLatestExecutionResponse)
+async def get_latest_execution_for_order(
+    order_id: int,
+    db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
+):
+    """
+    Looks up the most recent checkout-agent execution for an order.
+
+    The Gateway's customer-facing agent-status proxy has only an order_id
+    (from the browser) — the SSE stream endpoint below is keyed by job_id
+    (the PurchaseExecution UUID), so this is the lookup step that bridges
+    the two before the Gateway can start streaming.
+    """
+    execution = await db.scalar(
+        select(PurchaseExecution)
+        .where(PurchaseExecution.order_id == order_id)
+        # Tie-break on id (monotonically increasing) in addition to
+        # created_at — SQLite's CURRENT_TIMESTAMP is only second-precision,
+        # so two executions queued within the same second would otherwise
+        # sort non-deterministically.
+        .order_by(PurchaseExecution.created_at.desc(), PurchaseExecution.id.desc())
+        .limit(1)
+    )
+    if execution is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXECUTION_NOT_FOUND")
+    return AgentLatestExecutionResponse(
+        job_id=execution.uuid,
+        status=execution.status,
+        step_reached=execution.step_reached,
+        merchant_order_id=execution.merchant_order_id,
+    )
 
 
 @router.post("/queue-job", response_model=AgentQueueResponse)

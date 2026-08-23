@@ -15,7 +15,6 @@ Reliability features:
 import asyncio
 import json
 import logging
-from datetime import datetime, timezone
 
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -93,6 +92,27 @@ class OutboxPublisher:
                 logger.info(
                     "Queued VCN issue job from outbox",
                     extra={"event_id": event.id, "order_id": event.payload.get("order_id")},
+                )
+            elif event.event_name == "gateway.payment_confirmed":
+                # P0-01: notify Gateway so it advances Order.status past
+                # CONTRACTS_SIGNED and runs its own saga-compensation logic.
+                # A non-2xx or network failure raises, which falls through to
+                # the same exponential-backoff retry as every other event.
+                import httpx
+                payload = event.payload
+                async with httpx.AsyncClient(timeout=15.0) as client:
+                    resp = await client.post(
+                        f"{settings.GATEWAY_URL}/api/v1/internal/payments/{payload['payment_id']}/confirm",
+                        headers={"X-Internal-Token": settings.INTERNAL_API_TOKEN},
+                        json={
+                            "gateway_txn_id": payload.get("gateway_txn_id", ""),
+                            "status": payload.get("status", "confirmed"),
+                        },
+                    )
+                    resp.raise_for_status()
+                logger.info(
+                    "Notified Gateway of payment confirmation",
+                    extra={"event_id": event.id, "payment_id": payload["payment_id"]},
                 )
             else:
                 # Standard pub/sub event

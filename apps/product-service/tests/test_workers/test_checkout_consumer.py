@@ -1,5 +1,4 @@
 import asyncio
-import json
 from datetime import datetime, timezone, timedelta
 
 import pytest
@@ -12,7 +11,6 @@ from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.constants import QueueName
 
-from src.services.checkout import CheckoutAgentService
 from src.workers.checkout_consumer import CheckoutConsumer
 
 

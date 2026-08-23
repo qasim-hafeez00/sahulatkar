@@ -1,8 +1,11 @@
+from unittest.mock import AsyncMock
+
 import pytest
 from httpx import AsyncClient
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
+from src.core.http_client import InternalServiceClient
 
 pytestmark = pytest.mark.asyncio
 
@@ -20,6 +23,30 @@ async def test_registration_flow_success(client: AsyncClient, redis_mock: RedisC
     # Non-production environments are allowed to surface the OTP for local testing.
     assert data["dev_otp"] is not None
     assert len(data["dev_otp"]) == 6
+
+
+async def test_registration_initiate_dispatches_otp_via_notification_service(client: AsyncClient, redis_mock: RedisClient, monkeypatch):
+    """P1-10: registration OTPs must actually be dispatched for delivery, not
+    just logged/returned as dev_otp — previously nothing called
+    notification-service at all here, so no real user ever received a
+    registration code by SMS.
+    """
+    mock_send = AsyncMock(return_value=True)
+    monkeypatch.setattr(InternalServiceClient, "send_otp", mock_send)
+    monkeypatch.setattr(settings, "NOTIFICATION_SMS_ENABLED", True)
+
+    res = await client.post("/api/v1/auth/register/initiate", json={
+        "phone": "+923001111222",
+        "first_name": "Dispatch",
+        "last_name": "Test",
+    })
+    assert res.status_code == 200
+
+    mock_send.assert_awaited_once()
+    call_kwargs = mock_send.await_args.kwargs
+    assert call_kwargs["phone"] == "+923001111222"
+    assert call_kwargs["purpose"] == "registration"
+    assert len(call_kwargs["otp_code"]) == 6
 
 
 async def test_registration_initiate_does_not_leak_otp_in_production(client: AsyncClient, redis_mock: RedisClient):
@@ -55,7 +82,6 @@ async def test_registration_initiate_does_not_leak_otp_in_production(client: Asy
     assert verify_res_invalid.json()["detail"] == "INVALID_OTP"
 
 async def test_initiate_duplicate_phone(client: AsyncClient, db_setup):
-    from sqlalchemy import insert
     from sk_shared.models.auth import User
     import uuid
     # Let's seed a user directly using TestingSessionLocal inside the test or fixture

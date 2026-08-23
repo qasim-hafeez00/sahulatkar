@@ -5,10 +5,25 @@ export interface OfferPlan {
   profit_rate_pct: number
 }
 
+export interface OfferProductVariant {
+  option_name: string
+  options: Array<{ label: string; value: string; is_available?: boolean }>
+}
+
 export interface OrderOffer {
   status: "pending" | "ready" | "declined" | "extraction_failed"
   order_id: number
-  product?: { id: number; name: string; url: string; price: number }
+  product?: {
+    id: number
+    name: string
+    url: string
+    price: number
+    brand?: string | null
+    image_url?: string | null
+    availability?: "in_stock" | "out_of_stock" | "limited" | "unknown"
+    in_stock?: boolean
+    variants?: OfferProductVariant[]
+  }
   financing?: {
     cost_price: number
     profit_amount: number

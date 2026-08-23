@@ -5,7 +5,6 @@ Proactively polls Stripe Issuing API for card status updates.
 Used as a fallback when webhooks are delayed or lost.
 """
 import logging
-from datetime import datetime, timezone
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.payment import VirtualCard
@@ -24,9 +23,15 @@ class StripePoller:
         )
 
     async def poll_active_vcns(self):
-        """Poll Stripe for status of all 'active' VCNs."""
+        """Poll Stripe for status of all 'active' VCNs issued by Stripe.
+
+        Scoped to issuer == "stripe" so a Lithic-issued card (see
+        adapters/lithic.py, gated behind FEATURE_LITHIC_ENABLED) never gets
+        handed to the Stripe API here — it would just fail with a "no such
+        card" error since the token formats aren't compatible.
+        """
         result = await self.db.execute(
-            select(VirtualCard).where(VirtualCard.status == "active")
+            select(VirtualCard).where(VirtualCard.status == "active", VirtualCard.issuer == "stripe")
         )
         cards = result.scalars().all()
         

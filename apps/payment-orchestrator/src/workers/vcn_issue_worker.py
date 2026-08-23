@@ -87,6 +87,16 @@ class VcnIssueWorker:
                         amount_pkr=Decimal(str(payload.get("amount_pkr", "0"))),
                         merchant_domain=payload.get("merchant_domain"),
                     )
+                    # Live-verified bug: issue_vcn() only flushes (self.db.add +
+                    # await self.db.flush()) — it never commits, on the
+                    # assumption its caller (an HTTP request handler using
+                    # get_db(), which commits after the route returns) does.
+                    # This worker's SessionLocal() context manager does NOT
+                    # auto-commit on exit — without this, the VirtualCard row
+                    # and its vcn.issued outbox event were silently rolled
+                    # back every time, even though this log line said "VCN job
+                    # completed" right after.
+                    await db.commit()
                 logger.info("VCN job completed", extra={"order_id": order_id})
 
             except Exception as exc:

@@ -62,7 +62,7 @@ async def safepay_webhook(
 ):
     body = await request.body()
     signature = request.headers.get("X-Safepay-Signature", "")
-    client = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET)
+    client = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET)
 
     if not client.verify_signature(body, signature):
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="safepay", outcome="invalid_sig").inc()
@@ -85,9 +85,19 @@ async def safepay_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         gateway_txn_id=event.get("gateway_txn_id", ""),
     )
+    # Live-tested bug: this used to pass event["amount_pkr"] — the DOWN
+    # PAYMENT amount just confirmed — as the VCN's authorized amount.
+    # VcnService.issue_vcn() compares amount_pkr against the order's stored
+    # total_amount (see PRICE_DRIFT_EXCEEDED), so a real SafePay/Raast down
+    # payment always failed VCN issuance, retried with backoff, and never
+    # succeeded — the VCN must cover the full merchant purchase price, not
+    # just the down payment. Matches the sync-gateway path in gateway's own
+    # payments.py / payment-orchestrator's payments.py down_payment endpoint,
+    # both of which already correctly use order.total_amount here.
+    order = await service._get_order(int(event["order_id"]))
     await service.queue_issue(
         order_id=int(event["order_id"]),
-        amount_pkr=Decimal(str(event["amount_pkr"])),
+        amount_pkr=Decimal(str(order.total_amount)),
         merchant_domain=event.get("merchant_domain"),
     )
     await db.commit()
@@ -126,9 +136,12 @@ async def jazzcash_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         gateway_txn_id=event.get("gateway_txn_id", ""),
     )
+    # Same PRICE_DRIFT_EXCEEDED bug as the SafePay handler above — VCN amount
+    # must be the order's full total, not the down payment just confirmed.
+    order = await service._get_order(int(event["order_id"]))
     await service.queue_issue(
         order_id=int(event["order_id"]),
-        amount_pkr=Decimal(str(event["amount_pkr"])),
+        amount_pkr=Decimal(str(order.total_amount)),
         merchant_domain=None,
     )
     await db.commit()
@@ -175,9 +188,12 @@ async def raast_webhook(
         amount_pkr=Decimal(str(event["amount_pkr"])),
         gateway_txn_id=event.get("gateway_txn_id", ""),
     )
+    # Same PRICE_DRIFT_EXCEEDED bug as the SafePay handler above — VCN amount
+    # must be the order's full total, not the down payment just confirmed.
+    order = await service._get_order(int(event["order_id"]))
     await service.queue_issue(
         order_id=int(event["order_id"]),
-        amount_pkr=Decimal(str(event["amount_pkr"])),
+        amount_pkr=Decimal(str(order.total_amount)),
         merchant_domain=None,
     )
     await db.commit()
@@ -297,7 +313,7 @@ async def safepay_refund_webhook(
 ):
     body = await request.body()
     signature = request.headers.get("X-Safepay-Signature", "")
-    client = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET)
+    client = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET)
     return await _process_refund_completion_webhook(
         db=db, redis=redis, gateway="safepay", body=body, signature=signature,
         verify_signature=client.verify_signature,

@@ -1,8 +1,7 @@
 import pytest
 import respx
 import httpx
-from unittest.mock import patch, MagicMock
-from src.dispatchers.sms_dispatcher import JazzSMSDispatcher, TwilioSMSDispatcher
+from src.dispatchers.sms_dispatcher import JazzSMSDispatcher
 from src.dispatchers.whatsapp_dispatcher import JazzWhatsAppDispatcher
 from src.dispatchers.push_dispatcher import FCMPushDispatcher
 from src.dispatchers.email_dispatcher import SendGridEmailDispatcher
@@ -88,7 +87,7 @@ async def test_push_dispatcher_no_token_returns_failure():
 
 @respx.mock
 async def test_push_dispatcher_unregistered_token_permanent():
-    respx.post(f"https://fcm.googleapis.com/v1/projects/mock-project/messages:send").mock(
+    respx.post("https://fcm.googleapis.com/v1/projects/mock-project/messages:send").mock(
         return_value=httpx.Response(404, json={"error": {"details": [{"errorCode": "UNREGISTERED"}]}})
     )
     

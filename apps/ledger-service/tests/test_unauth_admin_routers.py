@@ -7,8 +7,6 @@ authentication at all, duplicating functionality already safely exposed under
 in the three routers now enforces the same admin-role gate.
 """
 import pytest
-from datetime import date
-from decimal import Decimal
 
 from src.accounting.accounts import ACCOUNT_CODES
 

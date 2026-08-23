@@ -54,7 +54,14 @@ async def _seed_order(user_id: int) -> Order:
         return order
 
 
-async def test_contracts_happy_path(client, test_user, redis_mock):
+async def test_contracts_happy_path(client, test_user, redis_mock, monkeypatch):
+    from unittest.mock import AsyncMock
+    from src.core.http_client import InternalServiceClient
+
+    mock_send = AsyncMock(return_value=True)
+    monkeypatch.setattr(InternalServiceClient, "send_otp", mock_send)
+    monkeypatch.setattr(settings, "NOTIFICATION_SMS_ENABLED", True)
+
     user, token = test_user
     order = await _seed_order(user.id)
 
@@ -70,6 +77,12 @@ async def test_contracts_happy_path(client, test_user, redis_mock):
     assert isinstance(res_wk["principal_name"], str)
     assert len(res_wk["principal_name"]) > 0
     assert "SAK-WAK-" in res_wk["contract_number"]
+
+    # P1-10: the signing OTP must actually be dispatched for delivery — this
+    # is a HARD GATE flow (no VCN without a signed Murabaha contract), so a
+    # silently-undelivered OTP here blocks the entire order.
+    mock_send.assert_awaited_once()
+    assert mock_send.await_args.kwargs["purpose"] == "contract_sign"
 
     # Updated to use user-scoped OTP key (TASK-12 fix)
     await redis_mock.set(f"{RedisNS.CONTRACT_OTP}:wakalah:{wk_contract_id}:{user.id}", hash_otp("123456"), 180)

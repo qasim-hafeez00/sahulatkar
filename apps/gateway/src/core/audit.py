@@ -45,7 +45,6 @@ async def record_audit_event(
         _logger.error("Failed to record audit event module=%s action=%s: %s", module, action, exc, exc_info=True)
         # Write to Redis dead-letter queue for async retry so compliance records are never silently dropped.
         try:
-            from sk_shared.database import SessionLocal
             from sk_shared.redis_client import get_redis_client
             from src.config import settings
             _dlq_payload = json.dumps({

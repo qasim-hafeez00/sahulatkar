@@ -14,6 +14,9 @@ from src.core.event_listeners import start_event_listener
 from src.core.logging import setup_logging
 from src.core.middleware import RequestIDMiddleware, PrometheusMiddleware
 from src.services.aftership_client import AfterShipClient
+from src.workers.notification_consumer import run_consumer
+from src.workers.reminder_worker import run_reminder_worker
+from src.workers.retry_worker import run_retry_worker
 from src.workers.scheduled_worker import run_scheduled_worker
 
 setup_logging()
@@ -38,6 +41,21 @@ async def lifespan(app: FastAPI):
     scheduled_task = asyncio.create_task(run_scheduled_worker(interval_seconds=60))
     app.state.scheduled_task = scheduled_task
 
+    # Previously only `python -m` entrypoints with nothing (no docker-compose
+    # command, no k8s CronJob/Deployment) ever invoking them — meaning no
+    # notification was ever actually dispatched, and due-date/overdue/retry
+    # sweeps never ran. Wired in-process here, same pattern as scheduled_task.
+    app.state.notification_consumer_shutdown = asyncio.Event()
+    app.state.notification_consumer_task = asyncio.create_task(
+        run_consumer(app.state.notification_consumer_shutdown)
+    )
+    app.state.reminder_task = asyncio.create_task(
+        run_reminder_worker(interval_seconds=settings.REMINDER_WORKER_INTERVAL_SECONDS)
+    )
+    app.state.retry_task = asyncio.create_task(
+        run_retry_worker(interval_seconds=settings.RETRY_WORKER_INTERVAL_SECONDS)
+    )
+
     yield
 
     # Graceful shutdown
@@ -45,6 +63,10 @@ async def lifespan(app: FastAPI):
         listener_task.cancel()
     if hasattr(app.state, "scheduled_task") and not app.state.scheduled_task.done():
         app.state.scheduled_task.cancel()
+    app.state.notification_consumer_shutdown.set()
+    for task in (app.state.notification_consumer_task, app.state.reminder_task, app.state.retry_task):
+        if not task.done():
+            task.cancel()
     await app.state.aftership_client.aclose()
     await app.state.redis.close()
 

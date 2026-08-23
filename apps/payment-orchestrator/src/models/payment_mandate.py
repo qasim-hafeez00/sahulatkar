@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 from typing import Optional
 from decimal import Decimal
 
-from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String, Text, Boolean
+from sqlalchemy import BigInteger, DateTime, Integer, Numeric, String
 from sqlalchemy.orm import Mapped, mapped_column
 
 from sk_shared.models.base import Base, TimestampMixin, UUIDMixin

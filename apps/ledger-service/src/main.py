@@ -10,7 +10,7 @@ from starlette.responses import Response
 from src.api.routes import api_router
 from src.config import settings, validate_critical_settings
 from src.events.listener import run_ledger_event_listener
-from src.core.logging import configure_logging
+from src.core.logging_config import configure_logging
 from src.core.middleware import RequestIDMiddleware
 from sk_shared.redis_client import get_redis_client
 
@@ -75,7 +75,6 @@ async def metrics():
 # Optional OpenTelemetry Integration
 try:
     from opentelemetry.instrumentation.fastapi import FastAPIInstrumentor
-    from opentelemetry.instrumentation.sqlalchemy import SQLAlchemyInstrumentor
     from opentelemetry import trace
     from opentelemetry.sdk.trace import TracerProvider
     
@@ -100,8 +99,3 @@ async def health_check():
         "listener_running": bool(listener_task and not listener_task.done()),
         "watchdog_running": bool(watchdog_task and not watchdog_task.done()),
     }
-
-
-@app.get("/metrics", include_in_schema=False)
-async def metrics() -> Response:
-    return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

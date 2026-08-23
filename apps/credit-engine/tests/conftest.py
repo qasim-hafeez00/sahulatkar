@@ -22,7 +22,6 @@ from src.core.dependencies import get_db, get_redis
 
 import fakeredis.aioredis
 from sk_shared.redis_client import RedisClient
-from sk_shared.models.credit import CreditApplication, RiskAssessment, CreditLimitHistory, BlacklistedEntity, FraudRule, VelocityCheck
 
 
 # The shared `sk_shared.models` package registers every service's tables onto the

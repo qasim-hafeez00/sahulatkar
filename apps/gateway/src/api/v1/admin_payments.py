@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.auth import AdminUser
 from sk_shared.redis_client import RedisClient
 from src.core.audit import record_audit_event
-from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
+from src.core.dependencies import get_db, get_redis, RequirePermission
 
 router = APIRouter(prefix="/admin/payments", tags=["Admin Payments"])
 

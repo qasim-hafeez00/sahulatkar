@@ -77,6 +77,20 @@ spec:
                 secretKeyRef:
                   name: sk-internal-service-token
                   key: internal_api_token
+            # Cluster-internal DNS — used for the gateway.payment_confirmed
+            # outbox callback (src/workers/outbox_publisher.py). Mirrors the
+            # identical GATEWAY_URL wiring in credit-engine's deployment.
+            - name: GATEWAY_URL
+              value: "http://gateway:8000"
+            # Public internet-facing URL — used ONLY as the callback_url handed
+            # to JazzCash/SafePay/Raast so THEY can reach Gateway's webhook
+            # ingress (src/workers/payment_initiate_consumer.py). Must never be
+            # the cluster-internal GATEWAY_URL above: vendors can't route to it.
+            - name: GATEWAY_PUBLIC_URL
+              valueFrom:
+                configMapKeyRef:
+                  name: sk-app-config
+                  key: gateway_public_url
           resources:
             requests:
               cpu: 100m

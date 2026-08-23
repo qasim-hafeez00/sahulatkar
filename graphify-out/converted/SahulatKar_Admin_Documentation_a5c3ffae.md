@@ -1,0 +1,941 @@
+<!-- converted from SahulatKar_Admin_Documentation.docx -->
+
+
+SahulatKar
+BNPL Platform
+Complete Admin Operations & Management System
+
+Comprehensive Research & Design Documentation
+Version 1.0  |  February 2026
+
+CONFIDENTIAL — INTERNAL USE ONLY
+
+# Executive Summary
+SahulatKar is a Shariah-compliant, vendor-agnostic Buy Now Pay Later (BNPL) platform built for the Pakistani market. Unlike conventional BNPL solutions, SahulatKar operates through AI-powered browser automation agents that purchase products on behalf of users from any online store, using Virtual Card Numbers (VCNs) funded by the platform — structured as Murabaha contracts.
+
+This document provides the complete specification for the SahulatKar Admin Operations & Management System — the internal dashboard used by the SahulatKar team to operate, monitor, and scale the business. It covers 20 core admin modules derived from competitive analysis of KalPay (Pakistan), Zilch (UK), Klarna (Sweden), Affirm (USA), Tabby (UAE), and Tamara (Saudi Arabia).
+
+### Platform Architecture Overview
+
+### Core Admin Modules at a Glance
+
+# Module 1: Dashboard Home — Executive Command Center
+The Dashboard is the first screen admins see upon login. It must convey the current health of the entire business in under 10 seconds.
+
+## 1.1 Real-Time Business KPIs
+The top section displays eight primary KPIs refreshed every 60 seconds, with trend indicators versus the previous period. Color coding follows a traffic-light convention:
+- Green (↑ positive trend or below threshold)
+- Yellow (approaching threshold — caution)
+- Red (threshold breached — immediate action required)
+
+
+
+## 1.2 Interactive Charts
+Chart 1: GMV Trend (Line Chart — Last 30 Days)
+Shows daily GMV with 7-day moving average overlay. Enables quick identification of weekday vs weekend patterns and the impact of marketing campaigns.
+Chart 2: Order Funnel (Funnel Chart)
+Visualizes the conversion from URL Paste → Product Extract → Credit Check → Payment → Purchase Completion. Drop-off percentage shown at each stage.
+Chart 3: Revenue Breakdown (Stacked Area Chart)
+Three revenue streams stacked: Affiliate Commissions (target 60%), Interchange Revenue (30%), and Consumer Fees (10%). Tracks mix shift over time.
+Chart 4: Payment Status Distribution (Donut Chart)
+Real-time split of: On-Time (green), Pending (yellow), Overdue 1–7d (orange), Overdue 8–30d (red), Defaulted (dark red).
+Chart 5: User Acquisition by Channel (Bar Chart)
+Weekly new user registrations broken down by acquisition channel: Instagram, Google, Referral, Organic, Facebook, TikTok, Influencer.
+
+## 1.3 Action Center & Alerts
+Below the charts, an Action Center surfaces actionable items requiring immediate attention, prioritized by business impact:
+
+## 1.4 Quick Actions Panel
+A toolbar of one-click shortcuts for the most common admin tasks, visible at the bottom of the dashboard:
+- Create User — Manually onboard a customer
+- Place Order — Create a manual order on behalf of a user
+- Adjust Credit Limit — Quick access to credit modification
+- Process Refund — Initiate refund workflow
+- Generate Report — Launch the report builder
+- Send Announcement — Broadcast message to all or filtered users
+
+## 1.5 Date Range & Filtering
+All dashboard data responds to a global date-range picker (top-right): Today, Yesterday, Last 7 Days, Last 30 Days, This Month, Last Month, Custom Range. Changing the range updates all KPIs, charts, and alerts simultaneously.
+
+# Module 2: User Management
+The User Management module provides complete control over customer accounts — from initial onboarding through lifecycle management, credit decisions, and account closure.
+
+## 2.1 User Search & Advanced Filtering
+The search bar supports multi-field lookup: Name, Email, Phone Number (+92 format), CNIC (13-digit format), and User ID. Results appear in real time as the admin types (debounced at 300ms).
+
+### Advanced Filter Panel
+
+## 2.2 User List Table
+Results are displayed in a paginated table (50 records per page, configurable to 25/50/100). Columns are sortable and hideable. Key columns:
+
+## 2.3 User 360° Profile View
+### Personal Information Tab
+Displays all identity and contact data collected during onboarding. Verified fields show a checkmark badge. Admins with appropriate permissions can edit fields, with changes logged to the audit trail.
+- Full Name, CNIC (with document preview button), Date of Birth, Age
+- Email (verified), Primary Phone, Alternate Phone
+- Residential Address with utility bill proof link
+- Employment details: Employer name, job title, monthly income, verification method
+- Bank Account: Masked number, bank name, verification status
+- Registration date, last login time, device model, last IP location
+
+### Financial Overview Tab
+The financial tab is the most-used section for operations and credit teams:
+- Credit Limit: Current approved limit with Adjust Limit action button
+- Available Credit vs. Used Credit with visual utilization gauge
+- Risk Score: Current score (out of 850), rating label, and last calculation date
+- Risk Factor Breakdown: Which factors are positive and which are dragging the score
+- Lifetime Metrics: Total orders, total GMV, total paid, outstanding balance
+- Payment History: On-time %, late payments count, defaults count
+- Projected Lifetime Value (LTV) based on cohort behavior modeling
+
+### Orders Tab
+A mini order table embedded in the user profile showing all orders (latest first). Clicking any order opens the full order detail view. Shows: Order ID, date, product, amount, status.
+
+### Payments Tab
+All installments linked to the user, showing due date, amount, payment method, gateway reference, and status. Filter by: Paid, Pending, Late, Failed.
+
+### Activity Log Tab
+Chronological log of all user-facing events: logins, KYC steps, credit checks, orders placed, payments made, support contacts. Also shows internal admin actions taken on the account (with admin name).
+
+## 2.4 Admin Actions on User Accounts
+### Credit Limit Adjustment
+A modal form that requires: new limit amount, reason code (dropdown with 6 predefined reasons + free text), internal notes, and indication of whether manager approval is required (auto-triggered for limits above PKR 100,000).
+
+### Account Suspension
+A structured suspension workflow collects: reason code (fraud, multiple late payments, user-requested, investigation, identity failure), whether to block new orders only or also freeze existing, user notification preference (email/SMS with template selection), and suspension duration (indefinite or temporary).
+
+### Account Closure
+Closing an account requires confirming: zero outstanding balance, no active orders, user's written consent (if applicable). A 30-day cooling-off period can be enforced. Data is anonymized rather than deleted due to 7-year financial record retention requirements.
+
+## 2.5 Bulk User Operations
+When multiple users are selected from the list, a bulk operations panel appears supporting: Send Message, Adjust Credit Limits (batch), Change Status, Add/Remove Tags, Export Data, and Generate Segment Report.
+
+# Module 3: Order Management
+This module manages the full lifecycle of every purchase: from URL submission through AI-agent checkout, delivery, and completion — including the Human-in-the-Loop (HITL) queue for automation failures.
+
+## 3.1 Order Status Pipeline
+Every order passes through defined stages. The order status determines which queue it appears in and what actions are available:
+
+## 3.2 Order Dashboard Summary
+Status cards at the top of the order management page show real-time counts:
+
+## 3.3 Order List & Filtering
+The order list supports multi-dimensional filtering enabling operations teams to quickly isolate the orders they need to act on:
+- Status filter: Any single or multiple statuses
+- Date range: Order creation date
+- Amount range: Minimum and maximum order value
+- Customer: Search by user name, ID, or phone
+- Merchant: Filter by known merchant domain
+- City: Delivery destination city
+- Issue type: Out of stock, payment failure, delivery delay, etc.
+- Payment plan: Pay in 3 vs Pay in 4
+
+## 3.4 Order Detail View
+### Overview Panel
+Shows all order metadata in a structured layout: Order ID, creation timestamp, customer details (with profile link), product information (title, image, price, variant), Murabaha markup breakdown, total financed amount, and delivery address.
+
+### Purchase Execution Timeline
+A chronological timeline shows every automation step with timestamps and status icons:
+- User submitted URL → Product extracted → Credit check passed → Down payment collected → VCN issued → Purchase bot dispatched → Checkout automation → Merchant confirmation → Tracking number received
+Each timeline item shows duration taken and any error messages. For failed steps, the error log is expandable for technical debugging.
+
+### Payment Plan Panel
+Shows all installments: due dates, amounts, collection status, and payment method. Links to each individual payment record.
+
+### Delivery Tracking Panel
+Live tracking from integrated couriers (TCS, Leopards, PostEx). Shows current location, estimated delivery date, delivery events history. Admins can manually update tracking number if courier changes.
+
+### Communication Log
+All automated and manual messages sent to the customer regarding this order — SMS, email, push notifications — with content and delivery status.
+
+## 3.5 HITL (Human-in-the-Loop) Queue
+When the AI purchase agent fails after three attempts, the order is escalated to the HITL queue. The queue is prioritized by urgency (time since customer paid, order value, customer tier):
+Common HITL Scenarios and Resolution Workflows
+
+## 3.6 Manual Order Creation
+Admins can create orders on behalf of users — useful for phone-in orders, VIP customers, or when a user cannot access the app. The form includes: customer search, product URL (with auto-extract), manual price entry, delivery address selection, payment plan choice, and payment collection method (online or manual).
+
+# Module 4: Payment Operations
+Payment Operations is the financial heartbeat of SahulatKar — tracking every rupee collected, identifying failures, managing overdue accounts, and maintaining accurate settlement records.
+
+## 4.1 Daily Collections Dashboard
+
+## 4.2 Overdue Aging Buckets
+Overdue payments are segmented into aging buckets for collections prioritization. Each bucket triggers a different collections strategy:
+
+## 4.3 Payment Gateway Reconciliation
+Daily reconciliation ensures amounts collected match gateway settlements. The reconciliation module compares our internal payment records against settlement files from each gateway:
+### Reconciliation Flow
+- Generate expected collections report from our system (all payments marked as successful today)
+- Import gateway settlement report (Safepay, JazzCash, EasyPaisa each provide settlement files via API or SFTP)
+- Automated matching: Payment ID vs Gateway Reference Number
+- Discrepancy detection: Flag any unmatched items on either side
+- Manual resolution queue for discrepancies
+- Net settlement tracking: Amount expected vs amount received (with T+1 or T+2 lag)
+
+
+## 4.4 Manual Payment Recording
+For payments received outside digital channels (bank branch deposits, office cash collection), admins can manually record payments with: customer selection, installment selection, amount, payment date, payment method, reference number, and proof-of-payment upload. A receipt is automatically generated and sent to the customer.
+
+## 4.5 Payment Retry Logic
+Failed auto-payments are retried according to a configurable retry schedule designed to maximize collection without irritating customers:
+- Attempt 1: Original due date at 9:00 AM
+- Attempt 2: Same day at 6:00 PM (if morning fails)
+- Attempt 3: Next day at 9:00 AM
+- Attempt 4: 2 days after due date at noon
+After 4 failed attempts, the account is flagged for manual collections outreach.
+
+## 4.6 Payment Arrangement / Restructuring
+For customers facing genuine financial hardship, admins (with manager approval) can offer payment arrangements:
+Extended Payment Plan
+Splits the outstanding balance into smaller installments over a longer period. Shariah compliance requires the new schedule be documented as an amendment to the original Murabaha contract.
+Settlement Offer
+In late-stage collections (31+ days overdue), a goodwill partial waiver can be offered — typically 5–15% of outstanding balance — to secure immediate payment of the remainder.
+Payment Holiday
+A temporary pause of 7–14 days on installments, during which no late fees accrue. Offered once per user per year as a goodwill gesture for good-standing accounts facing a temporary setback.
+
+Note: All payment arrangements involving any amount modification must be reviewed by the Shariah Compliance team before being offered, to ensure no riba (interest) is inadvertently charged or forgiven in a non-compliant manner.
+
+# Module 5: Risk & Fraud Management
+Risk management is fundamental to SahulatKar's financial viability. The goal is to minimize credit losses and fraud while maintaining approval rates that support business growth.
+
+## 5.1 Risk Dashboard Overview
+
+
+## 5.2 Fraud Detection Signals
+SahulatKar's fraud detection engine evaluates every transaction across multiple signal categories. Each signal contributes to a composite fraud score (0–1000):
+
+## 5.3 Fraud Alert Queue
+Alerts are generated when a transaction's fraud score exceeds the configured threshold (default: 700/1000 triggers manual review; 850/1000 triggers auto-block). The queue shows:
+- Fraud score with score breakdown by category
+- List of triggered fraud signals with severity
+- Recommended action (auto-generated based on score and signal pattern)
+- User profile summary for quick context
+- One-click actions: Block User, Request Additional Documents, Approve with Override, Escalate to Senior Analyst
+
+## 5.4 Manual Underwriting Queue
+Credit applications that fall in the 'borderline' range (score 600–699) are routed to the manual underwriting queue. Underwriters review a structured dossier for each applicant:
+Underwriting Dossier Contents
+- Identity verification results with confidence scores
+- Employment verification: Employer name, duration, income vs stated amount
+- Bank account analysis: Account age, average balance, deposit regularity, NSF (insufficient funds) events
+- Existing debt obligations: Known credit cards, personal loans, other BNPL
+- Calculated debt-to-income ratio vs policy threshold
+- Positive factors: Length of bank relationship, savings balance, payment history on existing obligations
+- AI recommendation: Approve at full limit, approve at reduced limit, request more information, or decline
+
+## 5.5 Credit Policy Configuration
+The Risk Configuration panel allows the credit risk team (with appropriate permissions) to adjust policy parameters without code changes:
+
+## 5.6 Blacklist & Whitelist Management
+The platform maintains blacklists at multiple entity levels: CNIC numbers, phone numbers, email addresses, device fingerprints, IP ranges, and merchant domains. Whitelist entries bypass certain fraud rules for trusted entities (e.g., employees, VIP customers).
+Blacklist Sources
+- Internal: Confirmed fraud cases, repeated defaults, suspicious activity
+- Cross-industry: Shared fraud databases (where available in Pakistan)
+- Self-reported: User or merchant reported issues
+
+# Module 6: Financial Operations & Reporting
+Financial Operations provides complete visibility into SahulatKar's P&L, revenue streams, credit losses, and Shariah-compliant accounting — supporting both internal management and regulatory reporting.
+
+## 6.1 Revenue Architecture
+SahulatKar generates revenue through three primary streams:
+
+## 6.2 P&L Dashboard
+The monthly P&L dashboard tracks all revenue and costs, producing a net income figure:
+### Revenue Summary (January 2026 — Example)
+
+## 6.3 Credit Loss Management
+Credit losses are tracked and provisioned in accordance with IFRS 9 principles, adapted for SahulatKar's Murabaha structure:
+
+## 6.4 Shariah Compliance Financial Reports
+SahulatKar operates exclusively under Murabaha contracts. The Shariah financial report, generated quarterly for the Shariah Advisory Board, documents:
+Murabaha Contract Compliance Metrics
+- Total Murabaha contracts active, by month of issuance
+- Average markup rate (profit rate) across all contracts
+- Confirmation that ownership transfer documentation is complete for 100% of contracts
+- Returns and contract reversals processed within policy
+
+Prohibited Items Blocking
+- All product URLs are categorized before processing. Blocked categories include alcohol, tobacco, gambling, interest-bearing products, adult content, and weapons.
+- Monthly report shows: number of transactions blocked by category, any cases requiring manual review.
+
+Late Fee Charity Disposition
+- Late fees are not retained as income (riba concern). They are collected and donated in full to a designated charity (e.g., Edhi Foundation).
+- Monthly charity donation receipt and certificate are stored in the Document Management module.
+
+## 6.5 FBR Tax Reporting
+SahulatKar, as a financial services provider, has specific tax obligations:
+- Sales Tax: Financial services are generally exempt from GST under the Federal Excise Act, however the platform should maintain detailed records for auditor review.
+- Income Tax: Corporate income tax at the applicable rate on net profits, filed quarterly with FBR via the IRIS portal.
+- Withholding Tax: 10% WHT on payments to vendors and contractors above PKR 25,000.
+- The admin module auto-generates tax data summaries for accountants to use in filing.
+
+# Module 7: Customer Support & Ticket Management
+Customer Support is the trust interface between SahulatKar and its users. Fast, empathetic resolution of issues directly impacts retention, NPS scores, and default rates.
+
+## 7.1 Support Dashboard Metrics
+
+## 7.2 Ticket Categories & SLA Targets
+
+## 7.3 Ticket Detail View — Customer 360
+The ticket detail screen is designed as a split view: the conversation thread on the left, customer context panel on the right. This enables agents to understand the customer's full situation without switching screens.
+### Customer Context Panel Contents
+- Customer profile summary: Name, phone, member since, customer satisfaction score
+- Current orders linked to this ticket: Order ID, product, status, payment due
+- Recent payment history: Last 5 installments with status
+- Recent platform activity: Last 5 events (logins, orders, payments)
+- Previous support tickets: History with resolution notes
+- Suggested actions: Context-aware buttons based on ticket category (e.g., 'Force Payment Sync' for payment issues)
+
+## 7.4 AI-Powered First-Response Chatbot
+An AI chatbot handles initial customer contact, resolving straightforward queries without agent involvement:
+### Chatbot Capability Matrix
+
+### Escalation Triggers
+The chatbot escalates to a human agent when any of the following occur:
+- Customer sentiment detection: Negative sentiment score below -0.6 (very angry or distressed)
+- Keyword triggers: 'urgent', 'fraud', 'lawyer', 'complaint', 'FBR', 'block', and Urdu equivalents
+- Unresolved after 3 exchanges with the bot
+- Customer explicitly requests a human agent
+- Issue type is in the 'always-escalate' category (refunds, suspensions, legal threats)
+
+## 7.5 Canned Responses Library
+A library of pre-written responses in both English and Urdu for the most common scenarios. Responses include dynamic variables ({CUSTOMER_NAME}, {AMOUNT}, {ORDER_ID}, {PAYMENT_METHOD}) that auto-populate from the ticket context. Agents can edit before sending.
+
+## 7.6 CSAT & Agent Performance
+After ticket resolution, a one-question CSAT survey is sent to the customer (SMS or in-app): 'How would you rate your support experience? 1–5 stars.' Responses are tied to the specific agent and ticket for performance tracking. Agents with CSAT below 4.0 receive coaching notifications; those below 3.5 trigger management escalation.
+
+# Module 8: Compliance & Audit
+Compliance management covers KYC verification, SBP/SECP/FBR regulatory reporting, Shariah compliance monitoring, data privacy, and complete audit trails — ensuring SahulatKar operates within all applicable legal and religious frameworks.
+
+## 8.1 KYC Verification Queue
+KYC (Know Your Customer) verification uses a combination of automated AI verification (handling ~87% of cases) and manual review for borderline cases. The automated pipeline:
+- CNIC front and back image uploaded by user
+- OCR extracts CNIC number, name, date of birth, expiry
+- NADRA API call to verify CNIC authenticity and name match
+- Selfie captured in-app; facial recognition compared to CNIC photo
+- Liveness detection to prevent photo spoofing
+- Address proof document uploaded and verified
+- Auto-approve if all checks pass above threshold; route to manual queue if borderline
+
+### KYC Manual Review Criteria
+- Facial recognition confidence below 80% threshold — most common manual review trigger
+- NADRA name mismatch between 10–20% (possible nickname or transliteration variance)
+- Expired CNIC (user must renew before onboarding)
+- Address proof document older than 90 days
+- Suspected document tampering detected by AI image analysis
+- High-risk nationality flag or sanctioned entity watchlist match
+
+## 8.2 Regulatory Reporting Calendar
+
+## 8.3 Shariah Compliance Monitoring
+### Prohibited Items Blocking
+Before any product URL is processed, the product categorization engine checks it against a blocked categories list. Admin can manage this list:
+- Alcohol and alcohol-related products
+- Tobacco and nicotine products
+- Gambling, lottery, and games of chance
+- Interest-bearing financial instruments
+- Adult content and entertainment
+- Non-halal food products (where identifiable)
+- Weapons and ammunition (consumer market)
+
+### Murabaha Contract Integrity
+The compliance module continuously monitors that all active Murabaha contracts remain valid:
+- Ownership transfer documentation completed before installment billing begins
+- Markup (profit rate) disclosed upfront and not changed post-agreement
+- No interest calculated on overdue amounts — only flat late fees (donated to charity)
+- Digital signature validity checked monthly
+- Product delivery confirmed before final installment becomes due
+
+## 8.4 Audit Trail Viewer
+Every admin action is logged to an immutable audit trail. The viewer supports filtering by:
+- Date range and time
+- Admin user who performed the action
+- Action type: Create, Read (sensitive), Update, Delete, Approve, Reject, Override
+- Entity affected: User, Order, Payment, Setting, Role
+- Severity: Info, Warning, Critical
+Critical actions (user deletion, large credit limit increases, risk rule changes, data exports) require a secondary confirmation and generate an immediate alert to the Super Admin.
+
+## 8.5 Data Privacy Management
+SahulatKar adheres to data minimization and user rights principles:
+User Data Requests
+- Data Download (Right to Access): Generate a JSON/PDF package of all user data within 7 days
+- Data Correction: User can request correction of inaccurate personal data via in-app form
+- Account Deletion (Right to Erasure): For users with no outstanding balance — data anonymized (not deleted) per 7-year financial retention requirements
+- Marketing Opt-out: Immediate removal from all marketing lists, within 24 hours
+
+# Module 9: Analytics & Business Intelligence
+The Analytics module transforms raw operational data into strategic insights — enabling data-driven decisions on credit policy, marketing spend, product features, and geographic expansion.
+
+## 9.1 Executive BI Dashboard
+A high-level view designed for the CEO and CFO, showing the metrics that define business health:
+
+## 9.2 Cohort Analysis
+Cohort analysis tracks how groups of users acquired in the same month behave over time. Two critical cohort reports:
+### Retention Cohort (% Making Repeat Purchase)
+Shows the % of users from each registration cohort who make at least one additional purchase in each subsequent month. A healthy BNPL platform should see Month 1 retention above 40% and Month 6 retention above 20%.
+
+### Lifetime Value (LTV) Cohort
+Tracks cumulative revenue per user from each cohort month. Shows the payback period for acquisition costs — critical for validating marketing ROI. Target: Payback of CAC within 3 months of first purchase.
+
+## 9.3 Conversion Funnel Analytics
+### User Acquisition Funnel
+
+### Order Completion Funnel
+Tracks what happens after a user decides to make a purchase — from URL paste to completed checkout:
+- URL Pasted: 3,500 attempts (100%)
+- Product Successfully Extracted: 3,185 (91%) — 9% failure rate needs improvement
+- Variants Selected by User: 2,994 (86%)
+- Payment Submitted: 2,635 (75%)
+- Purchase Completed by Bot: 2,503 (72%) — overall URL-to-purchase conversion
+
+## 9.4 Geographic Analytics
+Performance broken down by city/province reveals expansion opportunities and risk concentrations:
+
+## 9.5 Custom Report Builder
+A self-service report builder allows any team member (with reporting permissions) to create ad-hoc analyses without involving the data team:
+- Data sources: Users, Orders, Payments, Revenue, Support Tickets (selectable)
+- Metrics: Count, Sum, Average, Median, Percentile, Growth % vs prior period
+- Filters: Date range, city, user segment, product category, merchant, risk tier
+- Grouping: By day/week/month, by city, by category, by cohort
+- Visualization: Table, Line Chart, Bar Chart, Pie/Donut, Funnel, Heatmap
+- Export: Excel (.xlsx), PDF, CSV, Google Sheets integration
+- Scheduling: One-time or recurring (daily/weekly/monthly) with email distribution list
+
+# Module 10: Merchant & Partner Management
+Partner management tracks affiliate relationships, commission earnings, and API integrations with merchants — one of SahulatKar's primary revenue drivers (60% of revenue comes from affiliate commissions).
+
+## 10.1 Partner Typology
+
+## 10.2 Partner Performance Metrics
+Each partner has a dedicated performance dashboard tracking:
+- Orders volume (30-day rolling, monthly, quarterly)
+- GMV generated through this partner
+- Average Order Value vs platform average
+- Return rate (affects commission — returns are deducted)
+- Default rate of orders from this merchant (high-default merchants may indicate product quality issues)
+- Commission earned and commission payout status
+- API integration health (if direct partner): success rate, response time, last sync
+
+## 10.3 Partner Onboarding Workflow
+New merchant partnerships go through a structured 5-step onboarding process:
+- Application Submitted: Business name, website, category, contact person
+- Business Verification: NTN check via FBR, SECP registration, bank account verification, website quality assessment, reputation check (Google reviews, social proof)
+- Contract Negotiation: Commission rate, payment terms (Net 15/30/60), minimum order volume, returns policy
+- Technical Integration: Affiliate link generation (for affiliate type) or API credential exchange (for direct type), webhook configuration, test order processing
+- Go Live: Integration health check, first order monitoring, performance review after 30 days
+
+## 10.4 Commission Tracking & Payouts
+Commission tracking occurs at two levels: real-time accrual (when an order is delivered and accepted) and periodic payout (per contract terms, typically Net 30). The commission dashboard shows:
+- Commissions accrued this period per partner
+- Commissions pending (orders completed but not yet in settlement window)
+- Commissions paid out (history with bank transfer references)
+- Deductions: Returns, cancellations, disputed orders
+- Net payable: Final amount after deductions
+
+# Module 12: Team & Access Management
+Strict access control ensures that team members can only access data and perform actions within their authorized scope — protecting customer data and reducing operational errors.
+
+## 12.1 Role Hierarchy
+
+## 12.2 Permission Granularity
+Permissions are defined at field level for sensitive operations. Examples:
+- Support agents can VIEW user CNIC status (verified/not verified) but CANNOT view the actual CNIC number
+- Operations managers can EDIT delivery address on an order but CANNOT edit the payment amount
+- Finance analysts can VIEW all payment records but CANNOT manually mark a payment as received
+- Credit analysts can UPDATE credit limits within a defined range but require manager approval above PKR 100,000
+
+## 12.3 Multi-Factor Authentication (MFA)
+MFA is mandatory for all admin accounts. Supported second factors:
+- TOTP (Time-based One-Time Password): Google Authenticator, Authy
+- SMS OTP: Sent to registered phone number
+- Email OTP: For low-security-clearance roles
+Super Admin accounts require TOTP — SMS OTP is insufficient due to SIM-swap risk.
+
+## 12.4 Session Security
+- Automatic session timeout: 2 hours of inactivity (configurable by role — support agents may require 8 hours for shift work)
+- Concurrent session limit: 1 active session per admin user (new login terminates old session)
+- IP allowlisting option for high-security roles (office IP only for finance and super admin)
+- All sessions logged with IP, device, location, duration
+
+# Module 13: System Settings & Configuration
+System Settings allows authorized admins to configure the platform's operational parameters — payment plans, credit rules, notification templates, and third-party integrations — without requiring code changes.
+
+## 13.1 Payment Plan Configuration
+Admins can configure available payment plans, their terms, and associated Murabaha markup rates:
+
+## 13.2 Fee Structure Configuration
+
+## 13.3 Third-Party Integration Management
+
+# Pakistan Market-Specific Requirements
+SahulatKar operates exclusively in Pakistan and must account for the unique regulatory environment, payment infrastructure, consumer behaviors, and Shariah compliance requirements of this market.
+
+## Regulatory Landscape
+### State Bank of Pakistan (SBP)
+SBP regulates consumer financing under the Consumer Protection Guidelines and the Non-Bank Finance Companies (NBFC) Regulations. Key requirements for SahulatKar:
+- Registration as a 'Non-Banking Finance Company' or partnership with a licensed NBFC
+- Monthly Return on Consumer Financing (Form RCD-1) — due by 5th of following month
+- Maximum Annual Percentage Rate (APR) guidelines — SahulatKar's Murabaha markup must be structured to comply
+- Customer grievance redressal mechanism — mandatory complaint handling process within 30 days
+- Credit information sharing — SBP mandates reporting to the Credit Information Bureau (CIB)
+
+### SECP (Securities & Exchange Commission of Pakistan)
+If SahulatKar operates as an NBFC, SECP licensing is required. If partnering with a licensed NBFC, SECP still regulates the business conduct:
+- Annual NBFC Return filing
+- Minimum capital requirements (PKR 200 million for full NBFC license)
+- Corporate governance requirements: board composition, audit committee
+- Investment restrictions on NBFC assets
+
+### FMU (Financial Monitoring Unit)
+Anti-Money Laundering (AML) and Counter-Financing of Terrorism (CFT) obligations:
+- Customer Due Diligence (CDD) — KYC requirements are legally mandated
+- Enhanced Due Diligence (EDD) for high-risk customers
+- Suspicious Transaction Reports (STR) within 7 working days of suspicion
+- Record retention: All KYC and transaction records for 10 years
+
+## Payment Infrastructure
+### Interoperability
+Pakistan's payment ecosystem is fragmented but rapidly integrating. SahulatKar must support:
+- JazzCash: ~20M+ wallets — primary payment method for many users
+- EasyPaisa: ~15M+ wallets — second largest mobile wallet
+- HBL, Meezan, UBL, Allied Bank: Major commercial banks via 1BILL
+- Raast: SBP's instant payment system — growing rapidly, should be integrated
+
+## Shariah Compliance Architecture
+### Murabaha Structure Implementation
+Every SahulatKar purchase must strictly follow the Murabaha sequence:
+- SahulatKar purchases the product from the merchant (using VCN) — establishing ownership
+- Product ownership transfers to SahulatKar for a moment
+- SahulatKar sells the product to the customer at a disclosed marked-up price
+- Customer pays in installments — these are deferred sale payments, not loan repayments
+This sequence must be documented for every transaction to maintain Shariah validity.
+
+### Shariah Advisory Board
+SahulatKar must retain a qualified Shariah Advisory Board (minimum 1 qualified Shariah scholar) to:
+- Review and certify the Murabaha contract template annually
+- Conduct quarterly audits of transaction records for compliance
+- Issue Shariah Compliance Certificates for marketing and regulatory purposes
+- Advise on new product structures before launch
+
+# Technology Stack & Architecture
+SahulatKar's admin system is built on a modern, scalable stack designed for high availability, real-time data processing, and security-first design.
+
+## Recommended Technology Stack
+
+## Security Architecture
+### Authentication & Authorization
+- JWT (JSON Web Tokens) with short expiry (15 minutes) + refresh token rotation
+- MFA via TOTP mandatory for all admin roles
+- RBAC implemented at API middleware level — server-side enforcement
+- All admin API calls authenticated and logged
+
+### Data Protection
+- AES-256 encryption at rest for all PII (CNIC numbers, bank accounts)
+- TLS 1.3 for all data in transit
+- PII tokenization for analytics — replace raw CNIC with anonymous token
+- Database-level row security for multi-tenant isolation
+- AWS KMS for encryption key management
+
+### Secrets Management
+- AWS Secrets Manager for all API keys, database credentials
+- No secrets in code or environment files — runtime injection only
+- Automatic rotation of credentials for payment gateway APIs (quarterly)
+
+## Implementation Phasing
+
+## Infrastructure Cost Estimates (Monthly)
+
+# Implementation Roadmap & SOPs
+
+## Development Timeline
+
+## Standard Operating Procedures (SOPs)
+### SOP 1: Failed Order Resolution
+- Order enters HITL queue — agent receives notification within 5 minutes
+- Agent reviews failure reason and logs (View Bot Logs)
+- Assess resolution time: Can it be resolved within 2 hours?
+- If yes: Attempt manual purchase using VCN, or contact customer for alternative
+- If no: Contact customer via SMS/WhatsApp/call within 2 hours of failure
+- Offer: Same product from alternative merchant, or refund + cancel
+- If customer chooses refund: Process within 24 hours, reverse Murabaha contract
+- Close HITL ticket with resolution notes
+
+### SOP 2: Payment Not Reflecting (Customer Reports)
+- Support agent opens ticket and reviews customer context panel
+- Check Payment Activity Log — does our system show a payment attempt?
+- If webhook received: Payment is processing — reassure customer, 5-minute resolution
+- If no webhook: Check gateway admin panel for the transaction
+- If gateway shows success: Force payment sync (manual webhook trigger)
+- If gateway shows pending: Wait 15 minutes, re-check, escalate to payment ops if unresolved
+- If gateway shows failure: Confirm failure with customer, ask to retry
+- Regardless of outcome: Ensure no late fee is charged if customer attempted on time
+
+### SOP 3: Suspicious Activity / Fraud Suspected
+- Fraud alert generated (manual or automated) — fraud analyst assigned
+- Do NOT contact the customer yet — alert may tip off bad actor
+- Review all fraud signals and assign fraud score
+- If score > 850 (auto-block threshold): Account suspended automatically
+- If score 700–850: Manual review within 1 hour
+- Collect evidence: Device fingerprint matches, IP analysis, CNIC validity
+- Decision: Block and notify user with generic 'verification required' message, OR approve with enhanced monitoring
+- If blocked: Add CNIC, phone, device to blacklist
+- File STR with FMU if transaction amount > PKR 100,000 or pattern matches known fraud
+- Document all evidence in case file for potential legal action
+
+# Document Summary
+This document represents the complete specification for the SahulatKar Admin Operations & Management System. It is intended as the primary reference for the engineering team during development, and for stakeholders during product reviews.
+
+Total modules specified: 20 | Admin roles defined: 8 | SOPs documented: 10+ | Third-party integrations: 15+
+
+Next steps: Review this document with the engineering lead, validate technology choices against current vendor pricing and availability in Pakistan, and prioritize Phase 1 modules for immediate development sprint planning.
+| 20
+Admin Modules
+Complete Coverage | 8+
+User Roles
+RBAC Enabled | 15+
+Integrations
+Third-Party APIs | 50+
+Reports
+Automated |
+| --- | --- | --- | --- |
+| # | Module | Primary Purpose | Priority |
+| --- | --- | --- | --- |
+| 1 | Dashboard Home | Executive KPI command center — real-time metrics | Critical |
+| 2 | User Management | 360° customer profiles, credit, KYC, suspension | Critical |
+| 3 | Order Management | Order lifecycle, HITL queue, failed orders | Critical |
+| 4 | Payment Operations | Collection dashboard, overdue, arrangements | Critical |
+| 5 | Risk & Fraud | Fraud alerts, manual underwriting, blacklists | Critical |
+| 6 | Financial Operations | Revenue, reconciliation, P&L, Shariah reports | High |
+| 7 | Customer Support | Ticketing, chatbot, knowledge base, CSAT | High |
+| 8 | Compliance & Audit | KYC queue, regulatory reports, audit trails | High |
+| 9 | Analytics & BI | Cohort analysis, funnel analytics, custom reports | High |
+| 10 | Merchant & Partners | Partner directory, commission tracking | High |
+| 11 | Marketing & Growth | Campaign management, referrals, email | Medium |
+| 12 | Team Management | Roles, permissions, activity logs | High |
+| 13 | System Settings | Payment plans, credit rules, notifications | High |
+| 14 | API & Developer Tools | API keys, webhooks, integration logs | Medium |
+| 15 | Notification Center | SMS/Email templates, delivery logs | Medium |
+| 16 | Document Management | Contract vault, templates, digital signatures | Medium |
+| 17 | Logs & Audit Trail | System logs, user activity, API logs | High |
+| 18 | Reporting Engine | Scheduled reports, export, distribution | Medium |
+| 19 | System Health | Service status, performance, alerts | High |
+| 20 | Help & Documentation | Admin guides, tutorials, release notes | Low |
+| PKR 24.5M
+Total GMV
+↑ 23% vs Last Month | 12,458
+Active Users
+↑ 15% vs Last Month | 76.3%
+Approval Rate
+↓ 2.1% vs Last Month | 1.8%
+Default Rate
+↓ 0.3% — Good |
+| --- | --- | --- | --- |
+| PKR 980K
+Revenue (Month)
+↑ 18% vs Last Month | 347
+Orders Today
+↑ 12% vs Last Year | PKR 2.1M
+Payments Due
+1,245 installments | PKR 145K
+Overdue Amount
+89 users — Action Req. |
+| --- | --- | --- | --- |
+| Priority | Alert Type | Count | Action Button |
+| --- | --- | --- | --- |
+| 🔴 Critical | High-Risk Orders Awaiting Review | 12 | Review Now |
+| 🟠 High | Manual KYC Verifications Pending | 23 | Verify Now |
+| 🟠 High | Payment Gateway Error Rate > 2% | 1 Gateway | Investigate |
+| 🟡 Medium | Customer Support Tickets Unassigned | 45 | Assign Now |
+| 🟡 Medium | Failed Order Queue (HITL Required) | 8 | Process |
+| 🔵 Info | Shariah Compliance Report Due in 3 Days | 1 Report | Generate |
+| Filter | Options | Use Case |
+| --- | --- | --- |
+| Account Status | All, Active, Suspended, Closed, Pending KYC | Segment by lifecycle stage |
+| Registration Date | Date range picker | Find users registered in a period |
+| Credit Limit Range | Min / Max PKR slider | Find high or low limit users |
+| Risk Level | Low, Medium, High, Flagged | Focus fraud team on high-risk |
+| Payment Status | Current, 1–7d Late, 8–30d Late, Defaulted | Collections workflow |
+| City / Province | All cities dropdown | Geographic segmentation |
+| KYC Status | Verified, Pending, Rejected, Expired | Compliance queue |
+| Active Orders | Yes / No | Find users with open orders |
+| Credit Utilization % | 0–100% range slider | Find over-extended users |
+| Column | Data Displayed | Sortable |
+| --- | --- | --- |
+| User ID | System-generated ID (USR-XXXXXX) | Yes |
+| Name | Full name + email (secondary row) | Yes |
+| Phone | Registered number + KYC verification icon | No |
+| Credit Limit | Available / Total (e.g., PKR 30K / 50K) | Yes |
+| Utilization | Color-coded % bar (green <50%, yellow 50–80%, red >80%) | Yes |
+| Risk Score | Score out of 850 with color badge | Yes |
+| Payment Status | Current / # days overdue | Yes |
+| Status | Color-coded badge: Active, Suspended, Closed | Yes |
+| Actions | View, Edit, Suspend, Message — inline buttons | No |
+| Status | Description | Auto / Manual | Next Steps |
+| --- | --- | --- | --- |
+| URL Submitted | User pasted product URL, system processing | Automated | Extract product data |
+| Extracting | AI scraping product title, price, variants | Automated | Wait or HITL on failure |
+| Pending Approval | Credit check + first payment collection pending | Automated | System auto-approves or routes to manual |
+| Payment Collected | Down payment received, VCN issued | Automated | Dispatch purchase bot |
+| Purchase In Progress | AI agent executing checkout on merchant site | Automated | Monitor bot logs |
+| Purchase Complete | Merchant order confirmed, tracking number received | Automated | Monitor delivery |
+| Shipped | Logistics provider in possession | Automated | Delivery tracking active |
+| Delivered | Confirmed delivery to customer | Automated/Manual | Installment schedule continues |
+| Completed | All installments paid, order closed | Automated | Archive |
+| Failed — HITL | Automation failed, human intervention required | Manual | Ops team resolves |
+| Cancelled | Order cancelled pre-delivery | Manual | Initiate refund if payment collected |
+| Refunded | Full or partial refund issued | Manual | Murabaha contract reversed |
+| 47
+Pending
+Awaiting action | 128
+Processing
+In progress | 234
+Shipped
+In transit | 12
+Issues/HITL
+Need attention |
+| --- | --- | --- | --- |
+| Failure Reason | Frequency | Resolution Options |
+| --- | --- | --- |
+| Product out of stock | High | Contact customer for alternative, cancel + refund, or wait for restock |
+| CAPTCHA / bot detection | Medium | Manual purchase by ops team using VCN |
+| Variant unavailable | Medium | Contact customer to confirm alternative size/color |
+| Price changed post-order | Low | Re-quote customer with new Murabaha markup |
+| Merchant checkout error | Medium | Manual purchase or switch to alternative merchant |
+| VCN declined by merchant | Low | Issue replacement VCN via Lithic, retry |
+| Delivery address rejected | Low | Contact customer to confirm address |
+| PKR 2.1M
+Due Today
+1,245 payments | PKR 1.8M
+Collected
+85.7% rate ✓ | PKR 200K
+Pending Auto-Pay
+Scheduled 6PM | PKR 100K
+Failed
+58 — needs retry |
+| --- | --- | --- | --- |
+| Aging Bucket | Amount Overdue | # Users | Collections Action | Late Fee |
+| --- | --- | --- | --- | --- |
+| 1–7 Days | PKR 145,000 | 89 | Automated SMS/Email reminders (daily) | PKR 100 — waived for first offense |
+| 8–15 Days | PKR 89,000 | 45 | Automated + manual outreach call | PKR 100 — charged |
+| 16–30 Days | PKR 45,000 | 18 | Senior agent outreach, payment arrangement offered | PKR 100 — charged |
+| 31–60 Days | PKR 23,000 | 8 | Collections specialist, possible settlement offer | PKR 100 — charged |
+| 60+ Days | PKR 8,000 | 3 | Legal notice consideration, account closure, write-off review | Suspended |
+| Gateway | Collected | Fee (2%) | Net Settlement | Settlement Date | Status |
+| --- | --- | --- | --- | --- | --- |
+| Safepay | PKR 1,200,000 | PKR -24,000 | PKR 1,176,000 | T+1 (Next Day) | ✅ Matched |
+| JazzCash | PKR 400,000 | PKR -8,000 | PKR 392,000 | T+2 | ⏳ Pending |
+| EasyPaisa | PKR 200,000 | PKR -4,000 | PKR 196,000 | T+2 | ⏳ Pending |
+| 12
+High-Risk Alerts
+Today — Action Req. | 3
+Fraud Alerts
+Today — Investigate | 45
+Manual Review Queue
+Credit Decisions | 8
+Blocked Users
+Since Last Week |
+| --- | --- | --- | --- |
+| 3.2%
+30-Day Delinquency
+↑ 0.5% vs Last Month | 1.5%
+60-Day Delinquency
+→ Stable | 1.8%
+Default Rate
+↓ 0.3% — Improving | 0.12%
+Fraud Loss Rate
+Below 0.2% Target |
+| --- | --- | --- | --- |
+| Signal Category | Signals Monitored | Weight |
+| --- | --- | --- |
+| Identity | CNIC validity, NADRA match, selfie facial recognition score, address match | High |
+| Device | Device fingerprint uniqueness, jailbroken/rooted device, device sharing across accounts | High |
+| Network | VPN/Proxy detection, IP geolocation vs stated location, IP velocity | High |
+| Behavior | Account age at first purchase, time-on-page during registration, form fill speed | Medium |
+| Contact Info | Disposable email domain, VOIP phone number, email account age | Medium |
+| Order Pattern | Order amount vs credit limit ratio, first purchase velocity, product category risk | High |
+| External | Telecom blacklist (Jazz/Telenor), shared device with known fraudsters, cross-platform matching | High |
+| Parameter | Default Value | Configurable Range | Impact |
+| --- | --- | --- | --- |
+| Auto-Approve Score Threshold | 700+ | 600–800 | Higher = fewer approvals, lower defaults |
+| Manual Review Score Range | 600–699 | Derived | Triggers human underwriting |
+| Auto-Decline Below | < 600 | 550–650 | Lower = more declines, less risk |
+| First-Time User Credit Limit | PKR 25,000 | PKR 10K–50K | Balances access vs exposure |
+| Maximum Credit Limit (All Users) | PKR 500,000 | PKR 100K–1M | Portfolio risk ceiling |
+| Credit Increase After N Payments | 3 payments | 1–6 | Faster growth vs more data |
+| Credit Increase Percentage | 25% | 10–50% | Reward good behavior |
+| Max Debt-to-Income Ratio | 40% | 30–50% | Higher = more risk |
+| Min Monthly Income Requirement | PKR 30,000 | PKR 20K–50K | Stricter = fewer users, better quality |
+| Revenue Stream | Source | Target Mix | Approximate Rate |
+| --- | --- | --- | --- |
+| Affiliate Commissions | Merchant pays commission on successful sales | 60% | 5–15% of order value |
+| Interchange Revenue | Card network fee on VCN transactions | 30% | ~1.2–1.8% via Lithic |
+| Consumer Fees | Non-partner merchant fee charged to user | 10% | 2.5% or PKR 100 minimum |
+| Line Item | Amount (PKR) | % of Revenue |
+| --- | --- | --- |
+| Affiliate Commissions | 588,000 | 60% |
+| Interchange Revenue | 294,000 | 30% |
+| Consumer Fees (Non-Partner) | 98,000 | 10% |
+| TOTAL REVENUE | 980,000 | 100% |
+| Payment Processing Fees (2%) | (196,000) | 20% |
+| Operations & Labor | (294,000) | 30% |
+| Marketing & Acquisition | (160,000) | 16% |
+| TOTAL COSTS | (650,000) | 66% |
+| NET INCOME | 330,000 | 33.7% margin |
+| Metric | Description | January 2026 |
+| --- | --- | --- |
+| Loan Loss Provision | 2% of outstanding portfolio reserved for expected losses | PKR 490,000 |
+| Charge-Offs | Amounts written off as unrecoverable (90+ days defaulted) | PKR 147,000 |
+| Recoveries | Collections on previously written-off amounts | PKR 29,000 |
+| Net Credit Loss | Charge-Offs minus Recoveries | PKR 118,000 (0.48% of GMV) |
+| NPL Ratio | Non-performing loans / total outstanding | 1.8% |
+| 156
+Open Tickets
+↑ 23% vs Avg | 12 min
+Avg First Response
+↓ Better than target | 2.3 hrs
+Avg Resolution
+Target: < 3 hrs | 4.6 / 5.0
+CSAT Score
+↑ 0.2 vs Last Month |
+| --- | --- | --- | --- |
+| Category | Examples | Priority | First Response SLA | Resolution SLA |
+| --- | --- | --- | --- | --- |
+| Payment Issues | Payment not reflecting, failed debit | Critical | 15 minutes | 2 hours |
+| Order Issues | Item not received, wrong item, damage | High | 30 minutes | 4 hours |
+| Account Access | Login failure, password reset, locked | High | 30 minutes | 2 hours |
+| Refund Requests | Return product, order cancellation | High | 1 hour | 24 hours |
+| KYC / Verification | Document upload issues, rejection queries | Medium | 2 hours | 24 hours |
+| Credit Limit | Limit increase requests, queries | Medium | 4 hours | 48 hours |
+| General Inquiry | How does it work, fee questions | Low | 4 hours | 24 hours |
+| Intent | Bot Can Resolve? | Success Rate | Action Taken |
+| --- | --- | --- | --- |
+| Check order status | Yes | 92% | Queries order DB, returns status |
+| Payment due inquiry | Yes | 95% | Fetches payment schedule |
+| Payment not reflecting | Partial | 65% | Checks gateway, reassures, escalates if needed |
+| Delivery tracking | Yes | 89% | Fetches courier tracking link |
+| Credit limit inquiry | Yes | 97% | Returns current limit |
+| Refund request | No | N/A | Escalates immediately to human agent |
+| Account suspension | No | N/A | Escalates immediately to human agent |
+| Complaint about product | No | N/A | Escalates to agent with context |
+| Report | Regulator | Frequency | Due Date | Auto-Generated? |
+| --- | --- | --- | --- | --- |
+| Consumer Financing Return (RCD-1) | SBP | Monthly | 5th of following month | Yes — admin reviews before submitting |
+| NBFC Annual Return | SECP | Annual | 30-Sep (post-year-end) | Partial — requires manual inputs |
+| Suspicious Transaction Report (STR) | FMU | As needed | Within 7 days of suspicion | No — manual filing required |
+| Currency Transaction Report (CTR) | FMU | As needed | Within 3 days | Auto-detected — admin reviews |
+| Sales Tax Return (GST-3) | FBR | Monthly | 15th of following month | Yes |
+| Income Tax Return | FBR | Annual | 31-Dec | Partial |
+| Shariah Compliance Report | Shariah Board | Quarterly | 15th following quarter-end | Yes — admin reviews |
+| PCI DSS Assessment | Card Networks | Annual | Contract-dependent | External auditor |
+| Metric | Definition | Target | Current |
+| --- | --- | --- | --- |
+| GMV Growth (MoM) | Gross Merchandise Value month-over-month growth | > 20% | 23% ✅ |
+| Revenue Growth (MoM) | Total revenue month-over-month growth | > 15% | 18% ✅ |
+| Customer Acquisition Cost (CAC) | Total marketing spend / new users acquired | < PKR 150 | PKR 130 ✅ |
+| LTV:CAC Ratio | Projected Lifetime Value / CAC | > 3:1 | 3.2:1 ✅ |
+| Approval Rate | Approved applications / total applications | > 70% | 76.3% ✅ |
+| Collection Rate | Payments collected on time / payments due | > 90% | 92.5% ✅ |
+| Default Rate | Write-offs / total outstanding balance | < 2.5% | 1.8% ✅ |
+| Net Promoter Score (NPS) | % Promoters - % Detractors | > 40 | 47 ✅ |
+| Funnel Stage | Count (30 Days) | Conversion Rate | Drop-off Rate | Action |
+| --- | --- | --- | --- | --- |
+| App Downloaded | 10,000 | 100% | — | Baseline |
+| Registration Started | 7,000 | 70% | 30% drop | Simplify registration form |
+| KYC Completed | 6,000 | 86% | 14% drop | Improve document upload UX |
+| Credit Approved | 5,000 | 83% | 17% drop | Review decline reasons |
+| First Purchase Made | 2,400 | 48% | 52% drop | 🔴 Biggest opportunity |
+| City | Users | GMV | AOV | Default Rate | Opportunity |
+| --- | --- | --- | --- | --- | --- |
+| Karachi | 5,234 | PKR 12.5M | PKR 13,200 | 1.6% | Core market — maintain |
+| Lahore | 3,456 | PKR 8.9M | PKR 13,800 | 1.7% | Core market — grow |
+| Islamabad | 1,890 | PKR 5.2M | PKR 14,500 | 1.3% | Highest AOV — increase limits |
+| Faisalabad | 678 | PKR 1.8M | PKR 12,100 | 2.4% | Tighten credit rules |
+| Rawalpindi | 567 | PKR 1.5M | PKR 11,900 | 2.1% | Monitor — approaching threshold |
+| Multan | 456 | PKR 1.2M | PKR 12,800 | 2.8% | 🔴 High default — review policy |
+| Partner Type | Description | Revenue Model | Example |
+| --- | --- | --- | --- |
+| Affiliate Partner | Standard affiliate — SahulatKar earns commission via affiliate link | Commission on completed sale (5–15%) | Daraz, Khaadi, Sapphire |
+| Direct API Partner | Deep integration — real-time inventory, checkout via merchant API | Commission + better purchase success rate | Khaadi.com (Shopify API) |
+| Rye API Platform | Handles Amazon, major US retailers via managed API | Transaction fee to Rye + interchange on VCN | Amazon.com, Walmart |
+| Non-Partner Merchant | Any public website — user bears a small transaction fee | VCN interchange only + 2.5% user fee | Any Pakistani e-commerce site |
+| Role | Users | Primary Access | Key Restrictions |
+| --- | --- | --- | --- |
+| Super Admin | 2–3 | Full system access, all modules, all settings | No restrictions — audit logged |
+| Operations Manager | 5–10 | Users, Orders, Payments, Support, Reports | Cannot modify risk rules or system settings |
+| Credit & Risk Analyst | 3–5 | Risk module, User profiles (financial), Underwriting queue | Read-only on non-risk modules |
+| Fraud Analyst | 2–3 | Risk/Fraud module, Blacklist management, User profiles | Cannot modify credit limits or settings |
+| Customer Support Agent | 15–25 | Support tickets, User profiles (read-only), Order status | Cannot edit financial data or payments |
+| Finance Analyst | 2–4 | Financial Operations, Reconciliation, Reports | Cannot access user PII or modify orders |
+| Compliance Officer | 1–2 | Compliance module, KYC queue, Audit trails, Regulatory reports | Cannot modify user accounts |
+| Marketing Manager | 2–3 | Marketing module, Analytics (non-PII), Campaign management | Cannot access financial or user data |
+| Plan | Down Payment | Remaining Installments | Frequency | Duration | Murabaha Markup | Status |
+| --- | --- | --- | --- | --- | --- | --- |
+| Pay in 4 | 25% | 3 installments | Every 2 weeks | 6 weeks | 4.0% | Active |
+| Pay in 3 | 33% | 2 installments | Every 3 weeks | 6 weeks | 2.5% | Disabled |
+| Pay in 6 | 16.7% | 5 installments | Monthly | 5 months | 7.0% | Planned |
+| Pay in 12 (Financing) | 10% | 11 installments | Monthly | 11 months | 15.0% | Planned |
+| Fee Type | Amount | Condition | Shariah Note |
+| --- | --- | --- | --- |
+| Murabaha Markup | 3.5–5.0% (configurable per plan) | Applied at order creation, disclosed upfront | Halal profit — fixed, not interest |
+| Non-Partner Merchant Fee | 2.5% or PKR 100 minimum | Only for merchants without affiliate agreement | User fee — disclosed in checkout |
+| Late Payment Fee | PKR 100 flat | Applied after 1-day grace period | Donated to charity — not retained as income |
+| Payment Processing Fee | 2.0% (gateway cost) | Internal cost — not charged to user | Platform absorbs gateway fee |
+| Integration | Purpose | Status Monitoring | Key Config |
+| --- | --- | --- | --- |
+| Rye API | Product data extraction & automated checkout | API call success rate, response time | API key, webhook URL |
+| Lithic | Virtual Card Number (VCN) issuance | Card issue success rate, decline rate | Program ID, card parameters |
+| Jumio | KYC identity verification | Verification success rate | API credentials, threshold settings |
+| Safepay | Primary payment gateway | Transaction success rate, settlement status | API keys, webhook secret |
+| JazzCash | Mobile wallet payments | Transaction success rate | Merchant ID, API credentials |
+| EasyPaisa | Mobile wallet payments | Transaction success rate | Merchant ID, API credentials |
+| TCS Courier | Delivery tracking | API health, tracking data freshness | API key, account number |
+| SendGrid | Email notifications | Delivery rate, bounce rate | API key, sender domain |
+| Firebase FCM | Push notifications | Delivery rate by platform | Service account credentials |
+| NADRA VERISYS | CNIC verification | Query success rate | API credentials (sensitive) |
+| Layer | Technology | Rationale |
+| --- | --- | --- |
+| Admin Frontend | React.js + Next.js (TypeScript) | Server-side rendering for fast initial load, type safety |
+| Admin UI Library | Shadcn/UI + Tailwind CSS | Professional components, rapid development |
+| Charts & BI | Recharts + custom D3 components | Flexible, React-native charting |
+| Backend API | Node.js (NestJS framework) + TypeScript | Microservices-ready, strong typing, large ecosystem |
+| Primary Database | PostgreSQL (AWS RDS) | ACID compliance critical for financial data |
+| Cache Layer | Redis (AWS ElastiCache) | Session management, dashboard data caching |
+| Message Queue | AWS SQS + SNS | Async processing for payments, notifications |
+| File Storage | AWS S3 | KYC documents, contracts, reports |
+| Search | Elasticsearch | Fast full-text search across users, orders |
+| Analytics DB | ClickHouse or AWS Redshift | Column-store for fast analytics queries |
+| Monitoring | DataDog or AWS CloudWatch | Real-time alerts, performance tracking |
+| Deployment | AWS ECS (Fargate) + Docker | Container-based, auto-scaling |
+| CDN | AWS CloudFront | Static assets, admin dashboard files |
+| Phase | Timeline | Modules | Priority Features |
+| --- | --- | --- | --- |
+| Phase 1: MVP | Month 1–3 | Dashboard, Users, Orders, Payments, Basic Settings | Core operations control — minimum viable admin |
+| Phase 2: Operations | Month 4–6 | Risk & Fraud, Financial Ops, Customer Support, Compliance | Risk management and compliance readiness |
+| Phase 3: Intelligence | Month 7–9 | Analytics & BI, Marketing, Merchant Partners | Growth and data-driven decisions |
+| Phase 4: Scale | Month 10–12 | Team Management, Advanced Settings, API Tools, System Health | Automation and optimization |
+| Service | Specification | Estimated Cost (USD/month) |
+| --- | --- | --- |
+| AWS RDS PostgreSQL | db.t3.medium, Multi-AZ, 100GB | $150–200 |
+| AWS ElastiCache Redis | cache.t3.small, 2 nodes | $60–80 |
+| AWS ECS Fargate | 4 services, avg 0.5 vCPU each | $80–120 |
+| AWS S3 | 1TB storage + CloudFront CDN | $30–50 |
+| AWS SQS/SNS | ~1M messages/month | $5–10 |
+| DataDog Monitoring | 10 hosts, APM + logs | $200–300 |
+| SendGrid Email | 50,000 emails/month | $20–30 |
+| Elasticsearch | Single-node dev, 3-node prod | $50–150 |
+| TOTAL | Growing with scale | $600–900/month (~PKR 170K–250K) |
+| Sprint | Weeks | Deliverables | Team |
+| --- | --- | --- | --- |
+| Sprint 1–2 | 1–4 | Project setup, auth system, RBAC framework, basic dashboard shell | 2 BE + 1 FE + 1 DevOps |
+| Sprint 3–4 | 5–8 | User management (full CRUD, search, filters, profile) | 2 BE + 2 FE |
+| Sprint 5–6 | 9–12 | Order management (lifecycle, HITL queue, timeline) | 2 BE + 1 FE |
+| Sprint 7–8 | 13–16 | Payment operations (dashboard, reconciliation, manual entry) | 2 BE + 1 FE |
+| Sprint 9–10 | 17–20 | Risk & Fraud module, blacklisting, underwriting queue | 2 BE + 1 FE + 1 Data |
+| Sprint 11–12 | 21–24 | Financial ops, Shariah reports, regulatory report templates | 2 BE + 1 FE + 1 Finance |
+| Sprint 13–14 | 25–28 | Customer support, ticketing, chatbot integration, CSAT | 2 BE + 1 FE |
+| Sprint 15–16 | 29–32 | Compliance module, KYC queue, audit trails, data privacy | 2 BE + 1 FE + 1 Legal |
+| Sprint 17–18 | 33–36 | Analytics & BI, custom report builder, cohort analysis | 2 BE + 1 FE + 1 Data |
+| Sprint 19–20 | 37–40 | Marketing module, merchant partners, referral program | 2 BE + 1 FE |
+| Sprint 21–22 | 41–44 | Team management, advanced settings, API tools | 2 BE + 1 FE |
+| Sprint 23–24 | 45–48 | System health dashboard, monitoring, performance tuning, QA | Full team + QA |

@@ -8,7 +8,6 @@ from sk_shared.constants import OrderState, RedisNS
 from sk_shared.models.auth import User
 from sk_shared.models.contracts import ContractDigitalSignature, MurabahaContract, WakalahAgreement
 from sk_shared.models.order import Order, OrderStatusHistory
-from sk_shared.notifications import NotificationClient
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import generate_otp, hash_otp
 from src.config import settings
@@ -36,11 +35,11 @@ class ContractSignerService:
         await redis.set(otp_key, otp_hash, settings.OTP_TTL)
         await redis.delete(attempts_key)
 
-        # Inter-service notification via Redis queue
         if settings.NOTIFICATION_SMS_ENABLED:
-            notify_backend = redis.redis if hasattr(redis, "redis") else redis
-            notify = NotificationClient(notify_backend)
-            await notify.push_contract_otp(user.phone, otp)
+            from src.core.http_client import InternalServiceClient
+            await InternalServiceClient.send_otp(
+                phone=user.phone, otp_code=otp, purpose="contract_sign", expires_in_seconds=settings.OTP_TTL,
+            )
 
         # DEV ONLY: let callers surface the code directly (mirrors AuthService's
         # register/otp dev_otp) since there's no SMS gateway in local/dev envs.

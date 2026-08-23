@@ -66,18 +66,45 @@ class Settings(BaseSettings):
     # Inter-service security
     INTERNAL_SERVICE_TOKEN: str = "local-internal-token"
 
+    # Product Service base URL — used to proxy the customer-facing checkout-agent
+    # live-status stream (GET /orders/{id}/agent-status) through to Product
+    # Service's internal SSE endpoint. Port 8001 per the service port table in
+    # README.md.
+    PRODUCT_SERVICE_BASE_URL: str = "http://localhost:8001"
+
     # Shared secret with notification-service. Used to sign the short-lived
     # X-Admin-Assertion header (see sk_shared.security.create_signed_assertion) that
     # propagates an already-authenticated admin's id/role/permissions to
     # notification-service's admin_notifications/admin_tracking routes, instead of
     # letting a direct caller set X-Admin-Role/X-Admin-Permissions itself. Must match
-    # notification-service's INTERNAL_API_KEY setting.
+    # notification-service's INTERNAL_API_KEY setting. Also sent verbatim as
+    # X-Internal-Key on POST /internal/notifications/otp (see
+    # InternalServiceClient.send_otp) — that endpoint checks it directly via
+    # require_internal_key, no assertion wrapping needed.
     INTERNAL_API_KEY: str = "test-key"
+
+    # Base URL for notification-service — used to actually dispatch OTP SMS
+    # (registration, login resend, password reset, contract signing) via
+    # POST /api/v1/internal/notifications/otp. See InternalServiceClient.send_otp.
+    NOTIFICATION_SERVICE_URL: str = "http://localhost:8005"
 
     # KMS — local mock path uses KMS_MOCK_KEY_HEX (AES-256 hex-encoded key).
     # Production: set ENVIRONMENT=production and KMS_KEY_ARN for AWS KMS Boto3 path.
     KMS_MOCK_KEY_HEX: str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
     KMS_KEY_ARN: Optional[str] = None
+
+    # CNIC identity verification. "mock" (default) uses a realistic
+    # deterministic simulator with no external calls — safe for local/staging.
+    # Set to "verisys" once NADRA Verisys enterprise onboarding is complete;
+    # see src/services/nadra/verisys_provider.py. No other code changes
+    # needed — src/services/kyc.py resolves the provider via
+    # get_nadra_provider() and only ever calls the shared verify_cnic()
+    # contract.
+    NADRA_PROVIDER: str = "mock"
+    NADRA_API_URL: Optional[str] = None
+    NADRA_API_KEY: Optional[str] = None
+    NADRA_CHANNEL_ID: Optional[str] = None
+    NADRA_TIMEOUT_SECONDS: float = 8.0
 
     # Business rules
     COMPANY_LEGAL_NAME: str = "SahulatKar (Pvt) Ltd."
@@ -106,6 +133,7 @@ _SECRETS_MANAGER_FIELD_MAP = {
     "stripe-webhook-secret": "STRIPE_WEBHOOK_SECRET",
     "internal-service-token": "INTERNAL_SERVICE_TOKEN",
     "internal-api-key": "INTERNAL_API_KEY",
+    "nadra-api-key": "NADRA_API_KEY",
 }
 
 
@@ -170,3 +198,16 @@ def validate_critical_settings() -> None:
         environment=settings.ENVIRONMENT,
         error_prefix="PRODUCTION_CONFIG_VALIDATION_FAILED",
     )
+
+    # Only required once NADRA_PROVIDER is switched to "verisys" — the
+    # default "mock" provider needs no external credentials, so it must not
+    # block staging/prod deploys that haven't completed NADRA onboarding yet.
+    if settings.NADRA_PROVIDER == "verisys":
+        raise_if_placeholder_credentials(
+            [
+                ("NADRA_API_URL", settings.NADRA_API_URL or "", ""),
+                ("NADRA_API_KEY", settings.NADRA_API_KEY or "", ""),
+            ],
+            environment=settings.ENVIRONMENT,
+            error_prefix="PRODUCTION_CONFIG_VALIDATION_FAILED",
+        )

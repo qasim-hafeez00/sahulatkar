@@ -45,7 +45,7 @@ async def test_safepay_refund_webhook_settles_pending_refund(client, test_user, 
 
     payload = {"refund_reference": refund.refund_reference, "gateway_refund_id": "sp_rfnd_confirmed", "status": "success"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp = await client.post(
         "/api/v1/webhooks/safepay/refund",
@@ -80,7 +80,7 @@ async def test_safepay_refund_webhook_rejects_invalid_signature(client):
 async def test_safepay_refund_webhook_ignores_unknown_reference(client):
     payload = {"refund_reference": "does-not-exist", "gateway_refund_id": "sp_x", "status": "success"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp = await client.post(
         "/api/v1/webhooks/safepay/refund",
@@ -147,7 +147,7 @@ async def test_refund_webhook_deduplicates_repeated_events(client, test_user, re
 
     payload = {"refund_reference": refund.refund_reference, "gateway_refund_id": "sp_rfnd_dedup", "status": "success"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp1 = await client.post("/api/v1/webhooks/safepay/refund", content=body, headers={"X-Safepay-Signature": sig})
     resp2 = await client.post("/api/v1/webhooks/safepay/refund", content=body, headers={"X-Safepay-Signature": sig})
@@ -163,7 +163,7 @@ async def test_refund_webhook_ignores_non_success_status(client, test_user, seed
 
     payload = {"refund_reference": refund.refund_reference, "status": "processing"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp = await client.post(
         "/api/v1/webhooks/safepay/refund",

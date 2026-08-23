@@ -162,7 +162,6 @@ async def test_internal_decrypt_404_when_no_vcn(client):
 
 async def test_vcn_issue_adds_buffer_to_authorized_amount(client, test_user, seed_signed_order):
     """VCN authorized amount should include a 5% buffer above the loaded amount."""
-    from src.config import settings
     user, token = test_user
     order, _ = await seed_signed_order(user.id)
 

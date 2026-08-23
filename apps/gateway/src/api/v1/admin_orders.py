@@ -1,16 +1,26 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, Query
-from sqlalchemy import select, text, func, desc
+import json
+from datetime import datetime, timezone
+
+from fastapi import APIRouter, Depends, Query, HTTPException, status, Request
+from pydantic import BaseModel, Field, field_validator
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 from sk_shared.models.order import Order
-from sk_shared.models.auth import User
 from sk_shared.redis_client import RedisClient
-from sk_shared.constants import QueueName
+from sk_shared.constants import OrderState, QueueName
 
-from src.core.dependencies import get_current_admin, get_db, get_redis, RequirePermission
+# P1-07: the set of legal order states, derived from OrderState so it can
+# never drift out of sync with the canonical list.
+_VALID_ORDER_STATES = frozenset(
+    v for k, v in vars(OrderState).items() if not k.startswith("_") and isinstance(v, str)
+)
+
+from src.core.audit import record_audit_event
+from src.core.dependencies import get_db, get_redis, RequirePermission
 
 router = APIRouter(prefix="/admin/orders", tags=["Admin Orders"])
 
@@ -212,16 +222,22 @@ async def get_admin_order_detail(
 # TASK-20: Admin Manual Order Status Override
 # ============================================================================
 
-from pydantic import BaseModel, Field
-from fastapi import HTTPException, status, Request
-from datetime import datetime, timezone
-from src.core.audit import record_audit_event
-import json
-
-
 class AdminOrderStatusRequest(BaseModel):
     status: str = Field(..., min_length=1, max_length=50)
     reason: str = Field(..., min_length=5, max_length=500)
+
+    @field_validator("status")
+    @classmethod
+    def status_must_be_known_order_state(cls, v: str) -> str:
+        # P1-07: previously any string was accepted and written straight to
+        # Order.status — a typo or compromised admin token could park an
+        # order in a state no other code recognizes, with no way to recover
+        # via the normal flow (only another manual override).
+        if v not in _VALID_ORDER_STATES:
+            raise ValueError(
+                f"Unknown order status '{v}'. Must be one of: {sorted(_VALID_ORDER_STATES)}"
+            )
+        return v
 
 
 class AdminOrderRefundRequest(BaseModel):

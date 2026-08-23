@@ -6,6 +6,17 @@ import pytest
 from src.services.url_normalizer import UrlNormalizerService
 
 
+def test_detect_platform_flags_instagram_as_social_commerce():
+    """Instagram storefronts have no structured product page or checkout to
+    automate (ordering happens via DM negotiation) — detect_platform must
+    tag them distinctly so the extraction waterfall can route straight to
+    HITL instead of burning automated attempts."""
+    service = UrlNormalizerService()
+    assert service.detect_platform("instagram.com", "/p/abc123/") == "SOCIAL_COMMERCE"
+    assert service.detect_platform("www.instagram.com", "/reel/xyz/") == "SOCIAL_COMMERCE"
+    assert service.detect_platform("instagr.am", "/p/abc123/") == "SOCIAL_COMMERCE"
+
+
 @pytest.mark.asyncio
 async def test_normalize_strips_tracking_and_detects_platform():
     service = UrlNormalizerService()

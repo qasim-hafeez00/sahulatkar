@@ -10,8 +10,7 @@ Test coverage:
   - Admin queue: list, claim, approve, reject
   - Auth guard: unauthenticated requests are rejected
 """
-import uuid
-from datetime import timedelta, datetime
+from datetime import datetime
 
 import pytest
 from httpx import AsyncClient
@@ -23,7 +22,6 @@ from sk_shared.models.kyc import (
     KycVerificationQueue,
     UserKycVerification,
 )
-from sk_shared.models.auth import User
 from tests.conftest import TestingSessionLocal
 
 pytestmark = pytest.mark.asyncio

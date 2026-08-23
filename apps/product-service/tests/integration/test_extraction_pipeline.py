@@ -7,7 +7,7 @@ import pytest
 async def test_integration_extract_then_fetch_offer(client, monkeypatch, user_header):
     from src.services.extraction_waterfall import ExtractionResult, ExtractionWaterfallService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",

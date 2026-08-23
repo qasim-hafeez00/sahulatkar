@@ -20,6 +20,7 @@ dependencies = [
     "prometheus-client>=0.20.0",
     "google-auth>=2.0.0",
     "google-auth-httplib2>=0.2.0",
+    "requests>=2.31.0",
     "sk-shared==0.1.0",
 ]
 

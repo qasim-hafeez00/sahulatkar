@@ -6,7 +6,7 @@ from sqlalchemy import select
 
 from sk_shared.constants import OrderState
 from sk_shared.models.delivery import Shipment, TrackingEvent
-from sk_shared.models.order import Order, OrderStatusHistory
+from sk_shared.models.order import OrderStatusHistory
 
 from conftest import build_webhook_payload, make_aftership_signature, seed_couriers, seed_user_order
 

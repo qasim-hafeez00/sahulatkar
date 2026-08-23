@@ -2,7 +2,6 @@
 Tests for payment initiation, installment payment, and refund endpoints.
 Target: 20+ test cases
 """
-import json
 import pytest
 
 pytestmark = pytest.mark.asyncio
@@ -32,7 +31,7 @@ async def test_down_payment_safepay_returns_redirect_url(client, test_user, seed
     assert resp.status_code == 200
     data = resp.json()
     assert data["status"] == "pending"
-    assert "sandbox.safepay.pk" in data["payment_session_url"]
+    assert "getsafepay.com" in data["payment_session_url"]
     assert data["idempotency_key"] == "test-idem-key-001"
 
 
@@ -186,7 +185,6 @@ async def test_pay_installment_success(client, test_user, seed_order_with_loan):
 
     # Get first installment
     from sk_shared.models.payment import Installment
-    from src.config import settings as test_settings
 
     async with TestingSessionLocal() as session:
         inst = await session.scalar(

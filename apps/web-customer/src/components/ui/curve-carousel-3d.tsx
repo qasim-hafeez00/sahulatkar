@@ -79,10 +79,6 @@ function CarouselImage({
   const [src, setSrc] = useState(item.src)
   const fallback = `https://images.unsplash.com/photo-1556742049-0cfed4f6a5d8?auto=format&fit=crop&w=${width}&h=${height}&q=80`
 
-  useEffect(() => {
-    setSrc(item.src)
-  }, [item.src])
-
   return (
     <img
       src={src}
@@ -236,7 +232,7 @@ export function CurveCarousel3D({
             className="h-full w-full object-cover transition-transform duration-700 ease-out group-hover:scale-108"
           />
         ) : (
-          <CarouselImage item={item} width={dims.w} height={dims.h} />
+          <CarouselImage key={item.id} item={item} width={dims.w} height={dims.h} />
         )}
 
         {/* Iridescent luxury glass sheen overlay */}

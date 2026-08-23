@@ -213,3 +213,23 @@ class VirtualCard(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
         Index("ix_virtual_cards_user_id", "user_id"),
         Index("ix_virtual_cards_status", "status"),
     )
+
+
+class VcnKmsKeyVersion(Base, TimestampMixin):
+    """Persists the AWS KMS-encrypted data key for each VCN encryption key
+    version, so the plaintext data key used to encrypt a batch of PAN/CVV
+    ciphertext can be rehydrated (via kms:Decrypt) by any process/pod — not
+    just the one that originally called kms:GenerateDataKey.
+
+    One row is created per version the first time that version is used to
+    encrypt (see VcnKeyProvider._kms_get_cipher in
+    apps/payment-orchestrator/src/services/vcn_encryption.py); `encrypted_pan`
+    /`encrypted_cvv` on `virtual_cards` never store this row's contents
+    directly — only the version tag, via `encryption_key_version`.
+    """
+
+    __tablename__ = "vcn_kms_key_versions"
+
+    version: Mapped[str] = mapped_column(String(20), primary_key=True)
+    kms_key_arn: Mapped[str] = mapped_column(String(255), nullable=False)
+    encrypted_data_key: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)

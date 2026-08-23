@@ -87,6 +87,32 @@ async def lifespan(app: FastAPI):
     app.state.vcn_issue_task = asyncio.create_task(vcn_issue_worker.run())
     logger.info("VcnIssueWorker started")
 
+    # ── GAP-09: Start PaymentWebhookConsumer background task ─────────────────
+    # Consumes the PAYMENT_WEBHOOK queue that Gateway's /api/v1/webhooks/payment/*
+    # endpoints enqueue into — Gateway is the only internet-reachable service,
+    # so this is how vendor payment confirmations actually reach VCN issuance.
+    from src.workers.payment_webhook_consumer import PaymentWebhookConsumer
+    payment_webhook_consumer = PaymentWebhookConsumer(
+        redis=app.state.redis, concurrency=settings.PAYMENT_WEBHOOK_WORKER_CONCURRENCY
+    )
+    app.state.payment_webhook_consumer = payment_webhook_consumer
+    app.state.payment_webhook_task = asyncio.create_task(payment_webhook_consumer.run())
+    logger.info("PaymentWebhookConsumer started")
+
+    # ── Start PaymentInitiateConsumer background task ─────────────────────────
+    # Consumes the PAYMENT_INITIATE queue that Gateway's customer-facing
+    # /api/v1/payments/{down-payment,installment/*/pay,refund/*} endpoints
+    # enqueue into — without this, down payments/installments/refunds never
+    # reached a real payment gateway in production (see
+    # src/workers/payment_initiate_consumer.py docstring).
+    from src.workers.payment_initiate_consumer import PaymentInitiateConsumer
+    payment_initiate_consumer = PaymentInitiateConsumer(
+        redis=app.state.redis, concurrency=settings.PAYMENT_INITIATE_WORKER_CONCURRENCY
+    )
+    app.state.payment_initiate_consumer = payment_initiate_consumer
+    app.state.payment_initiate_task = asyncio.create_task(payment_initiate_consumer.run())
+    logger.info("PaymentInitiateConsumer started")
+
     yield
 
     # ── Shutdown — complete in-flight work then stop ──────────────────────────
@@ -97,15 +123,19 @@ async def lifespan(app: FastAPI):
     vcn_expiry_worker.stop()
     stripe_poller_worker.stop()
     vcn_issue_worker.stop()
+    payment_webhook_consumer.stop()
+    payment_initiate_consumer.stop()
 
     # Cancel tasks and wait for graceful completion (5s budget)
     tasks = [
         app.state.event_listener_task,
-        app.state.outbox_task, 
-        app.state.expiry_task, 
+        app.state.outbox_task,
+        app.state.expiry_task,
         app.state.vcn_expiry_task,
         app.state.stripe_poller_task,
-        app.state.vcn_issue_task
+        app.state.vcn_issue_task,
+        app.state.payment_webhook_task,
+        app.state.payment_initiate_task,
     ]
     for task in tasks:
         task.cancel()

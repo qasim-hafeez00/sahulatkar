@@ -5,7 +5,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
 from src.core.database import get_db
-from src.core.dependencies import RequestContext, require_admin_role
+from src.core.dependencies import RequestContext, get_redis, require_admin_role
+from src.core.rate_limit import rate_limit_admin_writes
+from sk_shared.redis_client import RedisClient
 from src.services.period_service import PeriodService
 
 router = APIRouter(prefix="/periods", tags=["Periods"])
@@ -41,10 +43,6 @@ async def list_periods(
         for p in periods
     ]
 
-
-from src.core.rate_limit import rate_limit_admin_writes
-from src.core.dependencies import get_redis
-from sk_shared.redis_client import RedisClient
 
 @router.post("/{period_key}/close")
 async def close_period(

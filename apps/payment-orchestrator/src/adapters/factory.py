@@ -33,6 +33,7 @@ class GatewayAdapterFactory:
                 api_key=settings.SAFEPAY_API_KEY,
                 api_secret=settings.SAFEPAY_API_SECRET,
                 base_url=settings.SAFEPAY_BASE_URL,
+                webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET,
             )
 
         if gateway == "jazzcash":
@@ -60,6 +61,16 @@ class GatewayAdapterFactory:
                 fx_buffer_pct=settings.FX_BUFFER_PCT,
             )
 
+        if gateway == "lithic":
+            from src.adapters.lithic import LithicAdapter
+            return LithicAdapter(
+                api_key=settings.LITHIC_API_KEY,
+                base_url=settings.LITHIC_BASE_URL,
+                card_program_token=settings.LITHIC_CARD_PROGRAM_TOKEN,
+                fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+                fx_buffer_pct=settings.FX_BUFFER_PCT,
+            )
+
         if gateway == "easypaisa":
             from src.adapters.easypaisa import EasypaisaAdapter
             return EasypaisaAdapter(
@@ -68,4 +79,4 @@ class GatewayAdapterFactory:
                 base_url=settings.EASYPAISA_BASE_URL,
             )
 
-        raise ValueError(f"Unknown gateway: '{gateway}'. Expected one of: safepay, jazzcash, raast, stripe, easypaisa.")
+        raise ValueError(f"Unknown gateway: '{gateway}'. Expected one of: safepay, jazzcash, raast, stripe, lithic, easypaisa.")

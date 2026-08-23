@@ -1,6 +1,6 @@
 "use client"
 
-import React, { useState, useEffect } from "react"
+import React, { useState } from "react"
 import { motion } from "framer-motion"
 import { Shield, Ban, AlertTriangle, CheckCircle, XCircle, Search, Filter, Eye, Settings, Database, TrendingUp, Users, CreditCard } from "lucide-react"
 import { Button } from "@/components/ui/button"
@@ -31,22 +31,17 @@ interface MCCCategory {
   details: string
 }
 
-export function MerchantComplianceSystem() {
-  const [merchants, setMerchants] = useState<Merchant[]>([])
-  const [mccCategories, setMccCategories] = useState<MCCCategory[]>([])
-  const [searchTerm, setSearchTerm] = useState("")
-  const [selectedCategory, setSelectedCategory] = useState("all")
-  const [isScanning, setIsScanning] = useState(false)
-  const [scanResults, setScanResults] = useState<any[]>([])
-  const [showDetails, setShowDetails] = useState<string | null>(null)
+interface ComplianceScanResult {
+  merchantId: string
+  merchantName: string
+  scanTimestamp: string
+  complianceScore: number
+  issues: string[]
+  recommendations: string[]
+  automatedActions: string[]
+}
 
-  useEffect(() => {
-    // Initialize data
-    setMerchants(getInitialMerchants())
-    setMccCategories(getInitialMCCCategories())
-  }, [])
-
-  const getInitialMerchants = (): Merchant[] => [
+const getInitialMerchants = (): Merchant[] => [
     {
       id: "merchant-001",
       name: "Daraz Pakistan",
@@ -155,6 +150,15 @@ export function MerchantComplianceSystem() {
       details: "Cinemas and entertainment venues"
     }
   ]
+
+export function MerchantComplianceSystem() {
+  const [merchants, setMerchants] = useState<Merchant[]>(getInitialMerchants)
+  const [mccCategories, setMccCategories] = useState<MCCCategory[]>(getInitialMCCCategories)
+  const [searchTerm, setSearchTerm] = useState("")
+  const [selectedCategory, setSelectedCategory] = useState("all")
+  const [isScanning, setIsScanning] = useState(false)
+  const [scanResults, setScanResults] = useState<ComplianceScanResult[]>([])
+  const [showDetails, setShowDetails] = useState<string | null>(null)
 
   const scanMerchantCompliance = async () => {
     setIsScanning(true)

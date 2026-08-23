@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from decimal import Decimal, ROUND_HALF_UP
 
+from src.config import settings
+
 
 class PricingService:
     # GAP-F: Markup rates are INTENTIONALLY tiered (not a flat 4%).
@@ -16,9 +18,23 @@ class PricingService:
     #
     # SHARIAH COMPLIANCE NOTE: the markup rate is disclosed at offer stage and
     # fixed at contract time per Murabaha requirements.
-    # Note: Shariah-board sign-off on the tiered structure has been obtained.
-    is_shariah_approved = True
-    
+
+    @property
+    def is_shariah_approved(self) -> bool:
+        """Whether the tiered markup structure has documented Shariah-board sign-off.
+
+        P1-05: this used to be a hardcoded `True` backed only by a code
+        comment ("sign-off has been obtained") with no verifiable evidence —
+        an unfalsifiable compliance claim. It now reflects whether an actual
+        approval reference has been configured
+        (SHARIAH_MARKUP_APPROVAL_REFERENCE / _DATE, e.g. a board resolution
+        number and date), so the claim is traceable to a real record instead
+        of asserted in code. Defaults to False (not approved) until one is
+        set — this does not currently block offer generation; it's an
+        honest status flag, not yet an enforced gate.
+        """
+        return bool(settings.SHARIAH_MARKUP_APPROVAL_REFERENCE and settings.SHARIAH_MARKUP_APPROVAL_DATE)
+
     _MARKUP_BY_PLAN = {
         3: Decimal("2.5"),
         6: Decimal("7.0"),

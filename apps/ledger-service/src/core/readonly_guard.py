@@ -15,14 +15,6 @@ from typing import Any, Callable, TypeVar
 from sqlalchemy import inspect, event
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.models.ledger import (
-    JournalEntry,
-    JournalEntryLine,
-    LedgerAccount,
-    LateFeeCharityAllocation,
-    LedgerPeriod,
-    LedgerAccountBalance,
-)
 
 
 logger = logging.getLogger(__name__)

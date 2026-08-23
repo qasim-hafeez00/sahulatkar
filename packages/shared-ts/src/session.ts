@@ -60,7 +60,17 @@ export interface GatewayCookieOptions {
 export function gatewayCookieOptions(maxAge: number, httpOnly: boolean): GatewayCookieOptions {
   return {
     httpOnly,
-    secure: process.env.NODE_ENV === "production",
+    // NODE_ENV=production alone doesn't mean "served over HTTPS" — a
+    // production-optimized Next.js *build* (NODE_ENV=production, the
+    // standard/correct setting for any built image) can still be served
+    // over plain HTTP with no TLS termination in front of it, e.g. local
+    // Docker Compose. In that case a Secure cookie is silently dropped by
+    // the browser after a successful login, and the very next request
+    // looks unauthenticated — the user just gets bounced back to the login
+    // page with no error. COOKIE_INSECURE is an explicit opt-out for that
+    // case; real deployments (behind an HTTPS load balancer/ingress) never
+    // set it, so production behavior is unchanged.
+    secure: process.env.NODE_ENV === "production" && process.env.COOKIE_INSECURE !== "true",
     sameSite: "lax",
     path: "/",
     maxAge,

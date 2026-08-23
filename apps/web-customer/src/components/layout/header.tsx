@@ -11,6 +11,19 @@ import { hasClientSession } from "@/lib/api-client"
 import { useAuth } from "@/components/auth/auth-guard"
 import { NotificationSystem } from "@/components/notifications/notification-system"
 
+const GUEST_NAV_LINKS = [
+  { label: "How It Works", href: "/#how-it-works" },
+  { label: "Shariah Compliance", href: "/#shariah-compliance" },
+  { label: "FAQ", href: "/#faq" },
+]
+
+const APP_NAV_LINKS = [
+  { label: "Dashboard", href: "/dashboard" },
+  { label: "New Purchase", href: "/cart" },
+  { label: "Repayments", href: "/repayment" },
+  { label: "Support", href: "/support" },
+]
+
 export function Header() {
   const [isMenuOpen, setIsMenuOpen] = useState(false)
   const [isAuthenticated, setIsAuthenticated] = useState(false)
@@ -20,6 +33,8 @@ export function Header() {
   const pathname = usePathname()
 
   useEffect(() => {
+    // hasClientSession() reads browser storage/cookies, unavailable during SSR.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsAuthenticated(hasClientSession())
   }, [pathname])
 
@@ -68,7 +83,7 @@ export function Header() {
               transition={{ delay: 0.2, duration: 0.5 }}
               className="flex items-center"
             >
-              <Link href="/" className="flex items-center space-x-3 group/logo">
+              <Link href={isAuthenticated ? "/dashboard" : "/"} className="flex items-center space-x-3 group/logo">
                 <div className="w-10 h-10 bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl flex items-center justify-center shadow-md shadow-orange-500/10 group-hover/logo:scale-105 transition-transform duration-300">
                   <span className="text-white font-bold text-xl">S</span>
                 </div>
@@ -78,13 +93,7 @@ export function Header() {
 
             {/* Desktop Navigation */}
             <nav className="hidden lg:flex items-center space-x-1.5 text-[var(--foreground)]">
-              {[
-                { label: "Home", href: "/" },
-                { label: "Shop", href: "/cart" },
-                { label: "Repayments", href: "/repayment" },
-                { label: "Dashboard", href: "/dashboard" },
-                { label: "Support", href: "/support" },
-              ].map((link, idx) => (
+              {(isAuthenticated ? APP_NAV_LINKS : GUEST_NAV_LINKS).map((link, idx) => (
                 <motion.div
                   key={link.label}
                   initial={{ y: -20, opacity: 0 }}
@@ -188,11 +197,7 @@ export function Header() {
           >
             <div className="py-4 px-6 space-y-4">
               {[
-                { label: "Home", href: "/" },
-                { label: "Shop", href: "/cart" },
-                { label: "Repayments", href: "/repayment" },
-                { label: "Dashboard", href: "/dashboard" },
-                { label: "Support", href: "/support" },
+                ...(isAuthenticated ? APP_NAV_LINKS : GUEST_NAV_LINKS),
                 ...(isAuthenticated ? [{ label: "Profile", href: "/profile" }, { label: "Notifications", href: "/notifications" }] : []),
               ].map((link) => (
                 <Link

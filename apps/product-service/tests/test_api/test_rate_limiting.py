@@ -7,7 +7,7 @@ affected by another user's limit.
 from __future__ import annotations
 
 from decimal import Decimal
-from unittest.mock import AsyncMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -30,7 +30,7 @@ async def test_extract_rate_limit_blocks_after_limit_exceeded(client, user_heade
             platform="CUSTOM",
         )
 
-    async def fast_extract(self, url: str, platform: str):
+    async def fast_extract(self, url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",
@@ -72,7 +72,7 @@ async def test_extract_rate_limit_is_per_user_not_global(client, monkeypatch):
     async def fast_normalize(self, url: str):
         return NormalizedUrl(raw_url=url, canonical_url=url, domain="example.com", platform="CUSTOM")
 
-    async def fast_extract(self, url: str, platform: str):
+    async def fast_extract(self, url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed", method="json_ld", confidence=Decimal("0.85"),
             title="Product", price=Decimal("500.00"), image_url=None, availability="in_stock",
@@ -110,7 +110,7 @@ async def test_extract_rate_limit_prefers_x_real_ip_when_user_missing(client, mo
     async def fast_normalize(self, url: str):
         return NormalizedUrl(raw_url=url, canonical_url=url, domain="example.com", platform="CUSTOM")
 
-    async def fast_extract(self, url: str, platform: str):
+    async def fast_extract(self, url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed", method="json_ld", confidence=Decimal("0.85"),
             title="Product", price=Decimal("500.00"), image_url=None, availability="in_stock",

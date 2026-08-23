@@ -191,7 +191,7 @@ async def run_ledger_event_listener(app: FastAPI) -> None:
             payload = envelope.get("payload") or {}
 
             try:
-                retry_count = await _run_with_retry(lambda: _process_event_once(event_name, payload, redis=app.state.redis))
+                await _run_with_retry(lambda: _process_event_once(event_name, payload, redis=app.state.redis))
             except EventProcessingFailed as e:
                 logger.exception(
                     "Ledger event processing failed",

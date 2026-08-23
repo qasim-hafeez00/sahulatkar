@@ -2,7 +2,6 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import select
 
 from sk_shared.models.payment import VirtualCard
 from src.workers.vcn_expiry_worker import VcnExpiryWorker
@@ -11,12 +10,12 @@ from tests.conftest import TestingSessionLocal
 pytestmark = pytest.mark.asyncio
 
 
-async def _create_vcn(session, *, status: str, expires_delta_hours: int) -> VirtualCard:
+async def _create_vcn(session, *, status: str, expires_delta_hours: int, issuer: str = "stripe") -> VirtualCard:
     now = datetime.now(timezone.utc)
     card = VirtualCard(
         order_id=int(now.timestamp() * 1000) % 1_000_000_000,
         user_id=777,
-        issuer="stripe",
+        issuer=issuer,
         issuer_card_id=f"ic_test_{now.timestamp()}",
         masked_number="**** **** **** 4242",
         card_expiry=(now + timedelta(days=365)).date(),
@@ -114,6 +113,43 @@ async def test_vcn_expiry_worker_ignores_not_yet_expired(monkeypatch):
         assert c2.status == "active"
 
     assert len(calls) == 0
+
+
+async def test_vcn_expiry_worker_dispatches_lithic_cards_to_lithic_adapter(monkeypatch):
+    """A card issued while FEATURE_LITHIC_ENABLED was on (issuer='lithic')
+    must be canceled through LithicAdapter, not Stripe — the flag's current
+    value shouldn't matter, only the issuer stamped on the card at issuance
+    time (see VcnService.issue_vcn)."""
+    import src.workers.vcn_expiry_worker as module
+
+    monkeypatch.setattr(module, "SessionLocal", TestingSessionLocal)
+
+    stripe_calls = []
+    lithic_calls = []
+
+    def _fake_stripe_cancel(self, issuer_card_id: str) -> bool:
+        stripe_calls.append(issuer_card_id)
+        return True
+
+    def _fake_lithic_cancel(self, issuer_card_id: str) -> bool:
+        lithic_calls.append(issuer_card_id)
+        return True
+
+    monkeypatch.setattr("src.adapters.stripe_issuing.StripeIssuingAdapter.cancel_card", _fake_stripe_cancel)
+    monkeypatch.setattr("src.adapters.lithic.LithicAdapter.cancel_card", _fake_lithic_cancel)
+
+    async with TestingSessionLocal() as db:
+        card = await _create_vcn(db, status="active", expires_delta_hours=-2, issuer="lithic")
+
+    worker = VcnExpiryWorker()
+    await worker.sweep_expired_vcns()
+
+    async with TestingSessionLocal() as db:
+        c2 = await db.get(VirtualCard, card.id)
+        assert c2.status == "expired"
+
+    assert lithic_calls == [card.issuer_card_id]
+    assert stripe_calls == []
 
 
 async def test_vcn_expiry_worker_stop_sets_flag_false():

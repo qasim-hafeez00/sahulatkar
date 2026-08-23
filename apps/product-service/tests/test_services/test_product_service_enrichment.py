@@ -1,9 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone, timedelta
 from decimal import Decimal
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -112,7 +110,7 @@ async def test_vcn_verifier_timeout_comes_from_settings(monkeypatch, redis_mock)
 async def test_image_cache_called_after_extraction(db_session, redis_mock, monkeypatch):
     from src.services.extraction_waterfall import ExtractionWaterfallService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",

@@ -10,7 +10,7 @@ from sk_shared.models.kyc import (
     KycVerificationQueue,
     UserKycVerification,
 )
-from .nadra import NadraClientMock
+from .nadra import get_nadra_provider
 from .shufti import ShuftiClientMock
 from .notify import notify
 from src.config import settings
@@ -26,7 +26,7 @@ else:
 class KycService:
     def __init__(self, db: AsyncSession):
         self.db = db
-        self.nadra_client = NadraClientMock()
+        self.nadra_client = get_nadra_provider()
         self.shufti_client = ShuftiClientMock()
 
     # ── KYC Verification ─────────────────────────────────────────────────────

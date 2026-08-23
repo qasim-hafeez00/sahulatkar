@@ -14,7 +14,6 @@ def _signature(secret: str | None, raw_body: bytes) -> str:
 
 
 async def test_jazzcash_webhook_receives_payload(client: AsyncClient):
-    payload = {"pp_ResponseCode": "000", "pp_TxnRefNo": "TXN-001"}
     raw_body = b'{"pp_ResponseCode":"000","pp_TxnRefNo":"TXN-001"}'
     response = await client.post(
         "/api/v1/webhooks/payment/jazzcash",

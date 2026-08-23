@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import List, Optional, Dict, Any
-from pydantic import BaseModel, Field, EmailStr
-from sk_shared.models.notification import NotificationPriority, DispatchChannel, NotificationStatus, DispatchStatus
+from pydantic import BaseModel, Field
+from sk_shared.models.notification import NotificationPriority, DispatchChannel, DispatchStatus
 
 class NotificationItem(BaseModel):
     id: int

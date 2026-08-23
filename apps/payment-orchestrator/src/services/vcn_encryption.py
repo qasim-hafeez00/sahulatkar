@@ -60,13 +60,33 @@ from __future__ import annotations
 import base64
 import hashlib
 import logging
+import os
+from functools import lru_cache
 from typing import ClassVar, Optional
 
 from cryptography.fernet import Fernet, InvalidToken
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from sk_shared.models.payment import VcnKmsKeyVersion
 
 from src.config import settings
 
 logger = logging.getLogger(__name__)
+
+
+@lru_cache(maxsize=None)
+def _get_kms_client(region: str):
+    """Return a cached boto3 KMS client for `region`.
+
+    Mirrors sk_shared.secrets_manager._get_secretsmanager_client: lazy import
+    (boto3 is only needed on this path — real production, KMS_KEY_ARN set),
+    cached per-region so repeated calls in the same process reuse one client.
+    """
+    import boto3  # Lazy: only imported when the production KMS path is actually taken.
+
+    return boto3.client("kms", region_name=region)
 
 
 class UnknownEncryptionKeyVersionError(RuntimeError):
@@ -86,27 +106,31 @@ class VcnKeyProvider:
     # this version.
     LEGACY_VERSION: ClassVar[str] = "v1"
 
-    def __init__(self) -> None:
+    def __init__(self, db: Optional[AsyncSession] = None) -> None:
         self._cipher_cache: dict[str, Fernet] = {}
+        # Only required by the production KMS path (_kms_get_cipher), which
+        # persists/rehydrates the per-version encrypted data key. The local
+        # path never touches `db`.
+        self.db = db
 
     @property
     def current_version(self) -> str:
         return settings.VCN_ENCRYPTION_KEY_CURRENT_VERSION
 
-    def encrypt(self, value: str) -> tuple[bytes, str]:
+    async def encrypt(self, value: str) -> tuple[bytes, str]:
         """Encrypt with the current key version. Returns (ciphertext, version_tag)."""
         version = self.current_version
-        cipher = self.get_cipher(version)
+        cipher = await self.get_cipher(version)
         return cipher.encrypt(value.encode("utf-8")), version
 
-    def decrypt(self, ciphertext: bytes, version: Optional[str]) -> str:
+    async def decrypt(self, ciphertext: bytes, version: Optional[str]) -> str:
         """Decrypt using the key version stamped on the record.
 
         `version` may be None for rows written before this column existed —
         those are treated as `LEGACY_VERSION` ("v1").
         """
         resolved_version = version or self.LEGACY_VERSION
-        cipher = self.get_cipher(resolved_version)
+        cipher = await self.get_cipher(resolved_version)
         try:
             return cipher.decrypt(ciphertext).decode("utf-8")
         except InvalidToken as exc:
@@ -116,13 +140,13 @@ class VcnKeyProvider:
                 "corrupted data). Refusing to guess at another key."
             ) from exc
 
-    def get_cipher(self, version: str) -> Fernet:
+    async def get_cipher(self, version: str) -> Fernet:
         cached = self._cipher_cache.get(version)
         if cached is not None:
             return cached
 
         if settings.ENVIRONMENT == "production" and settings.KMS_KEY_ARN:
-            cipher = self._kms_get_cipher(version)
+            cipher = await self._kms_get_cipher(version)
         else:
             cipher = self._local_get_cipher(version)
 
@@ -165,45 +189,70 @@ class VcnKeyProvider:
 
         return secret or None
 
-    # ── Production KMS envelope path (TODO — not implemented) ──────────────
+    # ── Production KMS envelope path ────────────────────────────────────────
 
-    def _kms_get_cipher(self, version: str) -> Fernet:
+    async def _kms_get_cipher(self, version: str) -> Fernet:
+        """AWS KMS envelope encryption: one data key per version.
+
+        First call for a given version calls kms:GenerateDataKey and persists
+        the KMS-encrypted CiphertextBlob in `vcn_kms_key_versions` (the
+        plaintext data key is never persisted — only held in memory for this
+        process's cipher cache). Every later call, in this or any other
+        process, rehydrates the same plaintext data key via kms:Decrypt
+        against the persisted CiphertextBlob, so ciphertext produced by one
+        pod stays decryptable by every other pod/process without needing a
+        shared in-memory cache.
         """
-        TODO(production-kms): route through AWS KMS envelope encryption instead
-        of a static locally-derived secret.
+        if self.db is None:
+            raise UnknownEncryptionKeyVersionError(
+                f"VcnKeyProvider was constructed without a db session — cannot use "
+                f"the production KMS path for version '{version}'. This is a wiring "
+                "bug: pass `db` when ENVIRONMENT=production and KMS_KEY_ARN is set."
+            )
 
-        Intended shape (mirrors apps/gateway/src/core/kms.py's documented
-        local-mock -> real-KMS swap):
+        region = os.getenv("AWS_REGION", "ap-south-1")
+        client = _get_kms_client(region)
 
-            import boto3
-            client = boto3.client("kms", region_name="ap-south-1")
-            # One data key per version, generated once via GenerateDataKey and
-            # cached (plaintext data key held in memory only; the
-            # KMS-encrypted CiphertextBlob is what gets persisted, e.g. in a
-            # small `vcn_key_versions` table keyed by version tag):
-            resp = client.generate_data_key(KeyId=settings.KMS_KEY_ARN, KeySpec="AES_256")
-            plaintext_data_key = resp["Plaintext"]
-            encrypted_data_key = resp["CiphertextBlob"]  # persist alongside `version`
-            key = base64.urlsafe_b64encode(plaintext_data_key)
-            return Fernet(key)
-
-            # To rehydrate an existing version's cipher on a fresh process:
-            plaintext_data_key = client.decrypt(CiphertextBlob=encrypted_data_key)["Plaintext"]
-
-        This isn't implemented because it requires real AWS KMS access to
-        exercise (untestable in this environment) and `boto3` is not
-        currently a payment-orchestrator dependency — half-implementing it
-        would ship unverified AWS calls. Do not set `KMS_KEY_ARN` in
-        production until this lands; leave it unset to keep using the
-        `VCN_ENCRYPTION_KEY*`-derived local path (see `_local_get_cipher`),
-        which remains fully supported.
-        """
-        raise NotImplementedError(
-            "AWS KMS envelope encryption for VCN keys is not implemented yet "
-            f"(requested version '{version}'). KMS_KEY_ARN is set, which signals a "
-            "production KMS rollout is intended, but the envelope-encryption "
-            "plumbing has not been built — see the TODO block in "
-            "VcnKeyProvider._kms_get_cipher for the intended design. Until this "
-            "lands, unset KMS_KEY_ARN to keep using the VCN_ENCRYPTION_KEY*-derived "
-            "local path."
+        row = await self.db.scalar(
+            select(VcnKmsKeyVersion).where(VcnKmsKeyVersion.version == version)
         )
+
+        if row is None:
+            resp = client.generate_data_key(KeyId=settings.KMS_KEY_ARN, KeySpec="AES_256")
+            plaintext_data_key: bytes = resp["Plaintext"]
+            encrypted_data_key: bytes = resp["CiphertextBlob"]
+
+            self.db.add(
+                VcnKmsKeyVersion(
+                    version=version,
+                    kms_key_arn=settings.KMS_KEY_ARN,
+                    encrypted_data_key=encrypted_data_key,
+                )
+            )
+            try:
+                await self.db.flush()
+            except IntegrityError:
+                # Lost a race with another process generating the same
+                # version's data key concurrently — that process's row wins;
+                # discard ours (never persisted, so nothing to clean up
+                # KMS-side) and rehydrate from theirs instead.
+                await self.db.rollback()
+                row = await self.db.scalar(
+                    select(VcnKmsKeyVersion).where(VcnKmsKeyVersion.version == version)
+                )
+                if row is None:
+                    raise UnknownEncryptionKeyVersionError(
+                        f"Lost a race generating the KMS data key for version "
+                        f"'{version}' but the winning row is not visible — this "
+                        "should not happen outside a concurrent-write bug."
+                    )
+                plaintext_data_key = client.decrypt(
+                    CiphertextBlob=row.encrypted_data_key, KeyId=row.kms_key_arn
+                )["Plaintext"]
+        else:
+            plaintext_data_key = client.decrypt(
+                CiphertextBlob=row.encrypted_data_key, KeyId=row.kms_key_arn
+            )["Plaintext"]
+
+        key = base64.urlsafe_b64encode(plaintext_data_key)
+        return Fernet(key)

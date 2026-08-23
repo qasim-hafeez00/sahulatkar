@@ -2,24 +2,52 @@
 Tests for VcnIssueWorker.
 Target: 6 test cases — all with real behavioral assertions (P3-01 fix).
 """
-import asyncio
 import json
-import logging
 from decimal import Decimal
+from unittest.mock import patch
 
 import pytest
+from sqlalchemy import select
 
 from sk_shared.constants import QueueName
+from sk_shared.models.payment import VirtualCard
 
 from tests.conftest import TestingSessionLocal
-from src.services.vcn import VcnService
 
 pytestmark = pytest.mark.asyncio
 
 
+async def test_worker_process_actually_commits_the_issued_vcn(redis_mock, test_user, seed_signed_order):
+    """Live-verified regression: VcnIssueWorker._process() opens its own
+    SessionLocal() and calls issue_vcn(), which only flushes — the worker
+    itself never called db.commit(), so the VirtualCard row (and its
+    vcn.issued outbox event) were silently rolled back every time despite
+    the worker logging "VCN job completed". Unlike the other tests in this
+    file, this one goes through the real _process() method and re-queries
+    from a FRESH session afterward, so it fails if the commit is missing.
+    """
+    from src.workers import vcn_issue_worker as vcn_issue_worker_module
+    from src.workers.vcn_issue_worker import VcnIssueWorker
+
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    job_payload = json.dumps({"order_id": order.id, "amount_pkr": "5200", "merchant_domain": None}).encode()
+
+    worker = VcnIssueWorker(redis=redis_mock, concurrency=1)
+    with patch.object(vcn_issue_worker_module, "SessionLocal", TestingSessionLocal):
+        await worker._process(job_payload)
+
+    async with TestingSessionLocal() as fresh_session:
+        card = await fresh_session.scalar(
+            select(VirtualCard).where(VirtualCard.order_id == order.id)
+        )
+        assert card is not None, "VirtualCard was not committed — issue_vcn's work was silently rolled back"
+        assert card.status == "active"
+
+
 async def test_worker_processes_queued_job_and_issues_vcn(redis_mock, test_user, seed_signed_order):
     """Worker picks up a queued VCN job and issues the card successfully."""
-    from src.workers.vcn_issue_worker import VcnIssueWorker
 
     user, _ = test_user
     order, _ = await seed_signed_order(user.id)
@@ -52,7 +80,7 @@ async def test_worker_handles_invalid_json_payload(redis_mock, caplog):
     # Push invalid JSON
     await redis_mock.redis.lpush(QueueName.VCN_ISSUE, "not-valid-json!!!")
 
-    worker = VcnIssueWorker(concurrency=1)
+    VcnIssueWorker(concurrency=1)
 
     # Simulate one dequeue cycle
     raw = await redis_mock.redis.lpop(QueueName.VCN_ISSUE)

@@ -1,11 +1,14 @@
 "use client"
 
 import { useEffect, useState } from "react"
+import { motion } from "framer-motion"
 import { Button } from "@/components/ui/button"
+import { Card, CardContent } from "@/components/ui/card"
 import { useRouter } from "next/navigation"
-import { Lock } from "lucide-react"
+import { Lock, CreditCard, FlaskConical } from "lucide-react"
 import { paymentsApi, type PaymentMethod } from "@/lib/payments-api"
 import { ApiError } from "@/lib/api-client"
+import { formatCurrency } from "@/lib/utils"
 
 export default function PaymentDetails() {
   const [cardNumber, setCardNumber] = useState("")
@@ -29,6 +32,8 @@ export default function PaymentDetails() {
       return
     }
     const orderIds: number[] = JSON.parse(orderIdsRaw)
+    // These values are read from sessionStorage, a browser-only API unavailable during SSR.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setOrderId(orderIds[0])
     setAmount(Number(amountRaw))
     setMethod(methodRaw)
@@ -69,135 +74,154 @@ export default function PaymentDetails() {
   }
 
   return (
-    <div className="min-h-screen">
+    <div className="min-h-screen pt-28 pb-16">
       <div className="mx-auto max-w-7xl px-4 py-8 lg:px-8">
         <div className="grid gap-8 lg:grid-cols-[1fr_1.2fr]">
-          {/* Left Card */}
-          <div className="bg-gradient-to-br from-slate-900 to-slate-800 rounded-3xl p-8 text-white h-fit space-y-8">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5 }}
+            className="h-fit space-y-8 rounded-3xl bg-[var(--foreground)] p-8 text-[var(--background)]"
+          >
             <div>
-              <p className="text-xs uppercase tracking-widest text-slate-300 font-semibold">SahulatKar</p>
-              <p className="text-xs uppercase tracking-widest text-orange-500 font-bold mt-1">PREMIUM</p>
+              <p className="text-xs font-semibold uppercase tracking-widest opacity-70">SahulatKar</p>
+              <p className="mt-1 text-xs font-bold uppercase tracking-widest text-[var(--accent)]">Premium</p>
             </div>
 
             <div className="space-y-3">
-              <h2 className="text-3xl font-bold leading-tight">Secure Institutional Payment</h2>
-              <p className="text-sm text-slate-300">Complete your investment transaction with end-to-end Shariah-compliant encryption</p>
+              <h2 className="text-3xl font-bold leading-tight">Secure Down Payment</h2>
+              <p className="text-sm opacity-70">Complete your down payment with end-to-end Shariah-compliant encryption</p>
             </div>
 
             <div className="space-y-3">
               <div className="flex justify-between">
-                <span className="text-sm text-slate-400">Payment Method</span>
+                <span className="text-sm opacity-60">Payment Method</span>
                 <span className="text-lg font-semibold capitalize">{method}</span>
               </div>
-              <div className="border-t border-slate-700 pt-3 flex justify-between">
-                <span className="text-sm text-slate-400">DOWN PAYMENT DUE</span>
-                <span className="text-4xl font-bold text-orange-400">PKR {Math.round(amount).toLocaleString()}</span>
+              <div className="flex justify-between border-t border-[var(--background)]/10 pt-3">
+                <span className="text-sm opacity-60">Down Payment Due</span>
+                <span className="text-4xl font-bold text-[var(--accent)]">{formatCurrency(Math.round(amount))}</span>
               </div>
             </div>
 
-            <div className="flex gap-2 text-xs text-slate-400">
-              <span>🔒</span>
-              <span>PCI-DSS LEVEL 1 • 256-BIT SSL</span>
+            <div className="flex gap-2 text-xs opacity-60">
+              <Lock className="h-3.5 w-3.5" />
+              <span>PCI-DSS Level 1 &middot; 256-bit SSL</span>
             </div>
-          </div>
+          </motion.div>
 
-          {/* Right Form */}
-          <div className="bg-white rounded-3xl p-8 shadow-lg border border-slate-200 space-y-6">
-            <div>
-              <h3 className="text-2xl font-bold text-slate-900">Payment Details</h3>
-              <p className="text-sm text-slate-600 mt-1">Enter your credit or debit card information.</p>
-            </div>
-
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs uppercase tracking-widest text-slate-500 font-semibold block mb-2">
-                  Card Number
-                </label>
-                <div className="relative">
-                  <span className="absolute left-3 top-3 text-slate-400">💳</span>
-                  <input
-                    type="text"
-                    placeholder="0000 0000 0000 0000"
-                    value={cardNumber}
-                    onChange={(e) => setCardNumber(formatCardNumber(e.target.value))}
-                    maxLength={19}
-                    className="w-full pl-10 pr-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent text-slate-900 placeholder-slate-400"
-                  />
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-4">
+          <motion.div
+            initial={{ opacity: 0, y: 20 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.5, delay: 0.1 }}
+          >
+            <Card className="border-0">
+              <CardContent className="space-y-6 p-8">
                 <div>
-                  <label className="text-xs uppercase tracking-widest text-slate-500 font-semibold block mb-2">
-                    Expiry Date
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="MM / YY"
-                    value={expiryDate}
-                    onChange={(e) => setExpiryDate(e.target.value)}
-                    maxLength={7}
-                    className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent text-slate-900 placeholder-slate-400"
-                  />
+                  <h3 className="text-2xl font-bold text-theme">Payment Details</h3>
+                  <p className="mt-1 text-sm text-theme-muted">Enter your credit or debit card information.</p>
                 </div>
-                <div>
-                  <label className="text-xs uppercase tracking-widest text-slate-500 font-semibold block mb-2">
-                    CVC / CVV
-                  </label>
-                  <input
-                    type="text"
-                    placeholder="•••"
-                    value={cvc}
-                    onChange={(e) => setCvc(e.target.value)}
-                    maxLength={4}
-                    className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent text-slate-900 placeholder-slate-400"
-                  />
+
+                <div className="flex items-start gap-2 rounded-xl border border-[var(--accent)]/20 bg-[var(--accent)]/5 p-3 text-xs text-[var(--accent)]">
+                  <FlaskConical className="mt-0.5 h-4 w-4 shrink-0" />
+                  <span>Test payment &mdash; this is a development environment. No real card data is submitted or stored.</span>
                 </div>
-              </div>
 
-              <div>
-                <label className="text-xs uppercase tracking-widest text-slate-500 font-semibold block mb-2">
-                  Cardholder Name
-                </label>
-                <input
-                  type="text"
-                  placeholder="Full name as on card"
-                  value={cardholderName}
-                  onChange={(e) => setCardholderName(e.target.value)}
-                  className="w-full px-4 py-3 border border-slate-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-orange-500 focus:border-transparent text-slate-900 placeholder-slate-400"
-                />
-              </div>
+                <div className="space-y-4">
+                  <div>
+                    <label className="mb-2 block text-xs font-semibold uppercase tracking-widest text-theme-muted">
+                      Card Number
+                    </label>
+                    <div className="relative">
+                      <CreditCard className="absolute left-3 top-1/2 h-4 w-4 -translate-y-1/2 text-theme-muted" />
+                      <input
+                        type="text"
+                        placeholder="0000 0000 0000 0000"
+                        value={cardNumber}
+                        onChange={(e) => setCardNumber(formatCardNumber(e.target.value))}
+                        maxLength={19}
+                        className="w-full rounded-xl border border-[var(--section-border)] bg-[var(--card-bg)] py-3 pl-10 pr-4 text-theme placeholder:text-theme-muted focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+                      />
+                    </div>
+                  </div>
 
-              <div className="flex items-center gap-3">
-                <input
-                  type="checkbox"
-                  id="savecard"
-                  checked={saveCard}
-                  onChange={(e) => setSaveCard(e.target.checked)}
-                  className="w-4 h-4 rounded border-slate-300 accent-orange-500"
-                />
-                <label htmlFor="savecard" className="text-sm text-slate-700">
-                  Save card for future transactions
-                </label>
-              </div>
-            </div>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div>
+                      <label className="mb-2 block text-xs font-semibold uppercase tracking-widest text-theme-muted">
+                        Expiry Date
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="MM / YY"
+                        value={expiryDate}
+                        onChange={(e) => setExpiryDate(e.target.value)}
+                        maxLength={7}
+                        className="w-full rounded-xl border border-[var(--section-border)] bg-[var(--card-bg)] px-4 py-3 text-theme placeholder:text-theme-muted focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+                      />
+                    </div>
+                    <div>
+                      <label className="mb-2 block text-xs font-semibold uppercase tracking-widest text-theme-muted">
+                        CVC / CVV
+                      </label>
+                      <input
+                        type="text"
+                        placeholder="•••"
+                        value={cvc}
+                        onChange={(e) => setCvc(e.target.value)}
+                        maxLength={4}
+                        className="w-full rounded-xl border border-[var(--section-border)] bg-[var(--card-bg)] px-4 py-3 text-theme placeholder:text-theme-muted focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+                      />
+                    </div>
+                  </div>
 
-            {error && (
-              <div className="rounded-xl border border-red-200 bg-red-50 p-3 text-sm text-red-600">{error}</div>
-            )}
+                  <div>
+                    <label className="mb-2 block text-xs font-semibold uppercase tracking-widest text-theme-muted">
+                      Cardholder Name
+                    </label>
+                    <input
+                      type="text"
+                      placeholder="Full name as on card"
+                      value={cardholderName}
+                      onChange={(e) => setCardholderName(e.target.value)}
+                      className="w-full rounded-xl border border-[var(--section-border)] bg-[var(--card-bg)] px-4 py-3 text-theme placeholder:text-theme-muted focus:border-[var(--accent)] focus:outline-none focus:ring-2 focus:ring-[var(--accent)]/20"
+                    />
+                  </div>
 
-            <Button
-              onClick={handleConfirm}
-              disabled={isSubmitting || !isFormValid}
-              className="w-full bg-orange-500 hover:bg-orange-600 text-white py-3 rounded-2xl font-semibold flex items-center justify-center gap-2 disabled:opacity-50"
-            >
-              <Lock className="w-4 h-4" /> {isSubmitting ? "Processing..." : "Confirm Payment"}
-            </Button>
+                  <div className="flex items-center gap-3">
+                    <input
+                      type="checkbox"
+                      id="savecard"
+                      checked={saveCard}
+                      onChange={(e) => setSaveCard(e.target.checked)}
+                      className="h-4 w-4 rounded border-[var(--section-border)] accent-[var(--accent)]"
+                    />
+                    <label htmlFor="savecard" className="text-sm text-theme-muted">
+                      Save card for future transactions
+                    </label>
+                  </div>
+                </div>
 
-            <p className="text-xs text-center text-slate-500">
-              Your transaction is protected by SahulatKar Finance. We do not store your credit card information on our servers.
-            </p>
-          </div>
+                {error && (
+                  <div className="rounded-xl border border-[var(--danger)]/20 bg-[var(--danger-bg)] p-3 text-sm text-[var(--danger)]">
+                    {error}
+                  </div>
+                )}
+
+                <Button
+                  onClick={handleConfirm}
+                  disabled={isSubmitting || !isFormValid}
+                  size="xl"
+                  className="w-full"
+                >
+                  <Lock className="h-4 w-4" /> {isSubmitting ? "Processing..." : "Confirm Payment"}
+                </Button>
+
+                <p className="text-center text-xs text-theme-muted">
+                  Your transaction is protected by SahulatKar Finance. We do not store your credit card information on our servers.
+                </p>
+              </CardContent>
+            </Card>
+          </motion.div>
         </div>
       </div>
     </div>

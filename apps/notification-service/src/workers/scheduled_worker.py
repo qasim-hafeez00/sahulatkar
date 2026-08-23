@@ -13,7 +13,6 @@ import logging
 from datetime import datetime, timezone
 
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.database import SessionLocal
 from sk_shared.models.notification import ScheduledNotification
@@ -38,7 +37,9 @@ async def fire_scheduled_notifications() -> dict:
     After firing, sets fired_at to the current UTC timestamp.
     """
     redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
-    now = datetime.now(timezone.utc)
+    # scheduled_notifications.fire_at/fired_at are naive DateTime columns (UTC by convention);
+    # comparing them against a tz-aware value raises asyncpg.exceptions.DataError.
+    now = datetime.now(timezone.utc).replace(tzinfo=None)
     stats = {"found": 0, "fired": 0, "errors": 0, "skipped_cancelled": 0}
 
     async with SessionLocal() as db:

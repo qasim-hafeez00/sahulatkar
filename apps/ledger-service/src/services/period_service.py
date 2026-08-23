@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 from datetime import date, datetime, timezone
-from typing import Literal
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -82,7 +81,7 @@ class PeriodService:
             # and zero them out line by line. Here we aggregate to Retained Earnings based on Net Income.
             # Revenue accounts have credit balances (debit to close)
             # Expense accounts have debit balances (credit to close)
-            net_income = Decimal(str(pl["net_income"]))
+            Decimal(str(pl["net_income"]))
             revenue = Decimal(str(pl["revenue"]))
             expenses = Decimal(str(pl["costs"]))
 
@@ -107,8 +106,8 @@ class PeriodService:
                         lines.append(PostingLine(acct, credit_amount=b))
 
                 # The balancing figure goes to retained earnings
-                total_dr = sum(l.debit_amount for l in lines)
-                total_cr = sum(l.credit_amount for l in lines)
+                total_dr = sum(ln.debit_amount for ln in lines)
+                total_cr = sum(ln.credit_amount for ln in lines)
                 retained = total_dr - total_cr
 
                 if retained > 0:
@@ -178,7 +177,7 @@ class PeriodService:
         Used for alerting admins that a period is near its close date.
         """
         today = date.today()
-        cutoff = date(today.year + (today.month // 12), (today.month % 12) + 1, 1)
+        date(today.year + (today.month // 12), (today.month % 12) + 1, 1)
         # Simple approach: list open periods whose end_date <= today + within_days
         from datetime import timedelta
         warning_threshold = today + timedelta(days=within_days)

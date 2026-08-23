@@ -1,6 +1,5 @@
 import pytest
 from httpx import AsyncClient
-from sk_shared.models.notification import Notification, NotificationPreference
 from sqlalchemy.ext.asyncio import AsyncSession
 from src.config import settings
 
@@ -91,7 +90,7 @@ async def test_shariah_guard_late_fee(client: AsyncClient, db_session: AsyncSess
     
     resp = await client.post("/api/v1/internal/notifications/send", json=payload, headers=internal_header)
     assert resp.status_code == 200
-    notif_id = resp.json()["notification_id"]
+    resp.json()["notification_id"]
     
     from src.services.template_service import TemplateService
     ts = TemplateService()

@@ -47,7 +47,7 @@ const processNLP = async (text: string, currentContext: string[]): Promise<NLPRe
   
   const lowerText = text.toLowerCase()
   let intent = 'general'
-  let entities: string[] = []
+  const entities: string[] = []
   let confidence = 0.85
   let suggestedActions: string[] = []
   let responseText = "I understand you're asking about this. Let me help you with that."
@@ -153,6 +153,8 @@ export function ChatbotWidget() {
     if (!inputText.trim()) return
 
     const userMessage: Message = {
+      // Message id generated in a user-triggered handler, not during render.
+      // eslint-disable-next-line react-hooks/purity -- impure by design: unique id per sent message
       id: Date.now().toString(),
       text: inputText,
       sender: 'user',
@@ -172,6 +174,8 @@ export function ChatbotWidget() {
       setContext(prev => [...prev, nlpResponse.context])
       
       const botMessage: Message = {
+        // Message id generated in a user-triggered handler, not during render.
+        // eslint-disable-next-line react-hooks/purity -- impure by design: unique id per bot message
         id: (Date.now() + 1).toString(),
         text: nlpResponse.text,
         sender: 'bot',
@@ -186,6 +190,8 @@ export function ChatbotWidget() {
     } catch (error) {
       // Fallback response
       const botMessage: Message = {
+        // Message id generated in a user-triggered handler, not during render.
+        // eslint-disable-next-line react-hooks/purity -- impure by design: unique id per fallback message
         id: (Date.now() + 1).toString(),
         text: "I'm having trouble processing that. Could you please rephrase your question?",
         sender: 'bot',

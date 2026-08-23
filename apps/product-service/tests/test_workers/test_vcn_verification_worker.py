@@ -1,14 +1,10 @@
-import asyncio
-import json
 from datetime import datetime, timezone
-from uuid import uuid4
 
 import pytest
 from sqlalchemy import select
 
 from sk_shared.models.checkout import PurchaseExecution
 from sk_shared.models.hitl import HitlQueue
-from sk_shared.constants import QueueName
 from src.workers.vcn_verification_worker import VcnVerificationWorker
 
 class _SingleSessionFactory:
@@ -61,7 +57,7 @@ async def test_vcn_verification_worker_success(monkeypatch, db_session, redis_mo
     assert execution.step_reached == "order_confirmed"
     
     # Verify success event published
-    events = await redis_mock.redis.lrange("sk:queue:events:purchase_confirmed", 0, -1)
+    await redis_mock.redis.lrange("sk:queue:events:purchase_confirmed", 0, -1)
     # The channel is dynamically built, but redis_mock might capture it if it's subscribed
     # Actually redis_mock.publish is what's used.
     # We can check if publish was called if we mock it further, but usually redis_mock tracks publishes.

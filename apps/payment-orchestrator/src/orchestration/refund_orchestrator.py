@@ -8,14 +8,12 @@ import logging
 from dataclasses import asdict
 from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.events import build_event_envelope
 from src.models.refund_workflow import RefundWorkflow, RefundStatus
-from src.models.payment_workflow import PaymentWorkflow
 from src.models.outbox import OutboxEvent
 from src.adapters.factory import GatewayAdapterFactory
 from src.config import settings
@@ -37,9 +35,24 @@ class RefundOrchestrator:
         reason: str,
         refund_reference: str,
         gateway: str,
+        gateway_txn_id: str,
     ) -> RefundWorkflow:
         """
         Initiate a refund workflow and call the gateway adapter.
+
+        gateway_txn_id must be the original successful transaction's gateway
+        reference, supplied directly by the caller. This used to be derived
+        by looking up PaymentWorkflow.gateway_session_id via
+        payment_workflow_id — but PaymentWorkflow rows only exist for
+        payments made through this service's own (production-unreachable,
+        see src/api/v1/payments.py) down-payment endpoint. A refund for a
+        payment Gateway itself processed (the only production-reachable
+        path — see src/workers/payment_initiate_consumer.py) has no
+        PaymentWorkflow at all, so payment_workflow_id is always 0 there and
+        this always failed with ORIGINAL_TRANSACTION_NOT_FOUND. Every real
+        caller already has the gateway_txn_id from the PaymentTransaction row
+        it looked up, so take it directly instead of re-deriving it.
+        payment_workflow_id is kept only for the RefundWorkflow audit-trail FK.
         """
         # 1. Idempotency check
         existing = await self.db.scalar(
@@ -62,11 +75,9 @@ class RefundOrchestrator:
         self.db.add(refund)
         await self.db.flush()
 
-        # 3. Look up original gateway transaction ID
-        original_workflow = await self.db.get(PaymentWorkflow, payment_workflow_id)
-        if not original_workflow or not original_workflow.gateway_session_id:
+        if not gateway_txn_id:
             logger.error(
-                "Original payment transaction not found for refund",
+                "No gateway_txn_id supplied for refund — cannot call gateway",
                 extra={"payment_workflow_id": payment_workflow_id, "refund_reference": refund_reference}
             )
             refund.status = RefundStatus.FAILED
@@ -78,11 +89,11 @@ class RefundOrchestrator:
             })
             return refund
 
-        # 4. Call gateway via adapter
+        # 3. Call gateway via adapter
         adapter = GatewayAdapterFactory.get(gateway, settings)
         try:
             result = await adapter.refund(
-                gateway_txn_id=original_workflow.gateway_session_id,
+                gateway_txn_id=gateway_txn_id,
                 amount_pkr=amount_pkr,
                 reason=reason
             )

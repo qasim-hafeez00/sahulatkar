@@ -26,7 +26,6 @@ Boundary rules (DDD):
 """
 from __future__ import annotations
 
-import json
 import logging
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -38,16 +37,15 @@ from fastapi import HTTPException, status
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import OrderState, QueueName
+from sk_shared.constants import OrderState
 from sk_shared.events import (
     EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED,
     EVENT_VCN_ISSUED,
     build_event_envelope,
-    event_channel,
 )
 from sk_shared.models.contracts import MurabahaContract
 from sk_shared.models.order import Order
-from sk_shared.models.payment import VirtualCard
+from sk_shared.models.payment import PaymentTransaction, VirtualCard
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
@@ -67,7 +65,7 @@ class VcnService:
         # see src/api/v1/vcn.py) instead of being pinned forever by a
         # process-lifetime cache, which is what made the old single static
         # key un-rotatable without a process restart.
-        self._key_provider = VcnKeyProvider()
+        self._key_provider = VcnKeyProvider(db)
 
     # ── VCN Issuance ────────────────────────────────────────────────────────
 
@@ -93,7 +91,20 @@ class VcnService:
         start = time.perf_counter()
         try:
             order = await self._get_order(order_id)
-            if order.status != OrderState.CONTRACTS_SIGNED:
+            # Live-verified bug: queue_issue()'s caller is always
+            # confirm_down_payment's sequel (payments.py's own /down-payment
+            # endpoint, payment_webhook_consumer.py, payment_initiate_consumer.py),
+            # and by the time the queued vcn.issue job actually runs, Gateway's
+            # /internal/payments/{id}/confirm callback has already advanced
+            # Order.status from CONTRACTS_SIGNED to DOWN_PAYMENT_RECEIVED —
+            # exactly per the intended contracts-signed -> down-payment ->
+            # VCN-issuance flow. Requiring CONTRACTS_SIGNED here meant every
+            # real (non-test) VCN issuance was rejected the moment the
+            # gateway.payment_confirmed notification (GAP fixed this session)
+            # actually started working. CONTRACTS_SIGNED is still accepted so
+            # existing direct-call tests/callers that never advance Order.status
+            # keep working — mirrors confirm_down_payment's own multi-state gate.
+            if order.status not in {OrderState.CONTRACTS_SIGNED, OrderState.DOWN_PAYMENT_RECEIVED}:
                 raise HTTPException(
                     status_code=status.HTTP_403_FORBIDDEN,
                     detail="MURABAHA_NOT_SIGNED",
@@ -144,40 +155,62 @@ class VcnService:
             cardholder_svc = StripeCardholderService(self.redis)
             stripe_cardholder_id = await cardholder_svc.get_or_create(user_id=order.user_id)
 
-            # Real Stripe card creation
-            from src.adapters.stripe_issuing import StripeIssuingAdapter
-            stripe_adapter = StripeIssuingAdapter(
-                secret_key=settings.STRIPE_SECRET_KEY,
-                fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
-                fx_buffer_pct=settings.FX_BUFFER_PCT,
-            )
-            amount_usd_cents = stripe_adapter._pkr_to_usd_cents(authorized_amount)
-
             # Resolve MCC (simplified for this context)
             mcc = "5999"
 
-            stripe_card = stripe_adapter.create_card(
-                cardholder_id=stripe_cardholder_id,
-                authorized_amount_cents=amount_usd_cents,
-                merchant_category=mcc,
-            )
+            # Issuer selection: Lithic is code-complete (real merchant-domain
+            # locking via authorization rules, unlike Stripe's MCC-only lock)
+            # but gated off by default — it requires a business/KYB approval
+            # process before it can issue a single real card. Stripe Issuing
+            # remains the functional-today path until that approval lands.
+            if settings.FEATURE_LITHIC_ENABLED:
+                from src.adapters.lithic import LithicAdapter
+                issuer_adapter = LithicAdapter(
+                    api_key=settings.LITHIC_API_KEY,
+                    base_url=settings.LITHIC_BASE_URL,
+                    card_program_token=settings.LITHIC_CARD_PROGRAM_TOKEN,
+                    fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+                    fx_buffer_pct=settings.FX_BUFFER_PCT,
+                )
+                issuer_name = "lithic"
+                amount_usd_cents = issuer_adapter._pkr_to_usd_cents(authorized_amount)
+                issued_card = issuer_adapter.create_card(
+                    cardholder_id=stripe_cardholder_id,
+                    authorized_amount_cents=amount_usd_cents,
+                    merchant_category=mcc,
+                    merchant_domain=merchant_domain,
+                )
+            else:
+                from src.adapters.stripe_issuing import StripeIssuingAdapter
+                issuer_adapter = StripeIssuingAdapter(
+                    secret_key=settings.STRIPE_SECRET_KEY,
+                    fx_pkr_to_usd=settings.FX_PKR_TO_USD_RATE,
+                    fx_buffer_pct=settings.FX_BUFFER_PCT,
+                )
+                issuer_name = "stripe"
+                amount_usd_cents = issuer_adapter._pkr_to_usd_cents(authorized_amount)
+                issued_card = issuer_adapter.create_card(
+                    cardholder_id=stripe_cardholder_id,
+                    authorized_amount_cents=amount_usd_cents,
+                    merchant_category=mcc,
+                )
 
-            pan = stripe_card["pan"]
-            cvv = stripe_card["cvv"]
+            pan = issued_card["pan"]
+            cvv = issued_card["cvv"]
 
             # Both fields are encrypted under the same (current) key version —
             # only one version tag needs to be stored per row.
-            encrypted_pan, key_version = self._encrypt_value(pan)
-            encrypted_cvv, _ = self._encrypt_value(cvv)
+            encrypted_pan, key_version = await self._encrypt_value(pan)
+            encrypted_cvv, _ = await self._encrypt_value(cvv)
 
             card = VirtualCard(
                 order_id=order_id,
                 user_id=order.user_id,
-                issuer="stripe",
-                issuer_card_id=stripe_card["issuer_card_id"],
+                issuer=issuer_name,
+                issuer_card_id=issued_card["issuer_card_id"],
                 stripe_cardholder_id=stripe_cardholder_id,
                 masked_number=self._mask_pan(pan),
-                card_expiry=datetime(int(stripe_card["expiry_year"]), int(stripe_card["expiry_month"]), 1).date(),
+                card_expiry=datetime(int(issued_card["expiry_year"]), int(issued_card["expiry_month"]), 1).date(),
                 authorized_amount=authorized_amount,
                 loaded_amount=amount_pkr,
                 mcc_lock="retail",
@@ -212,7 +245,7 @@ class VcnService:
             await self._queue_outbox_event(EVENT_VCN_ISSUED, asdict(envelope))
 
             from src.core.metrics import VCN_ISSUED_TOTAL
-            VCN_ISSUED_TOTAL.labels(issuer="stripe").inc()
+            VCN_ISSUED_TOTAL.labels(issuer=issuer_name).inc()
 
             logger.info(
                 "VCN issued",
@@ -263,8 +296,8 @@ class VcnService:
         # Decrypt using whichever key version was stamped on this row at
         # issuance time — not necessarily the current version, so old VCNs
         # keep decrypting correctly across key rotations.
-        pan = self._decrypt_value(card.encrypted_pan, card.encryption_key_version)
-        cvv = self._decrypt_value(card.encrypted_cvv, card.encryption_key_version)
+        pan = await self._decrypt_value(card.encrypted_pan, card.encryption_key_version)
+        cvv = await self._decrypt_value(card.encrypted_cvv, card.encryption_key_version)
 
         # Security: log at DEBUG only — never INFO, never include PAN/CVV in log record
         logger.debug("VCN decrypted for checkout agent", extra={"order_id": order_id, "vcn_id": card.id})
@@ -328,6 +361,42 @@ class VcnService:
             },
         )
         await self._queue_outbox_event(EVENT_PAYMENT_DOWN_PAYMENT_CONFIRMED, asdict(envelope))
+
+        # P0-01 fix: the event above reaches Ledger (which posts the GL entry)
+        # but nothing was calling Gateway's own
+        # POST /internal/payments/{payment_id}/confirm — the only code path
+        # that advances Order.status past CONTRACTS_SIGNED and runs Gateway's
+        # saga-compensation logic. A real down payment therefore never moved
+        # the order forward in production; only a dev-simulated endpoint did.
+        # Look up the Gateway-created PaymentTransaction for this down payment
+        # (shared table) and queue a control event that OutboxPublisher turns
+        # into an HTTP call to Gateway, benefiting from the same
+        # retry/backoff the rest of the outbox already has.
+        txn = await self.db.scalar(
+            select(PaymentTransaction)
+            .where(
+                PaymentTransaction.order_id == order_id,
+                PaymentTransaction.transaction_type == "down_payment",
+                PaymentTransaction.status.in_(["initiated", "pending"]),
+                PaymentTransaction.deleted_at.is_(None),
+            )
+            .order_by(PaymentTransaction.created_at.desc())
+        )
+        if txn is not None:
+            await self._queue_outbox_event(
+                "gateway.payment_confirmed",
+                {
+                    "payment_id": txn.id,
+                    "gateway_txn_id": gateway_txn_id,
+                    "status": "confirmed",
+                },
+            )
+        else:
+            logger.warning(
+                "No matching Gateway PaymentTransaction found for down payment "
+                "confirmation — Order status will not advance past CONTRACTS_SIGNED",
+                extra={"order_id": order_id},
+            )
 
         logger.info(
             "Down payment confirmed — outbox event queued",
@@ -404,19 +473,19 @@ class VcnService:
     def _mask_pan(self, pan: str) -> str:
         return f"**** **** **** {pan[-4:]}"
 
-    def _encrypt_value(self, value: str) -> tuple[bytes, str]:
+    async def _encrypt_value(self, value: str) -> tuple[bytes, str]:
         """Encrypt with the current VCN key version. Returns (ciphertext, version_tag).
 
         See src/services/vcn_encryption.py::VcnKeyProvider for the versioned
         envelope scheme (local-mock vs. production-KMS split, rotation).
         """
-        return self._key_provider.encrypt(value)
+        return await self._key_provider.encrypt(value)
 
-    def _decrypt_value(self, ciphertext: bytes, key_version: Optional[str]) -> str:
+    async def _decrypt_value(self, ciphertext: bytes, key_version: Optional[str]) -> str:
         """Decrypt using the key version stamped on the record.
 
         `key_version` should be `VirtualCard.encryption_key_version`, which may
         be None for rows written before that column existed (treated as the
         legacy "v1" version — see VcnKeyProvider.LEGACY_VERSION).
         """
-        return self._key_provider.decrypt(ciphertext, key_version)
+        return await self._key_provider.decrypt(ciphertext, key_version)

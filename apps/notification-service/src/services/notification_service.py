@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import hashlib
-import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Optional
 
@@ -10,8 +8,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.notification import (
-    DispatchChannel, Notification, NotificationDispatch, NotificationStatus,
-    NotificationPriority, DispatchStatus
+    Notification, NotificationDispatch, NotificationStatus,
+    DispatchStatus
 )
 from sk_shared.redis_client import RedisClient
 
@@ -239,7 +237,7 @@ class NotificationService:
         if event_type not in EVENT_CATEGORY_MAP:
             event_type = "auth.otp_requested"
 
-        template_vars = {
+        {
             "otp": otp_code,
             "expires_min": expires_in_seconds // 60,
             "purpose": purpose.replace("_", " ")
@@ -395,7 +393,7 @@ class NotificationService:
     ) -> tuple[list[Notification], int, int]:
         query = select(Notification).where(Notification.user_id == user_id)
         if unread_only:
-            query = query.where(Notification.is_read == False)
+            query = query.where(not Notification.is_read)
         if category:
             query = query.where(Notification.category == category)
         
@@ -408,7 +406,7 @@ class NotificationService:
         unread = await self.db.scalar(
             select(func.count(Notification.id)).where(
                 Notification.user_id == user_id,
-                Notification.is_read == False
+                not Notification.is_read
             )
         )
         
@@ -439,7 +437,7 @@ class NotificationService:
         from sqlalchemy import update
         stmt = update(Notification).where(
             Notification.user_id == user_id,
-            Notification.is_read == False
+            not Notification.is_read
         ).values(
             is_read=True,
             read_at=datetime.now(timezone.utc)

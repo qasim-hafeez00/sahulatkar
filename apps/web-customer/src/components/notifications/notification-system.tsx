@@ -3,36 +3,17 @@
 import { motion, AnimatePresence } from "framer-motion"
 import { useState, useEffect, useCallback } from "react"
 import { useRouter } from "next/navigation"
-import { Bell, CreditCard, Info, ShoppingBag, Truck } from "lucide-react"
+import { Bell, CreditCard, ShieldCheck, ShoppingBag, Truck, Info } from "lucide-react"
 import { Button } from "@/components/ui/button"
 import { notificationsApi, notificationTarget, type NotificationItem } from "@/lib/notifications-api"
+import { getNotificationCategoryMeta, TONE_STYLES } from "@/lib/status"
 
-function getNotificationIcon(category: string) {
-  switch (category) {
-    case "payment":
-      return <CreditCard className="w-5 h-5" />
-    case "delivery":
-      return <Truck className="w-5 h-5" />
-    case "credit":
-      return <ShoppingBag className="w-5 h-5" />
-    default:
-      return <Info className="w-5 h-5" />
-  }
-}
-
-function getNotificationColor(category: string) {
-  switch (category) {
-    case "payment":
-      return "text-orange-600 bg-orange-100"
-    case "delivery":
-      return "text-blue-600 bg-blue-100"
-    case "credit":
-      return "text-emerald-600 bg-emerald-100"
-    case "kyc":
-      return "text-purple-600 bg-purple-100"
-    default:
-      return "text-gray-600 bg-gray-100"
-  }
+const CATEGORY_ICON: Record<string, React.ElementType> = {
+  payment: CreditCard,
+  delivery: Truck,
+  credit: ShoppingBag,
+  kyc: ShieldCheck,
+  general: Info,
 }
 
 function formatTimestamp(iso: string) {
@@ -116,11 +97,11 @@ export function NotificationSystem() {
               animate={{ opacity: 1, y: 0, scale: 1 }}
               exit={{ opacity: 0, y: -10, scale: 0.95 }}
               transition={{ duration: 0.2 }}
-              className="absolute right-0 mt-2 w-80 bg-white dark:bg-slate-900 rounded-xl shadow-2xl border border-gray-200 dark:border-white/10 z-50 max-h-96 overflow-hidden"
+              className="absolute right-0 mt-2 w-80 card-surface z-50 max-h-96 overflow-hidden"
             >
-              <div className="p-4 border-b border-gray-200 dark:border-white/10">
+              <div className="p-4 border-b border-gray-100 dark:border-white/10">
                 <div className="flex items-center justify-between">
-                  <h3 className="font-semibold text-gray-900 dark:text-white">Notifications</h3>
+                  <h3 className="font-bold text-gray-900 dark:text-white text-sm">Notifications</h3>
                   {unreadCount > 0 && (
                     <Button variant="ghost" size="sm" onClick={handleMarkAllRead} className="text-xs">
                       Mark all as read
@@ -132,38 +113,43 @@ export function NotificationSystem() {
               <div className="overflow-y-auto max-h-72">
                 {notifications.length === 0 ? (
                   <div className="p-8 text-center">
-                    <Bell className="w-12 h-12 text-gray-300 mx-auto mb-4" />
-                    <p className="text-gray-500">No notifications</p>
+                    <Bell className="w-10 h-10 text-gray-300 mx-auto mb-3" />
+                    <p className="text-sm text-gray-500">No notifications</p>
                   </div>
                 ) : (
                   <div className="divide-y divide-gray-100 dark:divide-white/5">
-                    {notifications.map((notification) => (
-                      <div
-                        key={notification.id}
-                        className={`p-4 hover:bg-gray-50 dark:hover:bg-white/5 cursor-pointer transition-colors ${
-                          !notification.is_read ? "bg-blue-50 dark:bg-blue-500/5" : ""
-                        }`}
-                        onClick={() => handleOpenNotification(notification)}
-                      >
-                        <div className="flex items-start space-x-3">
-                          <div className={`w-10 h-10 rounded-full flex items-center justify-center flex-shrink-0 ${getNotificationColor(notification.category)}`}>
-                            {getNotificationIcon(notification.category)}
-                          </div>
-                          <div className="flex-1 min-w-0">
-                            <p className={`text-sm text-gray-900 dark:text-white ${!notification.is_read ? "font-semibold" : "font-medium"}`}>
-                              {notification.title}
-                            </p>
-                            <p className="text-sm text-gray-600 dark:text-gray-400 mt-1 line-clamp-2">{notification.body}</p>
-                            <p className="text-xs text-gray-500 mt-2">{formatTimestamp(notification.created_at)}</p>
+                    {notifications.slice(0, 8).map((notification) => {
+                      const CatIcon = CATEGORY_ICON[notification.category] ?? Info
+                      const tone = TONE_STYLES[getNotificationCategoryMeta(notification.category).tone]
+                      return (
+                        <div
+                          key={notification.id}
+                          className={`p-4 hover:bg-gray-50 dark:hover:bg-white/5 cursor-pointer transition-colors ${
+                            !notification.is_read ? "bg-orange-50/40 dark:bg-orange-500/5" : ""
+                          }`}
+                          onClick={() => handleOpenNotification(notification)}
+                        >
+                          <div className="flex items-start gap-3">
+                            <div className={`w-9 h-9 rounded-full flex items-center justify-center flex-shrink-0 border ${tone.badge}`}>
+                              <CatIcon className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className={`text-sm text-gray-900 dark:text-white ${!notification.is_read ? "font-semibold" : "font-medium"}`}>
+                                {notification.title}
+                              </p>
+                              <p className="text-xs text-gray-600 dark:text-gray-400 mt-0.5 line-clamp-2">{notification.body}</p>
+                              <p className="text-xs text-gray-500 mt-1.5">{formatTimestamp(notification.created_at)}</p>
+                            </div>
+                            {!notification.is_read && <span className="mt-1.5 h-2 w-2 rounded-full bg-orange-500 flex-shrink-0" />}
                           </div>
                         </div>
-                      </div>
-                    ))}
+                      )
+                    })}
                   </div>
                 )}
               </div>
 
-              <div className="p-3 border-t border-gray-200 dark:border-white/10">
+              <div className="p-3 border-t border-gray-100 dark:border-white/10">
                 <Button
                   variant="ghost"
                   size="sm"

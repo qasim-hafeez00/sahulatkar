@@ -164,3 +164,10 @@ class AgentQueueResponse(BaseModel):
     status: Literal["queued"]
     job_id: UUID
     estimated_completion_seconds: int
+
+
+class AgentLatestExecutionResponse(BaseModel):
+    job_id: UUID
+    status: str
+    step_reached: str | None = None
+    merchant_order_id: str | None = None

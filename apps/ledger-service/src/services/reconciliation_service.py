@@ -4,7 +4,7 @@ from datetime import date
 from datetime import datetime, timezone
 from decimal import Decimal
 
-from sqlalchemy import case, func, select, update
+from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.payment import PaymentTransaction, Reconciliation, ReconciliationItem
@@ -63,7 +63,7 @@ class ReconciliationService:
         # LS-BL-06: Also compare the sum of matched PaymentTransaction amounts
         # against both expected_amount and actual_amount for true reconciliation.
         matched_vs_expected_discrepancy = matched_amount - expected_decimal
-        matched_vs_actual_discrepancy = matched_amount - actual_decimal
+        matched_amount - actual_decimal
 
         if abs(matched_vs_expected_discrepancy) > Decimal("1.00"):
             reconciliation_note = (

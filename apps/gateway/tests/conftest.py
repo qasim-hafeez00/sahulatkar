@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 import uuid
 import hashlib
 import sys
@@ -16,7 +15,6 @@ from sqlalchemy.dialects.postgresql import ARRAY, JSONB, TSVECTOR
 from sqlalchemy.ext.compiler import compiles
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession
 
-import fakeredis.aioredis
 
 
 def _bootstrap_project_root() -> None:
@@ -31,23 +29,13 @@ def _bootstrap_project_root() -> None:
 
 _bootstrap_project_root()
 
-from sk_shared.database import get_db
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import create_access_token
 from sk_shared.models.base import Base
-from sk_shared.models import auth  # registers auth models with Base.metadata
-from sk_shared.models import kyc   # registers kyc models with Base.metadata
-from sk_shared.models import product  # registers product models with Base.metadata
-from sk_shared.models import order  # registers order models with Base.metadata
-from sk_shared.models import contracts  # registers contract models with Base.metadata
-from sk_shared.models import hitl       # HitlQueue
-from sk_shared.models import payment    # Loan, Installment, PaymentTransaction, VirtualCard
-from sk_shared.models import admin      # RiskBlacklist, SystemParameter
 try:
     from sk_shared.models import delivery   # Shipment, TrackingEvent
 except ImportError:
     delivery = None
-from sk_shared.models import audit      # AuditTrail
 
 try:
     from src.main import app

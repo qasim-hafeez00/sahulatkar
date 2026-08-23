@@ -1,7 +1,7 @@
 """Admin Financial Operations — Module 6 (P&L, credit loss, tax summary)."""
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi import APIRouter, Depends, Request, status
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession
 

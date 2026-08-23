@@ -19,7 +19,7 @@ from sqlalchemy.orm import selectinload
 from sk_shared.models.kyc import CustomerProfile
 from sk_shared.models.payment import Loan
 from src.config import settings
-from src.services.tasdeeq_validation import TASDEEQReportRow, TASDEEQCSVValidator, TASDEEQValidationError
+from src.services.tasdeeq_validation import TASDEEQReportRow, TASDEEQCSVValidator
 from src.core.readonly_guard import readonly_guard
 
 

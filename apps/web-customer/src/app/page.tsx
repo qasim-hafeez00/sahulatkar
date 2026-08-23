@@ -1,14 +1,21 @@
 "use client"
 
 import { motion } from "framer-motion"
-import { ArrowRight, Shield, Clock, CreditCard, Star, CheckCircle, ArrowUpRight } from "lucide-react"
+import {
+  ArrowRight,
+  UserPlus,
+  Link2,
+  ShieldCheck,
+  PackageCheck,
+  HeartHandshake,
+  BadgeCheck,
+} from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { Card, CardContent } from "@/components/ui/card"
+import { Card } from "@/components/ui/card"
 import { MovingBanner } from "@/components/ui/moving-banner"
 import { ProductExtraction } from "@/components/ui/product-extraction"
 import { ProductShowcase } from "@/components/ui/product-showcase"
 import { FAQSection } from "@/components/ui/faq-section"
-import { HeroBrandCarousel } from "@/components/ui/hero-brand-carousel"
 import { FanDeckNew } from "@/components/ui/fan-deck-new"
 import Link from "next/link"
 import { useRouter } from "next/navigation"
@@ -31,7 +38,7 @@ export default function Home() {
       <ProductShowcase />
 
       {/* Transparent & Simple Section */}
-      <section className="py-20 section-surface">
+      <section id="how-it-works" className="py-20 section-surface">
         <div className="container mx-auto px-4">
           <motion.div
             initial={{ y: 50, opacity: 0 }}
@@ -50,29 +57,29 @@ export default function Home() {
           
           <div className="grid md:grid-cols-4 gap-8">
             {[
-              { 
-                step: 1, 
-                title: "Sign Up", 
+              {
+                step: 1,
+                title: "Sign Up",
                 description: "Create your account in minutes with instant verification",
-                image: "https://cdn.pixabay.com/photo/2022/06/17/16/48/subscribe-7268360_1280.jpg"
+                icon: UserPlus,
               },
-              { 
-                step: 2, 
-                title: "Browse Products", 
+              {
+                step: 2,
+                title: "Paste a Link",
                 description: "Paste any product URL from your favorite stores",
-                image: "https://cdn.pixabay.com/photo/2021/03/02/13/04/laptop-6062423_640.jpg"
+                icon: Link2,
               },
-              { 
-                step: 3, 
-                title: "Get Approved", 
+              {
+                step: 3,
+                title: "Get Approved",
                 description: "Instant credit assessment with transparent terms",
-                image: "https://cdn.pixabay.com/photo/2021/08/17/17/28/covid-19-6553695_1280.jpg"
+                icon: ShieldCheck,
               },
-              { 
-                step: 4, 
-                title: "Shop Now", 
+              {
+                step: 4,
+                title: "Shop Now",
                 description: "We purchase and deliver, you pay in easy installments",
-                image: "https://cdn.pixabay.com/photo/2017/10/29/17/31/online-2900303_1280.jpg"
+                icon: PackageCheck,
               }
             ].map((item, index) => (
               <motion.div
@@ -83,18 +90,67 @@ export default function Home() {
                 viewport={{ once: true }}
               >
                 <Card className="text-center p-6 border-0 card-surface hover-lift">
-                  <div className="relative w-full h-32 mb-4 rounded-lg overflow-hidden">
-                    <img 
-                      src={item.image}
-                      alt={item.title}
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/40 to-transparent" />
-                    <div className="absolute top-1/2 left-1/2 transform -translate-x-1/2 -translate-y-1/2">
-                      <div className="w-12 h-12 bg-gradient-to-br from-orange-500 to-orange-600 rounded-xl flex items-center justify-center text-white text-xl font-bold">
-                        {item.step}
-                      </div>
-                    </div>
+                  <div className="relative mx-auto mb-4 flex h-20 w-20 items-center justify-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-600 shadow-lg shadow-orange-500/20">
+                    <item.icon className="h-9 w-9 text-white" strokeWidth={1.75} />
+                    <span className="absolute -right-2 -top-2 flex h-7 w-7 items-center justify-center rounded-full border-2 border-[var(--card-bg)] bg-[var(--foreground)] text-xs font-bold text-[var(--background)]">
+                      {item.step}
+                    </span>
+                  </div>
+                  <h3 className="text-xl font-semibold text-theme mb-2">{item.title}</h3>
+                  <p className="text-theme-muted">{item.description}</p>
+                </Card>
+              </motion.div>
+            ))}
+          </div>
+        </div>
+      </section>
+
+      {/* Shariah Compliance & Trust Section */}
+      <section id="shariah-compliance" className="py-20 section-surface">
+        <div className="container mx-auto px-4">
+          <motion.div
+            initial={{ y: 50, opacity: 0 }}
+            whileInView={{ y: 0, opacity: 1 }}
+            transition={{ duration: 0.6 }}
+            viewport={{ once: true }}
+            className="text-center mb-16"
+          >
+            <h2 className="text-4xl font-bold text-theme mb-4">
+              Shariah Compliance &amp; Trust
+            </h2>
+            <p className="text-xl text-theme-muted max-w-2xl mx-auto">
+              Every contract, fee, and profit margin is disclosed upfront and structured under a Murabaha agreement
+            </p>
+          </motion.div>
+
+          <div className="grid md:grid-cols-3 gap-8">
+            {[
+              {
+                icon: ShieldCheck,
+                title: "Fully Transparent Pricing",
+                description: "The cost price, profit amount, and profit percentage are disclosed on every contract before you sign — no hidden markups.",
+              },
+              {
+                icon: HeartHandshake,
+                title: "100% of Late Fees to Charity",
+                description: "We don't profit from missed payments. Every late fee collected is donated in full — none of it is retained by SahulatKar.",
+              },
+              {
+                icon: BadgeCheck,
+                title: "SECP Registered & Certified",
+                description: "SahulatKar operates as a registered entity under Pakistani law, with every Murabaha contract reviewed for Shariah compliance.",
+              },
+            ].map((item, index) => (
+              <motion.div
+                key={item.title}
+                initial={{ y: 50, opacity: 0 }}
+                whileInView={{ y: 0, opacity: 1 }}
+                transition={{ duration: 0.6, delay: index * 0.1 }}
+                viewport={{ once: true }}
+              >
+                <Card className="text-center p-6 border-0 card-surface hover-lift h-full">
+                  <div className="mx-auto mb-4 flex h-16 w-16 items-center justify-center rounded-2xl bg-gradient-to-br from-orange-500 to-orange-600 shadow-lg shadow-orange-500/20">
+                    <item.icon className="h-8 w-8 text-white" strokeWidth={1.75} />
                   </div>
                   <h3 className="text-xl font-semibold text-theme mb-2">{item.title}</h3>
                   <p className="text-theme-muted">{item.description}</p>
@@ -106,83 +162,9 @@ export default function Home() {
       </section>
 
       {/* FAQ Section */}
-      <FAQSection />
-
-      
-      {/* Product Showcase */}
-      <section className="py-20 section-surface">
-        <div className="container mx-auto px-4">
-          <motion.div
-            initial={{ y: 50, opacity: 0 }}
-            whileInView={{ y: 0, opacity: 1 }}
-            transition={{ duration: 0.6 }}
-            viewport={{ once: true }}
-            className="text-center mb-16"
-          >
-            <h2 className="text-4xl font-bold text-theme mb-4">
-              Popular Products
-            </h2>
-            <p className="text-xl text-theme-muted max-w-2xl mx-auto">
-              See what our customers are financing with flexible payment plans
-            </p>
-          </motion.div>
-          
-          <div className="grid md:grid-cols-3 gap-8">
-            {[
-              { 
-                name: "iPhone 15 Pro", 
-                price: "PKR 299,999", 
-                monthly: "PKR 25,000",
-                image: " https://cdn.pixabay.com/photo/2022/09/26/19/40/iphone-7481400_1280.jpg"
-              },
-              { 
-                name: "MacBook Air M2", 
-                price: "PKR 249,999", 
-                monthly: "PKR 20,833",
-                image: "https://cdn.pixabay.com/photo/2016/10/15/13/40/laptop-1742462_1280.jpg"
-              },
-              { 
-                name: "Samsung TV 55\"", 
-                price: "PKR 149,999", 
-                monthly: "PKR 12,500",
-                image: "https://cdn.pixabay.com/photo/2015/02/07/20/58/tv-627876_1280.jpg"
-              }
-            ].map((product, index) => (
-              <motion.div
-                key={product.name}
-                initial={{ y: 50, opacity: 0 }}
-                whileInView={{ y: 0, opacity: 1 }}
-                transition={{ duration: 0.6, delay: index * 0.1 }}
-                viewport={{ once: true }}
-              >
-                <Card className="overflow-hidden border-0 card-surface hover-lift">
-                  <div className="aspect-square relative overflow-hidden">
-                    <img 
-                      src={product.image}
-                      alt={product.name}
-                      className="w-full h-full object-cover"
-                    />
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/20 to-transparent" />
-                  </div>
-                  <CardContent className="p-6">
-                    <h3 className="text-xl font-semibold text-theme mb-2">{product.name}</h3>
-                    <div className="flex items-center justify-between mb-4">
-                      <span className="text-2xl font-bold text-theme">{product.price}</span>
-                      <span className="text-sm text-green-600 font-medium">{product.monthly}/mo</span>
-                    </div>
-                    <Button 
-                      className="w-full"
-                      onClick={() => window.location.href = '/auth/login'}
-                    >
-                      Finance Now
-                    </Button>
-                  </CardContent>
-                </Card>
-              </motion.div>
-            ))}
-          </div>
-        </div>
-      </section>
+      <div id="faq">
+        <FAQSection />
+      </div>
 
       {/* CTA Section */}
       <section className="py-20 bg-gradient-to-br from-orange-600 to-orange-700">
@@ -240,7 +222,7 @@ export default function Home() {
             <div>
               <h4 className="font-semibold mb-4">Product</h4>
               <ul className="space-y-2 text-gray-400">
-                <li><Link href="/cart" className="hover:text-white transition-colors">How It Works</Link></li>
+                <li><Link href="/#how-it-works" className="hover:text-white transition-colors">How It Works</Link></li>
                 <li><Link href="/pricing" className="hover:text-white transition-colors">Pricing</Link></li>
                 <li><Link href="/cart" className="hover:text-white transition-colors">Shop Now</Link></li>
               </ul>
@@ -258,7 +240,7 @@ export default function Home() {
               <ul className="space-y-2 text-gray-400">
                 <li><Link href="/privacy" className="hover:text-white transition-colors">Privacy Policy</Link></li>
                 <li><Link href="/terms" className="hover:text-white transition-colors">Terms of Service</Link></li>
-                <li><Link href="/shariah" className="hover:text-white transition-colors">Shariah Compliance</Link></li>
+                <li><Link href="/#shariah-compliance" className="hover:text-white transition-colors">Shariah Compliance</Link></li>
               </ul>
             </div>
           </div>

@@ -80,7 +80,13 @@ class PriceStalenessWorker:
                     canonical_url=product.canonical_url,
                     platform_detected=product.platform or "CUSTOM",
                     status="queued",
-                    queued_at=now,
+                    # Same naive-vs-aware bug as scraping_worker.py's own
+                    # queue_job path — queued_at is TIMESTAMP WITHOUT TIME
+                    # ZONE. Unlike scraping_worker/checkout_consumer, this
+                    # worker has no per-job try/except, so the unhandled
+                    # DataError crashed the entire process outright rather
+                    # than just failing one job.
+                    queued_at=now.replace(tzinfo=None),
                 )
                 db.add(job)
                 await db.flush()

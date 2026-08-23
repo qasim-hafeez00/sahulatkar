@@ -8,7 +8,6 @@ installment_id only — order_id is never set directly on the row — so the
 admin transaction list must derive it via a join to Loan instead of always
 returning None.
 """
-from datetime import datetime, timezone
 from decimal import Decimal
 
 import pytest

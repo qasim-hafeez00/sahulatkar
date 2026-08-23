@@ -10,11 +10,18 @@ async def test_listen_to_redis_events():
     app = FastAPI()
     mock_redis = MagicMock()
     mock_pubsub = AsyncMock()
-    
-    # Mock Redis client structure
-    mock_redis._client = MagicMock()
-    mock_redis._client.pubsub.return_value = mock_pubsub
-    
+
+    # listen_to_redis_events() calls `app.state.redis.redis.pubsub()` (RedisClient
+    # wraps the real client as `.redis`, not `._client` — see
+    # sk_shared/redis_client.py). Mocking the wrong attribute name left
+    # `.redis.pubsub()` as an unconfigured MagicMock whose `.subscribe(...)`
+    # isn't awaitable, so every real run of this test hit the `except Exception`
+    # branch and looped forever on `await asyncio.sleep(5)` — the mocked
+    # CancelledError from mock_listen() below was never reached because
+    # mock_pubsub itself was never returned to the code under test.
+    mock_redis.redis = MagicMock()
+    mock_redis.redis.pubsub.return_value = mock_pubsub
+
     app.state.redis = mock_redis
     
     # Mock the generator of listen()

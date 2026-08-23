@@ -32,6 +32,7 @@ export function HeroBrandCarousel() {
 
   // Fix hydration by setting isClient only after mount
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsClient(true)
   }, [])
   

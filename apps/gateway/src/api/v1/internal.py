@@ -1,12 +1,11 @@
 from fastapi import APIRouter, Depends, HTTPException, status, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
-from typing import Optional
+from typing import Literal, Optional
 from datetime import datetime, timezone
 from datetime import timedelta
 import secrets
-import json
 
 from sk_shared.models.order import Order, OrderStatusHistory
 from sk_shared.models.product import Product
@@ -49,8 +48,6 @@ async def _orders_for_down_payment_txn(db: AsyncSession, txn) -> list[Order]:
     order = await db.scalar(select(Order).where(Order.id == txn.order_id))
     return [order] if order else []
 
-
-from pydantic import Field
 
 class ProductExtractedPayload(BaseModel):
     product_id: int = Field(..., gt=0)
@@ -101,11 +98,17 @@ async def product_extracted_callback(
     order.down_payment_amount = round(payload.sale_price * payload.down_payment_pct / 100.0, 2)
     order.status = OrderState.OFFER_PRESENTED
 
-    # GW-BL-01: Reserve credit at extraction — guard against insufficient credit first
+    # GW-BL-01: Reserve credit at extraction — guard against insufficient credit first.
+    # P1-06: row-locked (SELECT ... FOR UPDATE) so two concurrent extraction
+    # callbacks for the same user can't both read the same available_credit,
+    # both pass the check, and both decrement — the second blocks until the
+    # first commits and then re-reads the already-decremented value.
     from sk_shared.models.auth import User as UserModel
     from sk_shared.models.credit import CreditLimitHistory
     user = await db.scalar(
-        select(UserModel).where(UserModel.id == order.user_id, UserModel.deleted_at.is_(None))
+        select(UserModel)
+        .where(UserModel.id == order.user_id, UserModel.deleted_at.is_(None))
+        .with_for_update()
     )
     if user and user.available_credit is not None:
         prev_available = float(user.available_credit)
@@ -195,8 +198,7 @@ async def payment_confirmed_callback(
     _require_internal(request)
     
     from sk_shared.models.payment import PaymentTransaction
-    from sk_shared.events import event_channel
-    
+
     txn = await db.scalar(select(PaymentTransaction).where(PaymentTransaction.id == payment_id))
     if not txn:
         raise HTTPException(status_code=404, detail="PAYMENT_NOT_FOUND")
@@ -244,17 +246,14 @@ async def payment_confirmed_callback(
                     reason="down_payment_failed_reverted",
                 ))
 
-    # Publish event for Ledger orchestrator ingestion
-    if payload.status == "confirmed":
-        event = json.dumps({
-            "event": "payment.down_payment_confirmed",
-            "payment_id": payment_id,
-            "order_id": txn.order_id,
-            "amount": float(txn.amount),
-            "triggered_at": datetime.now(timezone.utc).isoformat(),
-        })
-        if hasattr(redis, "redis"):
-            await redis.redis.publish(event_channel("payment.down_payment_confirmed"), event)
+    # NOTE: Ledger ingestion of payment.down_payment_confirmed is handled by
+    # Payment Orchestrator's transactional outbox (see
+    # VcnService.confirm_down_payment in payment-orchestrator), which is what
+    # calls this endpoint in the first place — do not re-publish here. This
+    # used to also publish that event with a mismatched payload key
+    # ("amount" instead of the "amount_pkr" key Ledger's listener reads),
+    # which would have raised on the consumer side had it ever fired; it
+    # never fired historically because nothing called this endpoint.
 
     await db.commit()
     return {"status": "ok"}
@@ -487,8 +486,6 @@ async def shipment_register_callback(
 # ============================================================================
 # TASK-9: Checkout Status Callback (GAP-03)
 # ============================================================================
-
-from typing import Literal
 
 class CheckoutStatusPayload(BaseModel):
     status: Literal["succeeded", "failed"]

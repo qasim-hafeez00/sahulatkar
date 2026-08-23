@@ -1,4 +1,3 @@
-from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.notification import NotificationPreference
@@ -26,7 +25,7 @@ class PreferenceService:
         is_global_unsub = await self.db.scalar(
             select(NotificationPreference.is_globally_unsubscribed)
             .where(NotificationPreference.user_id == user_id)
-            .where(NotificationPreference.is_globally_unsubscribed == True)
+            .where(NotificationPreference.is_globally_unsubscribed)
             .limit(1)
         )
         

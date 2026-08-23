@@ -11,10 +11,10 @@ from opentelemetry import trace
 from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from sk_shared.constants import QueueName, RedisNS, RedisTTL
+from sk_shared.constants import QueueName
 from sk_shared.database import SessionLocal
 from sk_shared.models.hitl import HitlQueue
-from sk_shared.models.product import Merchant, Product, ScrapingJob
+from sk_shared.models.product import ScrapingJob
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
@@ -126,11 +126,19 @@ class ScrapingWorker:
             scraping_job.started_at = datetime.now(timezone.utc)
             await db.flush()
 
+        # Looked up before extraction (not just for the product_payload's
+        # merchant_id below) so a tuned merchants.scrape_config override can
+        # be passed into Tier 3's Playwright agent for this domain.
+        lookup_domain = payload["canonical_url"].split("//", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
+        merchant, _ = await merchant_repo.get_or_create(lookup_domain, payload.get("platform", "CUSTOM"))
+
         service = ExtractionWaterfallService(self.redis)
         # DESIGN-03 FIX: Call extract() (full waterfall: Tier1→Tier2A→Tier2B→Tier3)
         # instead of run_tier3() directly, so fast-path APIs (Rye, Violet) are used
         # for supported platforms, reducing unnecessary Playwright sessions.
-        result = await service.extract(payload["canonical_url"], payload.get("platform", "CUSTOM"))
+        result = await service.extract(
+            payload["canonical_url"], payload.get("platform", "CUSTOM"), scrape_config=merchant.scrape_config
+        )
         if result.status != "completed":
             scraping_job.error_code = result.error_code
             scraping_job.error_message = result.error_message
@@ -194,10 +202,6 @@ class ScrapingWorker:
             )
             return
 
-        canonical_url = payload["canonical_url"]
-        domain = canonical_url.split("//", 1)[-1].split("/", 1)[0].lower().replace("www.", "")
-        merchant, _ = await merchant_repo.get_or_create(domain, payload.get("platform", "CUSTOM"))
-
         primary_image_s3, secondary_images = _extract_image_fields(result)
         from src.services.prohibited_checker import ProhibitedCheckerService
         checker = ProhibitedCheckerService()
@@ -209,6 +213,42 @@ class ScrapingWorker:
             description=getattr(result, "description", None),
             brand=getattr(result, "brand", None),
         )
+
+        if prohibited_check.is_prohibited:
+            # P0-03 fix: the synchronous extraction path (product_extraction_
+            # service.py) rejects prohibited products outright and never
+            # persists them; this async worker path was computing the same
+            # check but only using it to tag shariah_category, still saving
+            # the product as status="active"/purchasable. That left prohibited
+            # items live for up to 24h until the daily catalog sweep caught
+            # them by name/URL keyword only (not this domain-denylist/DB
+            # check). Mirror the sync path: block here too, don't persist.
+            if settings.FEATURE_HITL_ESCALATION:
+                db.add(HitlQueue(
+                    order_id=scraping_job.order_id,
+                    execution_id=None,
+                    status="pending",
+                    priority=2,
+                    failure_reason=(
+                        f"PROHIBITED_CATEGORY: {prohibited_check.category or 'unknown'} "
+                        f"(Keyword: {prohibited_check.keyword})"
+                    ),
+                ))
+            scraping_job.status = "failed"
+            scraping_job.error_code = "PROHIBITED_CATEGORY"
+            scraping_job.error_message = f"Prohibited category: {prohibited_check.category or 'unknown'}"
+            scraping_job.completed_at = datetime.now(timezone.utc)
+            await db.commit()
+            await publish_event(
+                redis=self.redis,
+                event="product.extraction_failed",
+                payload={
+                    "order_id": scraping_job.order_id,
+                    "error_code": scraping_job.error_code,
+                    "error_message": scraping_job.error_message,
+                },
+            )
+            return
 
         product_payload = {
             "merchant_id": merchant.id,

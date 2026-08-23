@@ -1,6 +1,6 @@
 import hashlib
 from datetime import datetime, timezone
-from typing import AsyncGenerator, Optional
+from typing import AsyncGenerator
 from fastapi import Request, Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -58,7 +58,6 @@ async def get_current_user(
     session_data = await redis.get(f"sk:auth:session:{token_hash}")
     if not session_data:
         # Fallback to DB check for safety
-        from sqlalchemy import and_
         from sk_shared.models.auth import UserSession
         result = await db.execute(select(UserSession).where(
             UserSession.access_token_hash == token_hash,

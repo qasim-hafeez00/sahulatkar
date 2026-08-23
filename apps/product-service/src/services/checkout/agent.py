@@ -4,7 +4,6 @@ import json
 import socket
 from datetime import datetime, timezone
 import time
-from typing import Any, Dict, Optional
 from uuid import UUID
 
 from sqlalchemy import select
@@ -19,7 +18,6 @@ from src.services.checkout.vcn_verifier import VcnVerifier
 
 from sk_shared.constants import QueueName
 from sk_shared.events import (
-    EVENT_ORDER_PURCHASE_CONFIRMED,
     build_event_envelope,
     event_channel,
 )
@@ -29,7 +27,6 @@ from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.models.product import Product
 from sk_shared.redis_client import RedisClient
-from sk_shared.security import SecretService
 
 class CheckoutAgentService:
     """Orchestrator for autonomous checkout operations.
@@ -77,7 +74,11 @@ class CheckoutAgentService:
             vcn_id=vcn_id,
             status="queued",
             step_reached="queued",
-            queued_at=now,
+            # queued_at is TIMESTAMP WITHOUT TIME ZONE (partition-adjacent
+            # column, same convention as delivery's TrackingEvent.event_time)
+            # — an aware datetime here 500s the insert outright
+            # ("can't subtract offset-naive and offset-aware datetimes").
+            queued_at=now.replace(tzinfo=None),
         )
         self.db.add(execution)
         await self.db.commit()
@@ -133,7 +134,10 @@ class CheckoutAgentService:
 
         started_at = datetime.now(timezone.utc)
         execution.status = "running"
-        execution.started_at = started_at
+        # started_at/completed_at are TIMESTAMP WITHOUT TIME ZONE columns
+        # (same convention as queued_at above) — keep `started_at` itself
+        # aware for the duration_ms subtraction below, store the naive form.
+        execution.started_at = started_at.replace(tzinfo=None)
         await self.db.commit()
 
         # Support for regression testing forced failures
@@ -176,8 +180,9 @@ class CheckoutAgentService:
             execution.step_reached = "order_confirmed"
             execution.merchant_order_id = result.get("merchant_order_id")
             execution.merchant_order_url = result.get("merchant_order_url")
-            execution.completed_at = datetime.now(timezone.utc)
-            execution.duration_ms = int((execution.completed_at - started_at).total_seconds() * 1000)
+            completed_at = datetime.now(timezone.utc)
+            execution.completed_at = completed_at.replace(tzinfo=None)
+            execution.duration_ms = int((completed_at - started_at).total_seconds() * 1000)
             await self.db.commit()
 
             # GAP-21: VCN Verification (Decoupled)
@@ -230,7 +235,7 @@ class CheckoutAgentService:
             return
 
         execution.status = "cancelled"
-        execution.completed_at = datetime.now(timezone.utc)
+        execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await self.db.commit()
 
         # Remove from queue if present
@@ -272,7 +277,7 @@ class CheckoutAgentService:
         execution.status = "failed"
         execution.failure_type = failure_type
         execution.error_detail = error_detail
-        execution.completed_at = datetime.now(timezone.utc)
+        execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
         await self.db.commit()
 
         if settings.FEATURE_HITL_ESCALATION:

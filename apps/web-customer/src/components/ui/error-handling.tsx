@@ -9,7 +9,12 @@ import { Card, CardContent } from "@/components/ui/card"
 interface ErrorBoundaryState {
   hasError: boolean
   error?: Error
-  errorInfo?: any
+  errorInfo?: React.ErrorInfo
+}
+
+type ErrorBoundaryProps = {
+  children: React.ReactNode
+  fallback?: React.ComponentType<{ error?: Error; reset: () => void }>
 }
 
 interface ErrorDisplayProps {
@@ -197,10 +202,10 @@ export function NotFoundError() {
 
 // Error Boundary Component
 export class ErrorBoundary extends React.Component<
-  { children: React.ReactNode; fallback?: React.ComponentType<{ error?: Error; reset: () => void }> },
+  ErrorBoundaryProps,
   ErrorBoundaryState
 > {
-  constructor(props: any) {
+  constructor(props: ErrorBoundaryProps) {
     super(props)
     this.state = { hasError: false }
   }
@@ -209,7 +214,7 @@ export class ErrorBoundary extends React.Component<
     return { hasError: true, error }
   }
 
-  componentDidCatch(error: Error, errorInfo: any) {
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
     console.error('Error caught by boundary:', error, errorInfo)
     this.setState({ error, errorInfo })
   }

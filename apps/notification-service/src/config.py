@@ -89,9 +89,16 @@ class Settings(BaseSettings):
     NOTIFICATION_DLQ_KEY: str = "sk:queue:notifications:dlq"
 
     # ── Scheduler ─────────────────────────────────────────────────────────────
-    # Cron expression for the installment reminder scheduler
-    REMINDER_SCHEDULER_CRON: str = "0 9 * * *"   # 9 AM PKT daily
-    RETRY_WORKER_CRON: str = "*/5 * * * *"         # every 5 minutes
+    # Cron expression for the installment reminder scheduler. Documents the
+    # intended cadence; no croniter/APScheduler dependency exists in this
+    # service, so reminder_worker/retry_worker instead run as in-process
+    # asyncio loops on the interval settings below — idempotency_key already
+    # scopes each reminder to a calendar day, so polling more often than once
+    # a day is safe and just means the fire time isn't pinned to exactly 9 AM.
+    REMINDER_SCHEDULER_CRON: str = "0 9 * * *"   # 9 AM PKT daily (documents intent)
+    RETRY_WORKER_CRON: str = "*/5 * * * *"         # every 5 minutes (documents intent)
+    REMINDER_WORKER_INTERVAL_SECONDS: int = 3600
+    RETRY_WORKER_INTERVAL_SECONDS: int = 300
 
     # Reminder windows in days-before-due
     REMINDER_DAYS_BEFORE: List[int] = Field(default_factory=lambda: [3, 1])
@@ -113,6 +120,32 @@ class Settings(BaseSettings):
                 "it is used both for X-Internal-Key auth and for signing/verifying "
                 "the admin assertion trusted by admin_notifications/admin_tracking."
             )
+
+        # P1-08: the SendGrid/SMS/WhatsApp/AfterShip webhook handlers only
+        # verify a signature when their secret is configured — an empty
+        # secret makes each handler either skip verification entirely
+        # (SendGrid/SMS/WhatsApp: logs a warning and accepts unsigned
+        # requests) or verify against an effectively-empty HMAC key
+        # (AfterShip). That "fail open" default is fine for local dev (no
+        # real webhook traffic exists to spoof) but must not be reachable in
+        # a real deployment — refuse to start rather than silently accept
+        # forged webhook calls.
+        if self.ENVIRONMENT != "local":
+            missing = [
+                name for name, value in (
+                    ("AFTERSHIP_WEBHOOK_SECRET", self.AFTERSHIP_WEBHOOK_SECRET),
+                    ("SENDGRID_WEBHOOK_SECRET", self.SENDGRID_WEBHOOK_SECRET),
+                    ("JAZZ_SMS_WEBHOOK_SECRET", self.JAZZ_SMS_WEBHOOK_SECRET),
+                    ("JAZZ_WHATSAPP_WEBHOOK_SECRET", self.JAZZ_WHATSAPP_WEBHOOK_SECRET),
+                )
+                if not value
+            ]
+            if missing:
+                raise ValueError(
+                    f"Missing required webhook secret(s) outside local environment: "
+                    f"{', '.join(missing)}. Each secures a webhook endpoint that would "
+                    "otherwise accept unsigned/forged requests."
+                )
         return self
 
     @property

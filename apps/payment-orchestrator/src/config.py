@@ -29,16 +29,53 @@ class Settings(BaseSettings):
     # ── Internal Service Auth (shared KMS secret, constant-time compared) ────
     INTERNAL_API_TOKEN: str = ""
 
+    # Self-referencing base URL — used by the event listener to call this
+    # same service's own internal auto-collect endpoint (see
+    # handle_payment_collection_triggered in events/listeners.py) rather than
+    # duplicating that endpoint's business logic in the listener.
+    SELF_BASE_URL: str = "http://localhost:8003"
+
+    # Gateway's base URL — used by OutboxPublisher to notify Gateway when a
+    # down payment is confirmed (event_name="gateway.payment_confirmed"), so
+    # Gateway's own Order.status transition and saga-compensation logic in
+    # POST /internal/payments/{payment_id}/confirm actually runs. Shares
+    # INTERNAL_API_TOKEN as the auth secret (same shared internal token,
+    # named INTERNAL_SERVICE_TOKEN on Gateway's side).
+    GATEWAY_URL: str = "http://localhost:8000"
+
+    # Public internet-facing URL for Gateway, used ONLY as the callback_url
+    # handed to JazzCash/SafePay/Raast so they can reach Gateway's webhook
+    # ingress from outside the cluster (see
+    # src/workers/payment_initiate_consumer.py). Never use this for
+    # service-to-service calls — use GATEWAY_URL (cluster-internal) instead.
+    GATEWAY_PUBLIC_URL: str = "http://localhost:8000"
+
     # ── Stripe Issuing ────────────────────────────────────────────────────────
     STRIPE_SECRET_KEY: str = ""
     STRIPE_WEBHOOK_SECRET: str = ""
     STRIPE_POLLING_MAX_RETRIES: int = 5
     STRIPE_POLLING_INTERVAL_SECONDS: int = 3
 
+    # ── Lithic Issuing (second VCN issuer) ───────────────────────────────────
+    # Off by default: Stripe Issuing remains the functional-today path. Lithic
+    # requires a business/KYB approval process before it can issue a single
+    # real card — this adapter is code-complete and testable against Lithic's
+    # sandbox, but flipping this flag in production is gated on that approval
+    # landing, not on this code. See docs for the full VCN cost/strategy note.
+    FEATURE_LITHIC_ENABLED: bool = False
+    LITHIC_API_KEY: str = ""
+    LITHIC_BASE_URL: str = "https://sandbox.lithic.com/v1"
+    LITHIC_CARD_PROGRAM_TOKEN: str = ""
+    LITHIC_WEBHOOK_SECRET: str = ""
+
     # ── SafePay ───────────────────────────────────────────────────────────────
     SAFEPAY_API_KEY: str = ""
     SAFEPAY_API_SECRET: str = ""
-    SAFEPAY_BASE_URL: str = "https://sandbox.safepay.pk"
+    SAFEPAY_WEBHOOK_SECRET: str = ""
+    # Live-verified against the real SafePay sandbox and the official PHP SDK
+    # (getsafepay/safepay-php Base.php) — "sandbox.safepay.pk" doesn't exist
+    # (NXDOMAIN); the real API lives on the getsafepay.com domain.
+    SAFEPAY_BASE_URL: str = "https://sandbox.api.getsafepay.com"
 
     # ── JazzCash ──────────────────────────────────────────────────────────────
     JAZZCASH_MERCHANT_ID: str = ""
@@ -102,6 +139,8 @@ class Settings(BaseSettings):
 
     # ── Worker / DLQ Config ───────────────────────────────────────────────────
     VCN_WORKER_CONCURRENCY: int = 4
+    PAYMENT_WEBHOOK_WORKER_CONCURRENCY: int = 4
+    PAYMENT_INITIATE_WORKER_CONCURRENCY: int = 4
     DLQ_MAX_RETRIES: int = 3               # Attempts before pushing to DLQ
 
     # ── Reconciliation ────────────────────────────────────────────────────────
@@ -155,8 +194,11 @@ _SECRETS_MANAGER_FIELD_MAP = {
     "internal-api-token": "INTERNAL_API_TOKEN",
     "stripe-secret-key": "STRIPE_SECRET_KEY",
     "stripe-webhook-secret": "STRIPE_WEBHOOK_SECRET",
+    "lithic-api-key": "LITHIC_API_KEY",
+    "lithic-webhook-secret": "LITHIC_WEBHOOK_SECRET",
     "safepay-api-key": "SAFEPAY_API_KEY",
     "safepay-api-secret": "SAFEPAY_API_SECRET",
+    "safepay-webhook-secret": "SAFEPAY_WEBHOOK_SECRET",
     "jazzcash-merchant-id": "JAZZCASH_MERCHANT_ID",
     "jazzcash-password": "JAZZCASH_PASSWORD",
     "easypaisa-store-id": "EASYPAISA_STORE_ID",

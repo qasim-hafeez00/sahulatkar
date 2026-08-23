@@ -17,7 +17,7 @@ from sqlalchemy.pool import StaticPool
 
 from sk_shared.models import auth, contracts, credit, delivery, hitl, kyc, order, payment, product  # noqa: F401
 from sk_shared.models.auth import User
-from sk_shared.models.delivery import Courier, Shipment, TrackingEvent
+from sk_shared.models.delivery import Courier
 from sk_shared.models.order import Order
 from sk_shared.models.base import Base
 from sk_shared.redis_client import RedisClient

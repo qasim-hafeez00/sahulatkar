@@ -7,7 +7,6 @@ from sk_shared.models.notification import Notification, NotificationDispatch, Sc
 from sk_shared.redis_client import RedisClient
 from src.core.dependencies import get_db, get_redis, require_permissions
 from src.config import settings
-from src.services.notification_service import NotificationService
 import logging
 
 logger = logging.getLogger("admin_notifications")
@@ -132,7 +131,7 @@ async def list_scheduled(
     db: AsyncSession = Depends(get_db),
     _admin = Depends(require_permissions(["admin:notifications:read"]))
 ):
-    scheduled = (await db.scalars(select(ScheduledNotification).where(ScheduledNotification.fired_at == None))).all()
+    scheduled = (await db.scalars(select(ScheduledNotification).where(ScheduledNotification.fired_at is None))).all()
     return scheduled
 
 @router.delete("/scheduled/{scheduled_id}")

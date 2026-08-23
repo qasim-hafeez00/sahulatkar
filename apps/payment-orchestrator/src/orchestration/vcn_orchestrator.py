@@ -1,7 +1,6 @@
 import logging
 from dataclasses import asdict
 from decimal import Decimal
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -21,6 +20,16 @@ class VcnOrchestrator:
         """
         Handle Stripe Issuing events to track VCN usage.
         """
+        if event_type.startswith("payment_intent."):
+            # Nothing in this system creates a Stripe PaymentIntent today —
+            # down payments go through JazzCash/SafePay/Raast, and Stripe is
+            # used only for VCN Issuing. Gateway still forwards these
+            # defensively (see _STRIPE_ROUTABLE_EVENTS); acknowledge and
+            # no-op rather than logging a misleading "missing card ID"
+            # warning that implies a data problem.
+            logger.info(f"Stripe event {event_type} acknowledged — no PaymentIntent flow wired up, ignoring")
+            return
+
         card_id = data.get("card")
         if not card_id:
             # For some events, card ID is deeper in the object

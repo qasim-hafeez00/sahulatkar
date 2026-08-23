@@ -48,8 +48,10 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   const [mounted, setMounted] = useState(false)
 
   useEffect(() => {
+    // getInitialTheme() reads localStorage/matchMedia, browser-only APIs unavailable during SSR.
     const initial = getInitialTheme()
     applyTheme(initial)
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setThemeState(initial)
     setMounted(true)
   }, [])

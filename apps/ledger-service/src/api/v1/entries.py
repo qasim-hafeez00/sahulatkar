@@ -4,10 +4,11 @@ from datetime import date
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query, Header
 from sqlalchemy.ext.asyncio import AsyncSession
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from src.core.database import get_db
 from src.core.dependencies import RequestContext, get_redis, require_admin_role
+from src.core.rate_limit import rate_limit_admin_writes
 from sk_shared.redis_client import RedisClient
 from src.services.accounting_service import AccountingService
 
@@ -78,8 +79,6 @@ async def get_entry(
     except LookupError:
         raise HTTPException(status_code=404, detail="ENTRY_NOT_FOUND")
 
-
-from src.core.rate_limit import rate_limit_admin_writes
 
 @router.post("/manual")
 async def create_manual_entry(

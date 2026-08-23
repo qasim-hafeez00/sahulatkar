@@ -1,5 +1,4 @@
 import pytest
-import asyncio
 from decimal import Decimal
 from src.services.extraction_waterfall import ExtractionWaterfallService, ExtractionResult
 

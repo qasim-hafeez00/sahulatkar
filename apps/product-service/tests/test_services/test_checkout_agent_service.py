@@ -1,6 +1,6 @@
 from datetime import datetime, timezone, timedelta
 import json
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock
 
 import pytest
 from sqlalchemy import select

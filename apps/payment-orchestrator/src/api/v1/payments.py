@@ -30,7 +30,7 @@ from sk_shared.redis_client import RedisClient
 
 from src.adapters.factory import GatewayAdapterFactory
 from src.config import settings
-from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token
+from src.core.dependencies import get_current_user, get_db, get_redis, rate_limit, require_internal_token
 from src.core.metrics import DOWN_PAYMENT_TOTAL, GATEWAY_FAILURE_TOTAL, INSTALLMENT_PAYMENT_TOTAL
 from src.models.refund_workflow import RefundStatus, RefundWorkflow
 from src.orchestration.payment_orchestrator import PaymentOrchestrator
@@ -42,7 +42,6 @@ from src.schemas.payments import (
     PayInstallmentResponse,
     RefundRequest,
     RefundResponse,
-    WebhookAck,
 )
 from src.services.routing_engine import GatewayRoutingEngine
 from src.services.vcn import VcnService
@@ -76,8 +75,6 @@ async def _get_order_for_user(db: AsyncSession, order_id: int, user_id: int) -> 
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
     return order
 
-
-from src.core.dependencies import get_current_user, get_db, get_redis, require_internal_token, rate_limit
 
 @router.post("/down-payment", response_model=DownPaymentResponse, dependencies=[Depends(rate_limit(10, 60))])
 async def down_payment(
@@ -191,7 +188,7 @@ async def down_payment(
             select(PaymentMethod).where(
                 PaymentMethod.user_id == current_user.id,
                 PaymentMethod.provider == "raast",
-                PaymentMethod.is_default == True,
+                PaymentMethod.is_default,
                 PaymentMethod.deleted_at.is_(None),
             )
         )
@@ -437,6 +434,7 @@ async def initiate_refund(
         reason=request_payload.reason,
         refund_reference=request_payload.refund_reference,
         gateway=original_txn.gateway,
+        gateway_txn_id=original_txn.gateway_txn_id or "",
     )
     await db.commit()
 
@@ -676,7 +674,7 @@ async def get_payment_history(
     from src.models.payment_workflow import PaymentWorkflow
 
     # Verify order belongs to user
-    order = await _get_order_for_user(db, order_id, current_user.id)
+    await _get_order_for_user(db, order_id, current_user.id)
 
     loan = await db.scalar(select(Loan).where(Loan.order_id == order_id))
     txns = []

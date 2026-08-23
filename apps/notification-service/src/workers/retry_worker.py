@@ -29,5 +29,22 @@ async def process_retry_queue() -> None:
             
         logger.info(f"Re-enqueued {len(notification_ids)} notifications for retry")
 
+async def run_retry_worker(interval_seconds: int = 300) -> None:
+    """
+    Continuous loop: re-enqueue due retries every `interval_seconds`. Same gap
+    as reminder_worker — process_retry_queue() previously had no scheduler
+    calling it in production, so a dispatch that failed and was marked
+    RETRYING with a backoff never actually got a second attempt. Intended to
+    be started as a background asyncio task alongside the main FastAPI app.
+    """
+    logger.info("Retry worker started", extra={"interval_seconds": interval_seconds})
+    while True:
+        try:
+            await process_retry_queue()
+        except Exception as exc:
+            logger.error("Retry worker sweep failed", extra={"error": str(exc)})
+        await asyncio.sleep(interval_seconds)
+
+
 if __name__ == "__main__":
     asyncio.run(process_retry_queue())

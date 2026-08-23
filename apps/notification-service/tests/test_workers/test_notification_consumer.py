@@ -30,9 +30,7 @@ def _patch_worker_infra(monkeypatch, db_session, redis_mock: RedisClient):
 
     monkeypatch.setattr(notification_consumer, "SessionLocal", _session_cm)
     monkeypatch.setattr(notification_consumer, "get_redis_client", lambda *a, **k: redis_mock)
-    notification_consumer._shutdown = False
     yield
-    notification_consumer._shutdown = True
 
 
 async def _run_until(predicate, timeout: float = 3.0, interval: float = 0.02) -> None:
@@ -43,7 +41,6 @@ async def _run_until(predicate, timeout: float = 3.0, interval: float = 0.02) ->
             await asyncio.sleep(interval)
             elapsed += interval
     finally:
-        notification_consumer._shutdown = True
         task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await task
@@ -61,6 +58,19 @@ async def test_pulls_queued_id_and_dispatches_it(monkeypatch, redis_mock: RedisC
     await _run_until(lambda: dispatched_ids)
 
     assert dispatched_ids == [42]
+
+
+async def test_shutdown_event_stops_the_loop_cooperatively(redis_mock: RedisClient):
+    shutdown_event = asyncio.Event()
+    task = asyncio.create_task(notification_consumer.run_consumer(shutdown_event))
+
+    # Let the loop reach its first brpop.
+    await asyncio.sleep(0.05)
+    shutdown_event.set()
+
+    # Loop must exit on its own (timeout=2 brpop poll) without needing task.cancel().
+    await asyncio.wait_for(task, timeout=3.0)
+    assert task.done()
 
 
 async def test_a_failed_dispatch_does_not_kill_the_loop(monkeypatch, redis_mock: RedisClient):

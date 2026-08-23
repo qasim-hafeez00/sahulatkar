@@ -17,7 +17,14 @@ function setSessionCookie(response: NextResponse, token: string) {
   }
   response.cookies.set(ADMIN_SESSION_COOKIE, token, {
     httpOnly: true,
-    secure: process.env.NODE_ENV === "production",
+    // See packages/shared-ts/src/session.ts::gatewayCookieOptions for why
+    // this isn't just `NODE_ENV === "production"` — a production-optimized
+    // build can still be served over plain HTTP with no TLS termination
+    // (e.g. local Docker Compose), in which case a Secure cookie is
+    // silently dropped by the browser and login appears to fail with no
+    // error. COOKIE_INSECURE is an explicit opt-out; real deployments never
+    // set it.
+    secure: process.env.NODE_ENV === "production" && process.env.COOKIE_INSECURE !== "true",
     sameSite: "lax",
     path: "/",
     maxAge,

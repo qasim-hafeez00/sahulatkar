@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import base64
-import json
 from decimal import Decimal
 from uuid import UUID
 
@@ -22,7 +21,6 @@ from src.schemas.products import (
     ExecutionSummary,
     JobStatusResponse,
     MultipleOffersResponse,
-    OfferResponse,
     PriceHistoryResponse,
     ProductRefreshRequest,
     PriceHistoryItem,
@@ -31,7 +29,6 @@ from src.schemas.products import (
     SingleOfferResponse,
     ProductDetailResponse,
     ScrapingJobSummary,
-    UpoResponse,
 )
 from src.services.product_extraction_service import ProductExtractionService, build_upo
 from src.services.pricing_service import PricingService

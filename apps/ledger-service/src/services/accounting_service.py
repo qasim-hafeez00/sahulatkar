@@ -5,11 +5,8 @@ from datetime import date, datetime, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 from uuid import uuid4
-import calendar
-import re
 
 from sqlalchemy import func, select
-import sqlalchemy as sa
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -635,7 +632,7 @@ class AccountingService:
         equity = await get_accounts_by_type("equity")
 
         total_assets = sum((a["balance"] for a in assets if not a["is_control"]), 0.0)
-        total_liabilities = sum((l["balance"] for l in liabilities if not l["is_control"]), 0.0)
+        total_liabilities = sum((liab["balance"] for liab in liabilities if not liab["is_control"]), 0.0)
         total_equity = sum((e["balance"] for e in equity if not e["is_control"]), 0.0)
 
         total_liabilities_and_equity = total_liabilities + total_equity

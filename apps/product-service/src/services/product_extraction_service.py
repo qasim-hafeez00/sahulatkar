@@ -3,7 +3,6 @@ from __future__ import annotations
 import hashlib
 import json
 import socket
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Any
 from uuid import UUID
@@ -14,7 +13,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import QueueName, RedisNS, RedisTTL
 from sk_shared.models.hitl import HitlQueue
-from sk_shared.models.product import Merchant, Product, ScrapingJob
+from sk_shared.models.product import Product
 from sk_shared.redis_client import RedisClient
 
 from src.config import settings
@@ -166,7 +165,9 @@ class ProductExtractionService:
 
             merchant, _ = await self.merchant_repo.get_or_create(normalized.domain, normalized.platform)
 
-            extraction_result = await self.waterfall.extract(normalized.canonical_url, normalized.platform)
+            extraction_result = await self.waterfall.extract(
+                normalized.canonical_url, normalized.platform, scrape_config=merchant.scrape_config
+            )
             if extraction_result.status == "extracting":
                 existing_job = await self.scraping_job_repo.find_active_by_canonical_url(normalized.canonical_url)
                 if existing_job is not None:

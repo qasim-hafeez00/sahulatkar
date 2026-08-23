@@ -1,4 +1,3 @@
-import pytest
 
 from src.engines.scoring import ScoringEngine
 from src.policy.rule_policy import RulePolicy

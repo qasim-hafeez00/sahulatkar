@@ -38,6 +38,8 @@ export function AnimatedHero() {
   const translateY = useSpring(mouseY, { damping: 25, stiffness: 700 })
 
   useEffect(() => {
+    // Flips only after mount to avoid a server/client hydration mismatch.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setIsClient(true)
   }, [])
 

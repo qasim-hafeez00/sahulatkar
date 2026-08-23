@@ -70,7 +70,7 @@ RECONCILIATION_MATCHED_TOTAL = Counter(
 RECONCILIATION_DISCREPANCY_TOTAL = Counter(
     "payment_reconciliation_discrepancy_total",
     "Total discrepancies found during reconciliation",
-    ["gateway", "type"],  # type: amount_mismatch | missing_in_gateway | missing_internally
+    ["gateway", "type"],  # label 'type' values: amount_mismatch | missing_in_gateway | missing_internally
 )
 
 # ── Latency Histograms ──────────────────────────────────────────────────────

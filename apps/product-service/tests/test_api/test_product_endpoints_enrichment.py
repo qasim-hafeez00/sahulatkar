@@ -1,19 +1,18 @@
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from decimal import Decimal
 
 import pytest
 from sqlalchemy import select
 
 from sk_shared.models.checkout import PurchaseExecution
-from sk_shared.models.product import Product, ScrapingJob
+from sk_shared.models.product import Product
 
 
 @pytest.mark.asyncio
 async def test_search_products_cursor_paginates(client, make_product, db_session):
-    first = await make_product(db_session, name="Cursor Widget Alpha", canonical_url="https://example.com/a")
-    second = await make_product(db_session, name="Cursor Widget Beta", canonical_url="https://example.com/b")
+    await make_product(db_session, name="Cursor Widget Alpha", canonical_url="https://example.com/a")
+    await make_product(db_session, name="Cursor Widget Beta", canonical_url="https://example.com/b")
     await db_session.commit()
 
     first_page = await client.get("/api/v1/products/search", params={"q": "Cursor", "limit": 1})

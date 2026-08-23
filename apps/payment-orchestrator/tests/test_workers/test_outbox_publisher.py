@@ -10,11 +10,9 @@ Covers:
   - stop() method signals graceful shutdown
 """
 import json
-from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
-from sqlalchemy import select
 
 from src.models.outbox import OutboxEvent
 from src.workers.outbox_publisher import OutboxPublisher
@@ -115,6 +113,67 @@ async def test_publisher_skips_events_at_max_retries(db_session, redis_mock):
     await db_session.refresh(event)
     assert event.status == "failed"
     assert event.retry_count == 5
+
+
+async def test_publisher_calls_gateway_on_payment_confirmed_event(db_session, redis_mock):
+    """P0-01: gateway.payment_confirmed events must POST to Gateway's internal
+    confirm endpoint with the internal token, and mark the outbox event published
+    on a 2xx response.
+    """
+    from src.config import settings
+
+    event = await _create_outbox_event(
+        db_session,
+        "gateway.payment_confirmed",
+        {"payment_id": 77, "gateway_txn_id": "GW-TXN-1", "status": "confirmed"},
+    )
+
+    publisher = OutboxPublisher(redis_mock)
+
+    mock_response = AsyncMock()
+    mock_response.status_code = 200
+    mock_response.raise_for_status = lambda: None
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(return_value=mock_response)
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await publisher._process_event(db_session, event)
+    await db_session.commit()
+
+    assert event.status == "published"
+    mock_client.post.assert_awaited_once()
+    call_args = mock_client.post.await_args
+    assert call_args.args[0] == f"{settings.GATEWAY_URL}/api/v1/internal/payments/77/confirm"
+    assert call_args.kwargs["headers"]["X-Internal-Token"] == settings.INTERNAL_API_TOKEN
+    assert call_args.kwargs["json"] == {"gateway_txn_id": "GW-TXN-1", "status": "confirmed"}
+
+
+async def test_publisher_retries_gateway_payment_confirmed_on_http_failure(db_session, redis_mock):
+    """A failed Gateway notification (e.g. Gateway temporarily down) must be
+    retried like any other outbox event, not silently dropped.
+    """
+    event = await _create_outbox_event(
+        db_session,
+        "gateway.payment_confirmed",
+        {"payment_id": 78, "gateway_txn_id": "GW-TXN-2", "status": "confirmed"},
+    )
+
+    publisher = OutboxPublisher(redis_mock)
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=Exception("connection refused"))
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=None)
+
+    with patch("httpx.AsyncClient", return_value=mock_client):
+        await publisher._process_event(db_session, event)
+
+    assert event.status == "failed"
+    assert event.retry_count == 1
+    assert "connection refused" in event.last_error
 
 
 async def test_publisher_stop_signals_graceful_shutdown():

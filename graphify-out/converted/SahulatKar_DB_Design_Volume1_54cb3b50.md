@@ -1,0 +1,1382 @@
+<!-- converted from SahulatKar_DB_Design_Volume1.docx -->
+
+SAHULATKAR
+BNPL Platform — Complete Database Architecture & Design
+
+Volume I — Domains, Schemas & Core Design (Sections 1–16)
+Shariah-Compliant | Vendor-Agnostic | Pakistan Market
+Version 1.0  |  March 2026  |  CONFIDENTIAL – INTERNAL USE ONLY
+
+# Table of Contents — Volume I
+
+# 1. Executive Summary
+SahulatKar is a vendor-agnostic, Shariah-compliant Buy Now Pay Later (BNPL) platform operating in Pakistan's e-commerce market. The platform enables users to paste any product URL, whereupon the system autonomously scrapes product data, assesses credit in real-time, generates OTP-signed Wakalah and Murabaha contracts, issues a single-use virtual card (VCN), executes the purchase via an agentic headless browser, and manages installment collection via Raast/JazzCash/EasyPaisa.
+This document (Volume I) presents the complete entity definitions and SQL DDL schemas for all 170+ tables across 13 functional domains. Volume II covers indexing, partitioning, security, disaster recovery, performance optimization, migration strategy, Pakistan-specific considerations, comprehensive audit logging, and 5-year cost projections.
+The design is built on PostgreSQL 16 as the primary OLTP store, Redis 7 for caching and job queues, and TimescaleDB for time-series metrics. The architecture supports 100K+ concurrent users, 10M+ monthly transactions, and meets Pakistan SECP Circular 15/2022 data residency requirements and 7-year financial record retention mandates.
+## Key Design Principles
+Primary OLTP: PostgreSQL 16 — ACID compliant, JSONB support, table partitioning, Row-Level Security, PostGIS extension
+Caching Layer: Redis 7 — session state, BullMQ job queues, real-time hot data cache
+Search: PostgreSQL full-text search (Urdu + English) with GIN indexes on tsvector columns
+Time-Series: TimescaleDB extension for tracking events and system health metrics
+All monetary values: DECIMAL(14,2) in PKR — never FLOAT or NUMERIC without precision
+All entities: BIGSERIAL internal PK + UUID external-facing identifier (no internal IDs exposed to API)
+Soft deletes: deleted_at TIMESTAMP on all customer-facing tables
+Audit trail: AFTER INSERT/UPDATE/DELETE triggers on all 30 sensitive tables feeding audit_trails
+Encryption: pgcrypto AES-256 for CNIC, IBANs, VCN details, MFA secrets, courier API keys
+Connection pooling: PgBouncer in transaction-mode (2000 client connections → 180 PG server connections)
+## SahulatKar Order Flow — End to End
+1. User pastes product URL  →  2. Playwright + BrightData scrapes merchant page  →  3. GPT-4o Vision extracts product data (Universal Product Object)  →  4. Real-time credit assessment (NADRA + device + bank data, target <3 sec)  →  5. Financing offer presented (Murabaha profit rate disclosed)  →  6. User signs Wakalah agreement via OTP  →  7. User signs Murabaha contract via OTP  →  8. Down payment (25-40%) collected via JazzCash/EasyPaisa/Raast  →  9. Single-use VCN issued (Stripe/Lithic, MCC-locked to merchant)  →  10. Agentic browser completes checkout at merchant using VCN  →  11. Shipment tracked via AfterShip (TCS/Leopards/M&P)  →  12. Remaining 3 installments auto-collected on bi-weekly schedule
+## Platform Module Summary
+
+# 2. Database Technology Decisions
+## 2.1 Primary Database: PostgreSQL 16
+PostgreSQL is chosen as the primary data store due to full ACID compliance, non-negotiable for a financial platform handling Shariah contracts and installment agreements. Key capabilities exploited:
+JSONB: Stores semi-structured data (gateway responses, LLM product parse output, fraud rule metadata) with GIN indexing. Used in 40+ columns across all domains.
+Table Partitioning: Range partitioning on created_at for orders, payments, audit_trails, tracking_events. Reduces query scope 90%+ in time-bounded queries via partition pruning.
+Row-Level Security (RLS): Enforces data isolation at the database layer, preventing application-layer bypass. Users can only read/write their own records.
+PostGIS Extension: GEOGRAPHY type for delivery address coordinates — nearest courier depot selection, delivery zone eligibility checks.
+pg_cron: Schedules recurring jobs (installment due date checks, monthly partition creation, archival) within the database itself.
+pgcrypto: Column-level AES-256 encryption for CNIC numbers, bank IBANs, VCN details, and TOTP secrets.
+pg_stat_statements: Query performance metrics. Configured to log all queries >100ms for slow query identification.
+## 2.2 Caching Layer: Redis 7
+Session Store: JWT refresh token blacklist, user session data (TTL: 24h customers, 8h admin). Mirrored from PostgreSQL for sub-millisecond lookups.
+Job Queue: BullMQ queues for agentic purchase (priority 1), scraping (priority 2), notifications (priority 5), billing retries (scheduled). Workers pull from Redis, write results to PostgreSQL.
+Hot Cache: Product data 5 min TTL, user credit limits 30 sec (critical: prevents overcommit race condition), fraud rule snapshots 30 min, OTP codes 3 min, feature flags 60 sec.
+## 2.3 Technology Stack — Year 1 Architecture
+Rationale for PostgreSQL over MongoDB: Financial installment schedules and Shariah contracts require strong ACID transactions with FK enforcement. MongoDB's eventual consistency model creates unacceptable risk for financial data integrity. PostgreSQL's JSONB gives relational strength with document flexibility.
+
+# 3. Entity Relationship Overview
+The database is organized around users as the central anchor. Every financial record, order, contract, and payment traces back to a user. The following describes the primary lifecycle flows and inter-domain relationships.
+## 3.1 User Credit Lifecycle
+Registration → Phone OTP → KYC (user_kyc_verifications) → NADRA API → Manual Review (kyc_verification_queue) → Credit Assessment (credit_applications → risk_assessments) → Credit Limit Assignment (credit_limit_history) → User Activated (users.status = active)
+## 3.2 Order Lifecycle
+URL submitted (orders) → Scraping job (scraping_jobs) → Product extracted (products) → Financing offer → Wakalah signed (wakalah_agreements) → Murabaha signed (murabaha_contracts) → Down payment (installments[0] → payment_transactions) → VCN issued (virtual_cards) → Agentic checkout (purchase_executions) → Loan created (loans → installments) → Shipment (shipments → tracking_events) → Installments collected → Loan fully_paid
+## 3.3 Core Relationship Map
+
+# 4. Part A: User & Identity Domain
+This domain stores all customer identity data, KYC records, authentication state, and device intelligence. It is the foundation for credit assessment, order management, and fraud detection. All PII uses column-level AES-256 encryption (pgcrypto) and soft deletes.
+## 4.1 Table: users
+Central entity. Stores customer identity, KYC status, credit snapshot (denormalized for sub-10ms per-order credit checks), and account lifecycle state.
+CREATE TABLE users (
+id                      BIGSERIAL PRIMARY KEY,
+uuid                    UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+email                   VARCHAR(255) UNIQUE NOT NULL,
+email_verified_at       TIMESTAMP,
+phone                   VARCHAR(20) UNIQUE NOT NULL,   -- E.164: +92XXXXXXXXXX
+phone_verified_at       TIMESTAMP,
+password_hash           VARCHAR(255) NOT NULL,         -- bcrypt cost=12
+first_name              VARCHAR(100) NOT NULL,
+last_name               VARCHAR(100) NOT NULL,
+date_of_birth           DATE NOT NULL,
+gender                  CHAR(1) CHECK (gender IN ('M','F','O')),
+cnic_encrypted          BYTEA,       -- AES-256 via pgcrypto
+cnic_hash               VARCHAR(64), -- SHA-256 for uniqueness check
+cnic_verified_at        TIMESTAMP,
+status                  VARCHAR(20) NOT NULL DEFAULT 'pending_kyc'
+CHECK (status IN ('pending_kyc','active','suspended','closed','blocked')),
+kyc_status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+CHECK (kyc_status IN ('pending','in_review','verified','rejected','expired')),
+risk_level              VARCHAR(10) NOT NULL DEFAULT 'medium'
+CHECK (risk_level IN ('low','medium','high','blocked')),
+-- Credit snapshot (denormalized for performance)
+credit_limit            DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+available_credit        DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+total_outstanding       DECIMAL(14,2) NOT NULL DEFAULT 0.00,
+last_credit_assessment  TIMESTAMP,
+-- Pakistan-specific
+mobile_operator         VARCHAR(20),  -- 'jazz','telenor','zong','ufone'
+preferred_language      VARCHAR(5) NOT NULL DEFAULT 'en',
+city                    VARCHAR(100),
+province                VARCHAR(50) CHECK (province IN ('Sindh','Punjab','KPK',
+'Balochistan','Gilgit-Baltistan','AJK','ICT') OR province IS NULL),
+referral_code           VARCHAR(20) UNIQUE,
+referred_by_user_id     BIGINT REFERENCES users(id) ON DELETE SET NULL,
+marketing_opt_in        BOOLEAN NOT NULL DEFAULT FALSE,
+sms_opt_in              BOOLEAN NOT NULL DEFAULT TRUE,
+push_opt_in             BOOLEAN NOT NULL DEFAULT TRUE,
+registration_source     VARCHAR(50), -- 'web','android','ios','referral'
+registration_ip         INET,
+last_login_at           TIMESTAMP,
+last_login_ip           INET,
+failed_login_attempts   SMALLINT NOT NULL DEFAULT 0,
+locked_until            TIMESTAMP,
+created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+deleted_at              TIMESTAMP
+);
+CREATE UNIQUE INDEX idx_users_email  ON users(email)     WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX idx_users_phone  ON users(phone)     WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX idx_users_cnic   ON users(cnic_hash) WHERE deleted_at IS NULL;
+CREATE INDEX idx_users_status        ON users(status);
+CREATE INDEX idx_users_kyc_status    ON users(kyc_status);
+CREATE INDEX idx_users_credit_check  ON users(id)
+INCLUDE (credit_limit, available_credit, status, risk_level)
+WHERE deleted_at IS NULL;  -- Covering index for per-order credit check
+ALTER TABLE users ADD CONSTRAINT chk_avail_credit
+CHECK (available_credit >= 0 AND available_credit <= credit_limit);
+CREATE TRIGGER trg_users_updated_at BEFORE UPDATE ON users
+FOR EACH ROW EXECUTE FUNCTION fn_set_updated_at();
+CREATE TRIGGER trg_users_audit AFTER INSERT OR UPDATE OR DELETE ON users
+FOR EACH ROW EXECUTE FUNCTION fn_log_audit();
+## 4.2 Table: user_kyc_verifications
+CREATE TABLE user_kyc_verifications (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id             BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+nadra_request_id    VARCHAR(100),
+nadra_response_code VARCHAR(20),
+nadra_verified_at   TIMESTAMP,
+nadra_raw_response  JSONB,        -- Stored 7 years per SECP requirement
+cnic_front_s3       VARCHAR(512),
+cnic_back_s3        VARCHAR(512),
+selfie_s3           VARCHAR(512),
+liveness_score      DECIMAL(5,4), -- 0.0000-1.0000 (threshold: 0.8500)
+liveness_vendor     VARCHAR(50),  -- 'iproov','onfido','jumio'
+liveness_passed     BOOLEAN,
+status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+CHECK (status IN ('pending','processing','ai_approved',
+'manual_review','approved','rejected')),
+reviewed_by_admin   BIGINT,
+reviewed_at         TIMESTAMP,
+rejection_reason    TEXT,
+rejection_code      VARCHAR(50),
+is_resubmission     BOOLEAN NOT NULL DEFAULT FALSE,
+attempt_number      SMALLINT NOT NULL DEFAULT 1,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_kyc_user_id ON user_kyc_verifications(user_id);
+CREATE INDEX idx_kyc_status  ON user_kyc_verifications(status);
+## 4.3 Table: user_addresses
+CREATE TABLE user_addresses (
+id              BIGSERIAL PRIMARY KEY,
+uuid            UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id         BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+label           VARCHAR(50),
+address_line_1  VARCHAR(255) NOT NULL,
+address_line_2  VARCHAR(255),
+area            VARCHAR(100),
+city            VARCHAR(100) NOT NULL,
+province        VARCHAR(50) NOT NULL
+CHECK (province IN ('Sindh','Punjab','KPK',
+'Balochistan','Gilgit-Baltistan','AJK','ICT')),
+postal_code     VARCHAR(10),
+country         VARCHAR(50) NOT NULL DEFAULT 'Pakistan',
+latitude        DECIMAL(10,8),
+longitude       DECIMAL(11,8),
+is_default      BOOLEAN NOT NULL DEFAULT FALSE,
+is_verified     BOOLEAN NOT NULL DEFAULT FALSE,
+created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+deleted_at      TIMESTAMP
+);
+CREATE INDEX idx_addresses_user ON user_addresses(user_id);
+## 4.4 Table: user_devices
+CREATE TABLE user_devices (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id             BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+device_fingerprint  VARCHAR(255) NOT NULL,  -- FingerprintJS Pro hash
+device_type         VARCHAR(20) CHECK (device_type IN ('android','ios','web','unknown')),
+device_model        VARCHAR(100),
+os_version          VARCHAR(50),
+app_version         VARCHAR(20),
+push_token          VARCHAR(512),  -- FCM/APNs token
+ip_address          INET,
+city_from_ip        VARCHAR(100),
+country_from_ip     CHAR(2),
+is_rooted           BOOLEAN,  -- Higher risk signal
+is_emulator         BOOLEAN,  -- Fraud signal
+risk_score          DECIMAL(5,4),
+is_trusted          BOOLEAN NOT NULL DEFAULT FALSE,
+trusted_at          TIMESTAMP,
+last_seen_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_devices_user        ON user_devices(user_id);
+CREATE INDEX idx_devices_fingerprint ON user_devices(device_fingerprint);
+CREATE INDEX idx_devices_push_token  ON user_devices(push_token);
+## 4.5 Table: user_payment_methods
+CREATE TABLE user_payment_methods (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id             BIGINT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+type                VARCHAR(30) NOT NULL
+CHECK (type IN ('jazzcash','easypaisa','bank_account',
+'debit_card','sadapay','nayapay','raast')),
+wallet_number       VARCHAR(20),       -- E.164 phone for JazzCash/EasyPaisa
+wallet_name         VARCHAR(100),
+bank_name           VARCHAR(100),
+iban_encrypted      BYTEA,             -- AES-256 encrypted IBAN
+account_title       VARCHAR(100),
+card_last_four      CHAR(4),
+card_brand          VARCHAR(20),
+card_expiry_month   SMALLINT CHECK (card_expiry_month BETWEEN 1 AND 12),
+card_expiry_year    SMALLINT,
+card_token          VARCHAR(255),      -- Gateway token (never store raw PAN)
+raast_id            VARCHAR(30),
+is_verified         BOOLEAN NOT NULL DEFAULT FALSE,
+verified_at         TIMESTAMP,
+is_primary          BOOLEAN NOT NULL DEFAULT FALSE,
+is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+deleted_at          TIMESTAMP
+);
+CREATE INDEX idx_pm_user ON user_payment_methods(user_id);
+CREATE INDEX idx_pm_type ON user_payment_methods(type);
+## 4.6 Remaining User Domain Tables
+
+# 5. Part B: Credit & Risk Domain
+SahulatKar's alternative credit scoring engine combines NADRA identity verification, device intelligence, bank statement analysis, behavioral signals, and velocity checks to produce a real-time credit decision in under 3 seconds. The engine assigns risk bands (A-F) determining credit limits (PKR 5,000–100,000) and required down payment percentages (25-40%).
+## 5.1 Table: credit_applications
+CREATE TABLE credit_applications (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id             BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+application_type    VARCHAR(30) NOT NULL
+CHECK (application_type IN ('onboarding','limit_increase',
+'limit_review','manual_request','periodic_review')),
+requested_limit     DECIMAL(14,2),
+user_data_snapshot  JSONB,           -- Frozen at time of assessment
+credit_score        DECIMAL(5,2),    -- Internal composite score 0-100
+bureau_score        INTEGER,         -- PBCL/Experian (if available)
+status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+CHECK (status IN ('pending','processing','approved',
+'rejected','manual_review','expired')),
+approved_limit      DECIMAL(14,2),
+rejection_code      VARCHAR(50),
+rejection_reason    TEXT,
+decided_at          TIMESTAMP,
+decided_by          VARCHAR(20) CHECK (decided_by IN ('auto_engine','manual_admin')),
+decided_by_admin_id BIGINT,
+processing_time_ms  INTEGER,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_credit_apps_user    ON credit_applications(user_id);
+CREATE INDEX idx_credit_apps_status  ON credit_applications(status);
+CREATE INDEX idx_credit_apps_created ON credit_applications(created_at DESC);
+## 5.2 Table: risk_assessments
+CREATE TABLE risk_assessments (
+id                    BIGSERIAL PRIMARY KEY,
+uuid                  UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id               BIGINT NOT NULL REFERENCES users(id),
+order_id              BIGINT,
+credit_app_id         BIGINT REFERENCES credit_applications(id),
+assessment_type       VARCHAR(30) NOT NULL
+CHECK (assessment_type IN ('onboarding','per_order','periodic_review')),
+-- Score breakdown (each 0-100, weighted composite = total_score)
+total_score           DECIMAL(5,2),
+identity_score        DECIMAL(5,2),  -- NADRA match confidence
+device_score          DECIMAL(5,2),  -- Device trust, emulator/root flags
+behavioral_score      DECIMAL(5,2),  -- App usage patterns
+bank_statement_score  DECIMAL(5,2),  -- Income regularity, avg balance
+bureau_score          DECIMAL(5,2),  -- External PBCL normalized 0-100
+velocity_score        DECIMAL(5,2),  -- Recent activity velocity
+-- Outcome
+risk_band             VARCHAR(10) CHECK (risk_band IN ('A','B','C','D','F')),
+recommended_limit     DECIMAL(14,2),
+down_payment_pct      DECIMAL(5,2),  -- 25% (Band A) to 40% (Band D)
+flags                 TEXT[],        -- 'new_device','vpn_detected','sim_swap_risk'
+explanation           JSONB,         -- Per-factor human-readable breakdown
+model_version         VARCHAR(20),
+processing_time_ms    INTEGER,
+created_at            TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_risk_user  ON risk_assessments(user_id, created_at DESC);
+CREATE INDEX idx_risk_order ON risk_assessments(order_id);
+## 5.3 Table: fraud_alerts
+CREATE TABLE fraud_alerts (
+id              BIGSERIAL PRIMARY KEY,
+uuid            UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id         BIGINT REFERENCES users(id),
+order_id        BIGINT,
+payment_id      BIGINT,
+alert_type      VARCHAR(50) NOT NULL
+CHECK (alert_type IN ('synthetic_identity','account_takeover',
+'velocity_breach','device_anomaly','collusion_merchant',
+'sim_swap_suspected','cross_border_risk','bot_detection',
+'document_forgery','address_mismatch')),
+severity        VARCHAR(10) NOT NULL CHECK (severity IN ('low','medium','high','critical')),
+source          VARCHAR(30) CHECK (source IN ('rule_engine','ml_model','manual','watchlist')),
+rule_code       VARCHAR(50),
+description     TEXT,
+evidence        JSONB,
+status          VARCHAR(30) NOT NULL DEFAULT 'open'
+CHECK (status IN ('open','investigating','resolved_genuine',
+'resolved_fraud','false_positive')),
+investigated_by BIGINT,
+resolved_at     TIMESTAMP,
+resolution_note TEXT,
+action_taken    VARCHAR(50),
+created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_fraud_user     ON fraud_alerts(user_id);
+CREATE INDEX idx_fraud_status   ON fraud_alerts(status);
+CREATE INDEX idx_fraud_severity ON fraud_alerts(severity, created_at DESC);
+## 5.4 Table: velocity_checks
+CREATE TABLE velocity_checks (
+id              BIGSERIAL PRIMARY KEY,
+user_id         BIGINT REFERENCES users(id),
+device_id       BIGINT,
+ip_address      INET,
+check_type      VARCHAR(50) NOT NULL
+CHECK (check_type IN ('order_per_hour','order_per_day',
+'amount_per_day','failed_logins','kyc_attempts',
+'payment_fails','address_changes','promo_redemptions')),
+window_start    TIMESTAMP NOT NULL,
+window_end      TIMESTAMP NOT NULL,
+count           INTEGER NOT NULL,
+threshold       INTEGER NOT NULL,
+breached        BOOLEAN NOT NULL DEFAULT FALSE,
+checked_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_velocity_user ON velocity_checks(user_id, check_type, checked_at DESC);
+CREATE INDEX idx_velocity_ip   ON velocity_checks(ip_address, check_type);
+## 5.5 Remaining Credit & Risk Tables
+
+# 6. Part C: Product & Merchant Domain
+SahulatKar is vendor-agnostic: products are discovered via user-submitted URLs, not pre-catalogued partnerships. A Playwright browser scrapes the URL, GPT-4o vision extracts structured data (Universal Product Object / UPO), and the result populates the products table. Product data is frozen in orders.product_snapshot at order time to ensure Murabaha contract integrity.
+## 6.1 Table: products
+CREATE TABLE products (
+id                      BIGSERIAL PRIMARY KEY,
+uuid                    UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+canonical_url           VARCHAR(2048) NOT NULL,
+merchant_id             BIGINT REFERENCES merchants(id) ON DELETE SET NULL,
+platform                VARCHAR(30)
+CHECK (platform IN ('daraz','shopify','woocommerce',
+'magento','opencart','custom','unknown')),
+external_product_id     VARCHAR(255),
+title                   TEXT NOT NULL,
+title_urdu              TEXT,
+description             TEXT,
+brand                   VARCHAR(100),
+category                VARCHAR(100),
+sub_category            VARCHAR(100),
+current_price           DECIMAL(14,2) NOT NULL,
+original_price          DECIMAL(14,2),
+currency                CHAR(3) NOT NULL DEFAULT 'PKR',
+last_price_check        TIMESTAMP,
+is_available            BOOLEAN NOT NULL DEFAULT TRUE,
+stock_status            VARCHAR(20)
+CHECK (stock_status IN ('in_stock','out_of_stock','limited','unknown')),
+primary_image_url       VARCHAR(2048),
+primary_image_s3        VARCHAR(512),  -- Cached to prevent broken links in contracts
+image_urls              TEXT[],
+is_prohibited           BOOLEAN NOT NULL DEFAULT FALSE,
+prohibition_reason      VARCHAR(100),
+search_vector           TSVECTOR,
+search_vector_urdu      TSVECTOR,
+extraction_confidence   DECIMAL(4,3),
+extraction_method       VARCHAR(30)
+CHECK (extraction_method IN ('dom_parse','llm_vision','hybrid','manual')),
+created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_products_url       ON products USING HASH(canonical_url);
+CREATE INDEX idx_products_merchant  ON products(merchant_id);
+CREATE INDEX idx_products_available ON products(is_available) WHERE is_available = TRUE;
+CREATE INDEX idx_products_search    ON products USING GIN(search_vector);
+CREATE INDEX idx_products_search_ur ON products USING GIN(search_vector_urdu);
+CREATE TRIGGER trg_products_search BEFORE INSERT OR UPDATE ON products
+FOR EACH ROW EXECUTE FUNCTION
+tsvector_update_trigger(search_vector,'pg_catalog.english',title,description,brand);
+## 6.2 Table: merchants
+CREATE TABLE merchants (
+id                      BIGSERIAL PRIMARY KEY,
+uuid                    UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+name                    VARCHAR(255) NOT NULL,
+domain                  VARCHAR(255) UNIQUE NOT NULL,
+platform_type           VARCHAR(30),
+country                 VARCHAR(50) NOT NULL DEFAULT 'Pakistan',
+checkout_success_rate   DECIMAL(5,2),
+avg_checkout_time_sec   INTEGER,
+requires_account        BOOLEAN NOT NULL DEFAULT FALSE,
+has_captcha             BOOLEAN NOT NULL DEFAULT FALSE,
+captcha_type            VARCHAR(30)
+CHECK (captcha_type IN ('recaptcha_v2','recaptcha_v3',
+'hcaptcha','cloudflare_turnstile','custom')),
+bot_detection_level     VARCHAR(20)
+CHECK (bot_detection_level IN ('none','low','medium','high','extreme')),
+status                  VARCHAR(20) NOT NULL DEFAULT 'active'
+CHECK (status IN ('active','degraded','blocked','monitoring','testing')),
+block_reason            TEXT,
+last_successful_purchase TIMESTAMP,
+scrape_config           JSONB,  -- CSS selectors, XPath overrides per merchant
+is_affiliate_partner    BOOLEAN NOT NULL DEFAULT FALSE,
+commission_rate         DECIMAL(5,4),
+affiliate_code          VARCHAR(50),
+created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_merchants_domain ON merchants(domain);
+CREATE INDEX idx_merchants_status ON merchants(status);
+## 6.3 Table: scraping_jobs
+CREATE TABLE scraping_jobs (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+order_id            BIGINT,
+user_id             BIGINT REFERENCES users(id),
+product_id          BIGINT REFERENCES products(id),
+input_url           VARCHAR(2048) NOT NULL,
+canonical_url       VARCHAR(2048),
+merchant_id         BIGINT REFERENCES merchants(id),
+platform_detected   VARCHAR(30),
+status              VARCHAR(20) NOT NULL DEFAULT 'queued'
+CHECK (status IN ('queued','running','completed',
+'failed','retrying','cancelled')),
+attempt_number      SMALLINT NOT NULL DEFAULT 1,
+max_attempts        SMALLINT NOT NULL DEFAULT 3,
+worker_id           VARCHAR(100),
+proxy_used          VARCHAR(100),
+result              JSONB,         -- Universal Product Object (UPO)
+error_code          VARCHAR(50),
+error_message       TEXT,
+duration_ms         INTEGER,
+queued_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+started_at          TIMESTAMP,
+completed_at        TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+) PARTITION BY RANGE (created_at);
+CREATE INDEX idx_scrapejobs_pending ON scraping_jobs(queued_at)
+WHERE status IN ('queued','retrying');
+CREATE INDEX idx_scrapejobs_user    ON scraping_jobs(user_id);
+## 6.4 Remaining Product Domain Tables
+
+# 7. Part D: Order & Purchase Domain
+The order domain implements a complete 19-state machine tracking every order from URL submission to loan closure. Every state transition is immutably logged in order_state_history. The agentic purchase system uses Playwright with BrightData rotating proxies. Failed attempts trigger HITL (Human-In-The-Loop) escalation.
+## 7.1 Order State Machine
+url_submitted → extracting → [extraction_failed] → offer_presented → contracts_pending → contracts_signed → down_payment_pending → down_payment_received → vcn_issued → purchasing → [purchase_failed → hitl_queue] → purchase_confirmed → delivery_pending → in_transit → delivered → completed | cancelled | refunded | disputed
+## 7.2 Table: orders (Partitioned)
+CREATE TABLE orders (
+id                          BIGSERIAL,
+uuid                        UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+order_number                VARCHAR(30) UNIQUE NOT NULL,  -- SAK-2025-0001234
+user_id                     BIGINT NOT NULL REFERENCES users(id) ON DELETE RESTRICT,
+input_url                   VARCHAR(2048) NOT NULL,
+canonical_url               VARCHAR(2048),
+merchant_id                 BIGINT REFERENCES merchants(id),
+product_id                  BIGINT REFERENCES products(id),
+scraping_job_id             BIGINT,
+status                      VARCHAR(30) NOT NULL DEFAULT 'url_submitted'
+CHECK (status IN ('url_submitted','extracting','extraction_failed',
+'offer_presented','contracts_pending','contracts_signed',
+'down_payment_pending','down_payment_received',
+'vcn_issued','purchasing','purchase_failed',
+'purchase_confirmed','delivery_pending','in_transit',
+'delivered','completed','cancelled','refunded','disputed')),
+product_snapshot            JSONB NOT NULL,  -- Frozen at order time for contract integrity
+selected_variant            JSONB,
+product_cost                DECIMAL(14,2) NOT NULL,  -- Merchant price (SahulatKar's cost)
+platform_profit             DECIMAL(14,2) NOT NULL,  -- Disclosed Murabaha markup
+total_amount                DECIMAL(14,2) NOT NULL,  -- product_cost + platform_profit
+currency                    CHAR(3) NOT NULL DEFAULT 'PKR',
+delivery_address_id         BIGINT REFERENCES user_addresses(id),
+delivery_address_snapshot   JSONB,
+risk_assessment_id          BIGINT,
+down_payment_amount         DECIMAL(14,2),
+down_payment_pct            DECIMAL(5,2),
+merchant_order_id           VARCHAR(255),
+merchant_order_url          VARCHAR(2048),
+cancelled_at                TIMESTAMP,
+cancel_reason               VARCHAR(100),
+cancelled_by                VARCHAR(20) CHECK (cancelled_by IN ('user','system','admin')),
+admin_notes                 TEXT,
+created_at                  TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at                  TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+
+CREATE TABLE orders_2025_q1 PARTITION OF orders FOR VALUES FROM ('2025-01-01') TO ('2025-04-01');
+CREATE TABLE orders_2025_q2 PARTITION OF orders FOR VALUES FROM ('2025-04-01') TO ('2025-07-01');
+CREATE TABLE orders_2025_q3 PARTITION OF orders FOR VALUES FROM ('2025-07-01') TO ('2025-10-01');
+CREATE TABLE orders_2025_q4 PARTITION OF orders FOR VALUES FROM ('2025-10-01') TO ('2026-01-01');
+CREATE TABLE orders_default  PARTITION OF orders DEFAULT;
+
+CREATE INDEX idx_orders_user_status ON orders(user_id, status);
+CREATE INDEX idx_orders_status      ON orders(status, created_at DESC);
+CREATE INDEX idx_orders_number      ON orders(order_number);
+CREATE UNIQUE INDEX idx_orders_uuid ON orders(uuid);
+CREATE TRIGGER trg_orders_number BEFORE INSERT ON orders
+FOR EACH ROW EXECUTE FUNCTION fn_generate_order_number();
+CREATE TRIGGER trg_orders_audit AFTER INSERT OR UPDATE OR DELETE ON orders
+FOR EACH ROW EXECUTE FUNCTION fn_log_audit();
+## 7.3 Table: order_state_history
+-- Immutable state transition log (never deleted)
+CREATE TABLE order_state_history (
+id                  BIGSERIAL PRIMARY KEY,
+order_id            BIGINT NOT NULL,
+from_status         VARCHAR(30),
+to_status           VARCHAR(30) NOT NULL,
+transition_reason   VARCHAR(255),
+triggered_by        VARCHAR(20)
+CHECK (triggered_by IN ('user','system','admin','payment_gateway')),
+triggered_by_id     BIGINT,
+metadata            JSONB,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_osh_order ON order_state_history(order_id, created_at DESC);
+## 7.4 Table: virtual_cards
+CREATE TABLE virtual_cards (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+order_id            BIGINT UNIQUE NOT NULL,
+user_id             BIGINT NOT NULL REFERENCES users(id),
+issuer              VARCHAR(20) NOT NULL CHECK (issuer IN ('stripe','lithic','hbl_vcn')),
+issuer_card_id      VARCHAR(255) NOT NULL UNIQUE,
+masked_number       VARCHAR(19),        -- '**** **** **** 1234'
+card_expiry         DATE,
+billing_zip         VARCHAR(10),
+authorized_amount   DECIMAL(14,2) NOT NULL,  -- Product cost + 5% price variance buffer
+loaded_amount       DECIMAL(14,2) NOT NULL,  -- Exact product cost
+mcc_lock            VARCHAR(10),             -- Merchant Category Code whitelist
+merchant_lock       VARCHAR(255),            -- Specific merchant domain lock
+charged_amount      DECIMAL(14,2) NOT NULL DEFAULT 0,
+is_used             BOOLEAN NOT NULL DEFAULT FALSE,
+used_at             TIMESTAMP,
+status              VARCHAR(20) NOT NULL DEFAULT 'active'
+CHECK (status IN ('active','used','voided','expired','failed')),
+voided_at           TIMESTAMP,
+void_reason         VARCHAR(100),
+issued_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+expires_at          TIMESTAMP NOT NULL,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_vcn_order  ON virtual_cards(order_id);
+CREATE INDEX idx_vcn_status ON virtual_cards(status) WHERE status = 'active';
+## 7.5 Table: purchase_executions
+CREATE TABLE purchase_executions (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+order_id            BIGINT NOT NULL,
+vcn_id              BIGINT REFERENCES virtual_cards(id),
+attempt_number      SMALLINT NOT NULL DEFAULT 1,
+worker_id           VARCHAR(100),
+proxy_used          VARCHAR(100),
+status              VARCHAR(20) NOT NULL DEFAULT 'queued'
+CHECK (status IN ('queued','running','succeeded','failed',
+'hitl_escalated','cancelled')),
+step_reached        VARCHAR(50),
+failure_type        VARCHAR(50)
+CHECK (failure_type IN ('captcha','site_down','price_changed',
+'out_of_stock','cart_error','payment_declined',
+'checkout_changed','bot_detected','timeout','unknown')),
+error_detail        TEXT,
+screenshot_s3       VARCHAR(512),
+merchant_order_id   VARCHAR(255),
+merchant_order_url  VARCHAR(2048),
+receipt_screenshot_s3 VARCHAR(512),
+duration_ms         INTEGER,
+queued_at           TIMESTAMP NOT NULL DEFAULT NOW(),
+started_at          TIMESTAMP,
+completed_at        TIMESTAMP
+);
+CREATE INDEX idx_pe_order  ON purchase_executions(order_id);
+CREATE INDEX idx_pe_status ON purchase_executions(status);
+## 7.6 Remaining Order Domain Tables
+
+# 8. Part E: Payment & Installment Domain
+The financial core of SahulatKar. Each order generates exactly one Murabaha loan, one set of N installments (default: Pay-in-4), and all payment attempts are tracked to individual gateway transactions. Late fees, per Shariah principles, must be routed entirely to charity — never retained as platform profit.
+## 8.1 Table: loans
+CREATE TABLE loans (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+loan_number         VARCHAR(30) UNIQUE NOT NULL,  -- SAK-LOAN-2025-0001234
+user_id             BIGINT NOT NULL REFERENCES users(id),
+order_id            BIGINT UNIQUE NOT NULL,
+murabaha_contract_id BIGINT,
+-- Murabaha financial structure (must match signed contract)
+principal_amount    DECIMAL(14,2) NOT NULL,  -- Cost price (what SK paid merchant)
+profit_amount       DECIMAL(14,2) NOT NULL,  -- Disclosed markup
+total_repayable     DECIMAL(14,2) NOT NULL,  -- Principal + profit
+down_payment_amount DECIMAL(14,2) NOT NULL,  -- Collected before VCN issuance
+balance_financed    DECIMAL(14,2) NOT NULL,  -- Total - down payment
+profit_rate_pct     DECIMAL(5,2) NOT NULL,   -- e.g., 4.00 = 4%
+plan_type           VARCHAR(20) NOT NULL
+CHECK (plan_type IN ('pay_in_3','pay_in_4','pay_in_6','pay_full')),
+installment_count   SMALLINT NOT NULL CHECK (installment_count BETWEEN 1 AND 6),
+installment_amount  DECIMAL(14,2) NOT NULL,
+status              VARCHAR(20) NOT NULL DEFAULT 'active'
+CHECK (status IN ('active','partially_paid','fully_paid',
+'defaulted','written_off','disputed')),
+total_paid          DECIMAL(14,2) NOT NULL DEFAULT 0,
+total_outstanding   DECIMAL(14,2) NOT NULL,
+late_fee_total      DECIMAL(14,2) NOT NULL DEFAULT 0,
+last_payment_date   TIMESTAMP,
+start_date          DATE NOT NULL,
+expected_end_date   DATE NOT NULL,
+actual_end_date     DATE,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_loans_user    ON loans(user_id, status);
+CREATE INDEX idx_loans_status  ON loans(status) WHERE status NOT IN ('fully_paid','written_off');
+CREATE INDEX idx_loans_order   ON loans(order_id);
+-- Trigger to update users.available_credit whenever loan status or outstanding changes
+CREATE TRIGGER trg_loans_credit AFTER INSERT OR UPDATE OF total_outstanding, status ON loans
+FOR EACH ROW EXECUTE FUNCTION fn_recalculate_available_credit();
+## 8.2 Table: installments
+CREATE TABLE installments (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+loan_id             BIGINT NOT NULL REFERENCES loans(id) ON DELETE RESTRICT,
+user_id             BIGINT NOT NULL REFERENCES users(id),
+installment_number  SMALLINT NOT NULL,  -- 0 = down payment, 1-4 = installments
+is_down_payment     BOOLEAN NOT NULL DEFAULT FALSE,
+principal_portion   DECIMAL(14,2) NOT NULL,
+profit_portion      DECIMAL(14,2) NOT NULL DEFAULT 0,
+total_amount        DECIMAL(14,2) NOT NULL,
+due_date            DATE NOT NULL,
+status              VARCHAR(20) NOT NULL DEFAULT 'pending'
+CHECK (status IN ('pending','paid','overdue','defaulted','waived','rescheduled')),
+paid_amount         DECIMAL(14,2) NOT NULL DEFAULT 0,
+paid_at             TIMESTAMP,
+-- Late fees (Shariah: ALL late fees go to charity, zero retained as revenue)
+days_overdue        INTEGER NOT NULL DEFAULT 0,
+late_fee_amount     DECIMAL(14,2) NOT NULL DEFAULT 0,
+late_fee_waived     BOOLEAN NOT NULL DEFAULT FALSE,
+late_fee_waiver_reason TEXT,
+reminders_sent      SMALLINT NOT NULL DEFAULT 0,
+last_reminder_at    TIMESTAMP,
+retry_count         SMALLINT NOT NULL DEFAULT 0,
+next_retry_at       TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+-- Critical indexes for nightly billing sweep
+CREATE INDEX idx_inst_billing ON installments(due_date, user_id)
+WHERE status = 'pending';   -- Partial index: only pending installments
+CREATE INDEX idx_inst_overdue ON installments(due_date)
+WHERE status = 'overdue';
+CREATE INDEX idx_inst_loan    ON installments(loan_id);
+## 8.3 Table: payment_transactions (Partitioned)
+CREATE TABLE payment_transactions (
+id                  BIGSERIAL,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+installment_id      BIGINT NOT NULL REFERENCES installments(id) ON DELETE RESTRICT,
+user_id             BIGINT NOT NULL REFERENCES users(id),
+payment_method_id   BIGINT REFERENCES user_payment_methods(id),
+amount              DECIMAL(14,2) NOT NULL,
+currency            CHAR(3) NOT NULL DEFAULT 'PKR',
+gateway             VARCHAR(30) NOT NULL
+CHECK (gateway IN ('safepay','jazzcash','easypaisa','raast','stripe','manual')),
+gateway_txn_id      VARCHAR(255) UNIQUE,
+gateway_order_id    VARCHAR(255),
+gateway_response    JSONB,
+status              VARCHAR(30) NOT NULL DEFAULT 'initiated'
+CHECK (status IN ('initiated','pending','success','failed',
+'refunded','partially_refunded','chargeback')),
+failure_code        VARCHAR(50),
+failure_message     TEXT,
+retry_of_txn_id     BIGINT,  -- Self-reference for retry chain
+initiated_at        TIMESTAMP NOT NULL DEFAULT NOW(),
+confirmed_at        TIMESTAMP,
+failed_at           TIMESTAMP,
+settlement_id       BIGINT,
+reconciled_at       TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+CREATE INDEX idx_ptxn_installment ON payment_transactions(installment_id);
+CREATE INDEX idx_ptxn_user        ON payment_transactions(user_id, created_at DESC);
+CREATE INDEX idx_ptxn_gateway_id  ON payment_transactions USING HASH(gateway_txn_id);
+CREATE INDEX idx_ptxn_status      ON payment_transactions(status);
+## 8.4 Remaining Payment Domain Tables
+
+# 9. Part F: Delivery & Logistics Domain
+SahulatKar integrates with Pakistan's major couriers: TCS, Leopards Courier, M&P, PostEx, and Swyft. Tracking is unified via AfterShip API webhooks. The tracking_events table uses TimescaleDB hypertable for high-volume time-series ingestion.
+## 9.1 Table: shipments
+CREATE TABLE shipments (
+id                      BIGSERIAL PRIMARY KEY,
+uuid                    UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+order_id                BIGINT NOT NULL,
+courier_id              BIGINT REFERENCES couriers(id),
+courier_name            VARCHAR(100),      -- Denormalized for fast display
+tracking_number         VARCHAR(100) UNIQUE,
+courier_tracking_url    VARCHAR(2048),
+aftership_tracking_id   VARCHAR(100),
+status                  VARCHAR(30) NOT NULL DEFAULT 'label_created'
+CHECK (status IN ('label_created','picked_up','in_transit',
+'out_for_delivery','delivered','attempted','returned','lost')),
+estimated_delivery      DATE,
+actual_delivery         TIMESTAMP,
+delivery_address_snapshot JSONB,
+recipient_name          VARCHAR(100),
+recipient_phone         VARCHAR(20),
+weight_kg               DECIMAL(6,2),
+shipping_cost           DECIMAL(10,2),
+is_cod                  BOOLEAN NOT NULL DEFAULT FALSE,
+cod_amount              DECIMAL(10,2),
+created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at              TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_shipments_order   ON shipments(order_id);
+CREATE INDEX idx_shipments_status  ON shipments(status);
+CREATE UNIQUE INDEX idx_shipments_tracking ON shipments(tracking_number);
+## 9.2 Table: tracking_events (TimescaleDB Hypertable)
+CREATE TABLE tracking_events (
+id              BIGSERIAL,
+shipment_id     BIGINT NOT NULL REFERENCES shipments(id),
+event_code      VARCHAR(50),
+event_description TEXT,
+location_city   VARCHAR(100),
+location_country VARCHAR(50),
+courier_raw_data JSONB,
+event_time      TIMESTAMP NOT NULL,
+received_at     TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, event_time)
+) PARTITION BY RANGE (event_time);
+
+-- Enable TimescaleDB after creation:
+-- SELECT create_hypertable('tracking_events', 'event_time');
+-- SELECT add_compression_policy('tracking_events', INTERVAL '7 days');
+-- SELECT add_retention_policy('tracking_events', INTERVAL '2 years');
+CREATE INDEX idx_te_shipment ON tracking_events(shipment_id, event_time DESC);
+## 9.3 Table: couriers
+CREATE TABLE couriers (
+id                  SERIAL PRIMARY KEY,
+name                VARCHAR(100) NOT NULL,
+code                VARCHAR(20) UNIQUE NOT NULL,  -- 'TCS','LEO','MNP','POSTEX','SWYFT'
+tracking_url_template VARCHAR(512),
+api_endpoint        VARCHAR(255),
+api_key_encrypted   BYTEA,
+coverage_provinces  TEXT[],
+base_rate           DECIMAL(8,2),
+per_kg_rate         DECIMAL(6,2),
+is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+is_cod_available    BOOLEAN NOT NULL DEFAULT TRUE,
+avg_delivery_days   SMALLINT,
+aftership_slug      VARCHAR(50),
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+## 9.4 Remaining Delivery Tables
+
+# 10. Part G: Shariah Compliance Domain
+Shariah compliance is first-class in SahulatKar's architecture. The platform implements Agency Murabaha (two-contract structure: Wakalah agency agreement + Murabaha cost-plus sale), validated against SECP Islamic Finance Guidelines 2023 and Federal Shariat Court precedents. Three rules enforced at DB level:
+Rule 1 — Late fee charity routing: All late fees collected from defaulting customers must be routed 100% to charity. Zero can be retained as platform revenue. Tracked per installment in late_fee_charity_allocations.
+Rule 2 — Cost price disclosure: The Murabaha contract must explicitly state cost_price, profit_amount, and profit_rate_pct before user signing. No hidden fees.
+Rule 3 — Prohibited categories: Shariah-prohibited product categories blocked at scraping stage before any financing offer is presented. Block logged in prohibited_items_log.
+## 10.1 Table: wakalah_agreements
+-- Wakalah: User appoints SahulatKar as agent to purchase on their behalf
+CREATE TABLE wakalah_agreements (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+contract_number     VARCHAR(50) UNIQUE NOT NULL,  -- SAK-WAK-2025-001234
+order_id            BIGINT UNIQUE NOT NULL,
+user_id             BIGINT NOT NULL REFERENCES users(id),
+principal_name      VARCHAR(200) NOT NULL,
+principal_cnic      VARCHAR(20),    -- Masked display (42101-XXXXXXX-1)
+principal_phone     VARCHAR(20) NOT NULL,
+agent_name          VARCHAR(100) NOT NULL DEFAULT 'SahulatKar (Pvt) Ltd.',
+agent_secp_license  VARCHAR(50) NOT NULL,
+product_description TEXT NOT NULL,
+merchant_name       VARCHAR(255) NOT NULL,
+product_url         VARCHAR(2048) NOT NULL,
+authorized_amount   DECIMAL(14,2) NOT NULL,
+price_variance_pct  DECIMAL(4,2) NOT NULL DEFAULT 5.00,
+contract_pdf_s3     VARCHAR(512) NOT NULL,
+contract_hash       VARCHAR(64) NOT NULL,  -- SHA-256 for integrity verification
+signed_via          VARCHAR(20) NOT NULL DEFAULT 'otp'
+CHECK (signed_via IN ('otp','biometric','digital_cert')),
+otp_reference       VARCHAR(100),
+signed_at           TIMESTAMP NOT NULL,
+signing_ip          INET,
+signing_device_id   BIGINT,
+valid_from          TIMESTAMP NOT NULL,
+valid_until         TIMESTAMP NOT NULL,  -- Wakalah expires if not executed
+is_executed         BOOLEAN NOT NULL DEFAULT FALSE,
+executed_at         TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_wakalah_order ON wakalah_agreements(order_id);
+CREATE INDEX idx_wakalah_user  ON wakalah_agreements(user_id);
+## 10.2 Table: murabaha_contracts
+-- Murabaha: Cost-plus sale where SahulatKar sells to user at disclosed markup
+CREATE TABLE murabaha_contracts (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+contract_number     VARCHAR(50) UNIQUE NOT NULL,
+order_id            BIGINT UNIQUE NOT NULL,
+loan_id             BIGINT UNIQUE REFERENCES loans(id),
+wakalah_id          BIGINT REFERENCES wakalah_agreements(id),
+user_id             BIGINT NOT NULL REFERENCES users(id),
+-- Mandatory Shariah disclosures (must match exactly what user sees before signing)
+cost_price          DECIMAL(14,2) NOT NULL,
+profit_amount       DECIMAL(14,2) NOT NULL,
+profit_rate_pct     DECIMAL(5,2) NOT NULL,
+total_repayable     DECIMAL(14,2) NOT NULL,
+currency            CHAR(3) NOT NULL DEFAULT 'PKR',
+product_description TEXT NOT NULL,
+product_specification TEXT,
+delivery_obligation VARCHAR(100) NOT NULL DEFAULT 'merchant_to_customer',
+payment_plan        VARCHAR(20) NOT NULL,
+installment_schedule JSONB NOT NULL,
+contract_pdf_s3     VARCHAR(512) NOT NULL,
+contract_hash       VARCHAR(64) NOT NULL,
+template_version    VARCHAR(10) NOT NULL,
+signed_via          VARCHAR(20) NOT NULL DEFAULT 'otp',
+otp_reference       VARCHAR(100),
+signed_at           TIMESTAMP NOT NULL,
+signing_ip          INET,
+validated_by_shariah_board BOOLEAN NOT NULL DEFAULT FALSE,
+shariah_approval_ref VARCHAR(50),
+status              VARCHAR(20) NOT NULL DEFAULT 'active'
+CHECK (status IN ('active','completed','cancelled','disputed')),
+completed_at        TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_murabaha_order ON murabaha_contracts(order_id);
+CREATE INDEX idx_murabaha_user  ON murabaha_contracts(user_id);
+## 10.3 Remaining Shariah Tables
+
+# 11. Part H: Financial Accounting Domain
+SahulatKar implements double-entry bookkeeping. Every financial event generates balanced journal entry lines (debits = credits). This supports P&L reporting, balance sheet generation, gateway reconciliation, and SECP regulatory filings.
+## 11.1 Table: ledger_accounts (Chart of Accounts)
+CREATE TABLE ledger_accounts (
+id              SERIAL PRIMARY KEY,
+account_code    VARCHAR(20) UNIQUE NOT NULL,
+account_name    VARCHAR(100) NOT NULL,
+account_type    VARCHAR(20) NOT NULL
+CHECK (account_type IN ('asset','liability','equity','revenue','expense')),
+normal_balance  CHAR(6) NOT NULL CHECK (normal_balance IN ('debit','credit')),
+parent_account_id INTEGER REFERENCES ledger_accounts(id),
+is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+notes           TEXT
+);
+
+-- Chart of Accounts (Seed Data):
+-- ASSETS:    1001 Cash/Bank | 1100 AR-Installments | 1200 VCNs Issued | 1300 Merchant Advances
+-- LIABILITY: 2001 AP-Merchants | 2100 Charity Payable | 2200 Customer Deposits
+-- EQUITY:    3001 Owner Equity | 3900 Retained Earnings
+-- REVENUE:   4001 Murabaha Profit | 4002 Affiliate Commission | 4003 Late Fee Collections
+-- EXPENSE:   5001 COGS-Merchant Payment | 5002 Gateway Fees | 5003 VCN Issuance | 5004 Loan Loss Provision
+## 11.2 Tables: journal_entries & journal_entry_lines
+CREATE TABLE journal_entries (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+entry_number        VARCHAR(30) UNIQUE NOT NULL,  -- JE-2025-0001234
+entry_date          DATE NOT NULL,
+description         TEXT NOT NULL,
+entry_type          VARCHAR(30) NOT NULL
+CHECK (entry_type IN ('payment_received','merchant_payment',
+'refund','late_fee','charity_disbursement','provision',
+'write_off','reversal','adjustment','vcn_load','vcn_charge')),
+source_type         VARCHAR(30),    -- Polymorphic: 'payment_transaction','loan','refund'
+source_id           BIGINT,
+is_balanced         BOOLEAN NOT NULL DEFAULT FALSE,  -- DB-enforced: debits must = credits
+total_debit         DECIMAL(14,2) NOT NULL DEFAULT 0,
+total_credit        DECIMAL(14,2) NOT NULL DEFAULT 0,
+created_by          VARCHAR(20) NOT NULL DEFAULT 'system',
+created_by_id       BIGINT,
+is_posted           BOOLEAN NOT NULL DEFAULT FALSE,
+posted_at           TIMESTAMP,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_je_source ON journal_entries(source_type, source_id);
+CREATE INDEX idx_je_date   ON journal_entries(entry_date);
+
+CREATE TABLE journal_entry_lines (
+id              BIGSERIAL PRIMARY KEY,
+journal_id      BIGINT NOT NULL REFERENCES journal_entries(id) ON DELETE CASCADE,
+account_id      INTEGER NOT NULL REFERENCES ledger_accounts(id),
+debit_amount    DECIMAL(14,2) NOT NULL DEFAULT 0,
+credit_amount   DECIMAL(14,2) NOT NULL DEFAULT 0,
+description     TEXT,
+CONSTRAINT chk_one_side_only
+CHECK (NOT (debit_amount > 0 AND credit_amount > 0)),
+CONSTRAINT chk_positive_amounts
+CHECK (debit_amount >= 0 AND credit_amount >= 0)
+);
+CREATE INDEX idx_jel_journal ON journal_entry_lines(journal_id);
+CREATE INDEX idx_jel_account ON journal_entry_lines(account_id);
+## 11.3 Remaining Financial Accounting Tables
+
+# 12. Part I: Support, Communication & Notifications Domain
+## 12.1 Table: support_tickets
+CREATE TABLE support_tickets (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+ticket_number       VARCHAR(30) UNIQUE NOT NULL,  -- SAK-TKT-2025-001234
+user_id             BIGINT NOT NULL REFERENCES users(id),
+order_id            BIGINT,
+loan_id             BIGINT,
+category            VARCHAR(50) NOT NULL
+CHECK (category IN ('payment_issue','delivery_issue','product_issue',
+'kyc_query','fraud_report','refund_request',
+'contract_query','account_issue','general')),
+subject             VARCHAR(255) NOT NULL,
+priority            VARCHAR(10) NOT NULL DEFAULT 'medium'
+CHECK (priority IN ('low','medium','high','urgent')),
+status              VARCHAR(20) NOT NULL DEFAULT 'open'
+CHECK (status IN ('open','in_progress','waiting_user',
+'escalated','resolved','closed')),
+assigned_to         BIGINT,
+sla_deadline        TIMESTAMP,
+first_response_at   TIMESTAMP,
+resolved_at         TIMESTAMP,
+closed_at           TIMESTAMP,
+satisfaction_score  SMALLINT CHECK (satisfaction_score BETWEEN 1 AND 5),
+satisfaction_comment TEXT,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_tickets_user     ON support_tickets(user_id);
+CREATE INDEX idx_tickets_status   ON support_tickets(status);
+CREATE INDEX idx_tickets_assigned ON support_tickets(assigned_to, status);
+CREATE INDEX idx_tickets_sla      ON support_tickets(sla_deadline) WHERE status='open';
+## 12.2 Table: notifications_queue (Partitioned)
+CREATE TABLE notifications_queue (
+id                  BIGSERIAL,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+user_id             BIGINT NOT NULL REFERENCES users(id),
+channel             VARCHAR(20) NOT NULL
+CHECK (channel IN ('sms','email','push','whatsapp')),
+notification_type   VARCHAR(50) NOT NULL,
+template_id         BIGINT,
+subject             VARCHAR(255),
+body                TEXT NOT NULL,
+variables           JSONB,
+recipient           VARCHAR(255) NOT NULL,
+status              VARCHAR(20) NOT NULL DEFAULT 'queued'
+CHECK (status IN ('queued','sending','sent','failed','bounced','cancelled')),
+priority            SMALLINT NOT NULL DEFAULT 5 CHECK (priority BETWEEN 1 AND 10),
+scheduled_at        TIMESTAMP,
+sent_at             TIMESTAMP,
+delivered_at        TIMESTAMP,
+failure_reason      TEXT,
+retry_count         SMALLINT NOT NULL DEFAULT 0,
+gateway_message_id  VARCHAR(255),
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+CREATE INDEX idx_notif_dispatch ON notifications_queue(scheduled_at, priority)
+WHERE status = 'queued';
+## 12.3 Remaining Support & Comms Tables
+
+# 13. Part J: Marketing & Growth Domain
+## 13.1 Table: referrals
+CREATE TABLE referrals (
+id                      BIGSERIAL PRIMARY KEY,
+referrer_user_id        BIGINT NOT NULL REFERENCES users(id),
+referred_user_id        BIGINT NOT NULL REFERENCES users(id),
+referral_code           VARCHAR(20) NOT NULL,
+status                  VARCHAR(30) NOT NULL DEFAULT 'pending'
+CHECK (status IN ('pending','registered','kyc_complete',
+'first_order_placed','reward_paid','expired')),
+referrer_reward_amount  DECIMAL(10,2),
+referred_reward_amount  DECIMAL(10,2),
+reward_type             VARCHAR(30)
+CHECK (reward_type IN ('credit_limit_bonus','cashback','fee_waiver')),
+reward_paid_at          TIMESTAMP,
+first_order_id          BIGINT,
+expires_at              TIMESTAMP,
+created_at              TIMESTAMP NOT NULL DEFAULT NOW(),
+UNIQUE(referrer_user_id, referred_user_id)
+);
+CREATE INDEX idx_referrals_referrer ON referrals(referrer_user_id, status);
+## 13.2 Table: promotional_codes & promo_code_usage
+CREATE TABLE promotional_codes (
+id                  BIGSERIAL PRIMARY KEY,
+code                VARCHAR(30) UNIQUE NOT NULL,
+promo_type          VARCHAR(30) NOT NULL
+CHECK (promo_type IN ('fee_waiver','credit_bonus',
+'cashback_pct','cashback_flat','free_delivery')),
+discount_value      DECIMAL(10,2),
+discount_pct        DECIMAL(5,2) CHECK (discount_pct BETWEEN 0 AND 100),
+min_order_amount    DECIMAL(14,2),
+max_discount_cap    DECIMAL(10,2),
+usage_limit_total   INTEGER,
+usage_limit_per_user SMALLINT NOT NULL DEFAULT 1,
+times_used          INTEGER NOT NULL DEFAULT 0,
+valid_from          TIMESTAMP NOT NULL,
+valid_until         TIMESTAMP NOT NULL,
+applicable_cities   TEXT[],
+is_active           BOOLEAN NOT NULL DEFAULT TRUE,
+created_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE TABLE promo_code_usage (
+id              BIGSERIAL PRIMARY KEY,
+promo_code_id   BIGINT NOT NULL REFERENCES promotional_codes(id),
+user_id         BIGINT NOT NULL REFERENCES users(id),
+order_id        BIGINT NOT NULL,
+discount_applied DECIMAL(10,2) NOT NULL,
+used_at         TIMESTAMP NOT NULL DEFAULT NOW(),
+UNIQUE(promo_code_id, order_id)
+);
+## 13.3 Remaining Marketing Tables
+
+# 14. Part K: Admin & Team Domain
+RBAC for all internal team members. Roles: super_admin, risk_analyst, credit_manager, cs_agent, cs_supervisor, finance_officer, compliance_officer, tech_engineer, shariah_auditor. Every admin action is logged in admin_activity_logs with before/after state JSONB capture.
+## 14.1 Tables: admin_users, roles, permissions, RBAC joins
+CREATE TABLE admin_users (
+id                  BIGSERIAL PRIMARY KEY,
+uuid                UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+email               VARCHAR(255) UNIQUE NOT NULL,
+phone               VARCHAR(20),
+full_name           VARCHAR(200) NOT NULL,
+password_hash       VARCHAR(255) NOT NULL,
+department          VARCHAR(50)
+CHECK (department IN ('risk','operations','finance',
+'tech','compliance','cs','shariah','executive')),
+status              VARCHAR(20) NOT NULL DEFAULT 'active'
+CHECK (status IN ('active','inactive','suspended')),
+mfa_secret_encrypted BYTEA,
+mfa_enabled         BOOLEAN NOT NULL DEFAULT TRUE,
+last_login_at       TIMESTAMP,
+last_login_ip       INET,
+failed_login_attempts SMALLINT NOT NULL DEFAULT 0,
+locked_until        TIMESTAMP,
+force_password_change BOOLEAN NOT NULL DEFAULT FALSE,
+created_by          BIGINT REFERENCES admin_users(id),
+created_at          TIMESTAMP NOT NULL DEFAULT NOW(),
+updated_at          TIMESTAMP NOT NULL DEFAULT NOW()
+);
+
+CREATE TABLE roles (
+id          SERIAL PRIMARY KEY,
+name        VARCHAR(50) UNIQUE NOT NULL,
+description TEXT,
+is_system_role BOOLEAN NOT NULL DEFAULT FALSE,
+is_active   BOOLEAN NOT NULL DEFAULT TRUE
+);
+
+CREATE TABLE permissions (
+id          SERIAL PRIMARY KEY,
+code        VARCHAR(100) UNIQUE NOT NULL,  -- 'orders.view','users.suspend','credit.adjust'
+module      VARCHAR(50) NOT NULL,
+action      VARCHAR(50) NOT NULL,
+description TEXT
+);
+
+CREATE TABLE role_permissions (
+role_id       INTEGER NOT NULL REFERENCES roles(id) ON DELETE CASCADE,
+permission_id INTEGER NOT NULL REFERENCES permissions(id) ON DELETE CASCADE,
+PRIMARY KEY (role_id, permission_id)
+);
+
+CREATE TABLE admin_user_roles (
+admin_user_id BIGINT NOT NULL REFERENCES admin_users(id) ON DELETE CASCADE,
+role_id       INTEGER NOT NULL REFERENCES roles(id) ON DELETE RESTRICT,
+assigned_by   BIGINT REFERENCES admin_users(id),
+assigned_at   TIMESTAMP NOT NULL DEFAULT NOW(),
+expires_at    TIMESTAMP,
+PRIMARY KEY (admin_user_id, role_id)
+);
+## 14.2 Table: admin_activity_logs (Partitioned)
+CREATE TABLE admin_activity_logs (
+id              BIGSERIAL,
+admin_user_id   BIGINT NOT NULL REFERENCES admin_users(id),
+action          VARCHAR(100) NOT NULL,  -- 'user.suspend','credit.adjust','order.cancel'
+target_type     VARCHAR(50),
+target_id       BIGINT,
+before_state    JSONB,
+after_state     JSONB,
+reason          TEXT,
+ip_address      INET,
+user_agent      TEXT,
+session_id      UUID,
+created_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, created_at)
+) PARTITION BY RANGE (created_at);
+CREATE INDEX idx_aal_admin  ON admin_activity_logs(admin_user_id, created_at DESC);
+CREATE INDEX idx_aal_target ON admin_activity_logs(target_type, target_id);
+## 14.3 Remaining Admin Tables
+
+# 15. Part L: Compliance & Audit Domain
+The compliance domain captures the audit backbone. The audit_trails table receives writes from AFTER triggers on all 30 sensitive tables. Partitioned monthly to manage the expected 50M+ rows per year at scale. All compliance data retained 7 years per SECP requirements.
+## 15.1 Table: audit_trails (Partitioned — 50M+ rows/year)
+CREATE TABLE audit_trails (
+id              BIGSERIAL,
+table_name      VARCHAR(100) NOT NULL,
+record_id       BIGINT NOT NULL,
+operation       VARCHAR(10) NOT NULL CHECK (operation IN ('INSERT','UPDATE','DELETE')),
+actor_type      VARCHAR(20) CHECK (actor_type IN ('customer','admin','system','api')),
+actor_id        BIGINT,
+actor_email     VARCHAR(255),
+ip_address      INET,
+user_agent      TEXT,
+request_id      UUID,
+session_id      UUID,
+old_values      JSONB,
+new_values      JSONB,
+changed_fields  TEXT[],
+change_reason   TEXT,
+changed_at      TIMESTAMP NOT NULL DEFAULT NOW(),
+PRIMARY KEY (id, changed_at)
+) PARTITION BY RANGE (changed_at);
+
+CREATE TABLE audit_trails_default PARTITION OF audit_trails DEFAULT;
+-- Monthly partitions auto-created via pg_cron
+
+CREATE INDEX idx_audit_table_record ON audit_trails(table_name, record_id);
+CREATE INDEX idx_audit_actor        ON audit_trails(actor_type, actor_id);
+CREATE INDEX idx_audit_changed_at   ON audit_trails(changed_at DESC);
+
+-- Universal trigger function — applied to all 30 sensitive tables
+CREATE OR REPLACE FUNCTION fn_log_audit()
+RETURNS TRIGGER LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE v_old JSONB; v_new JSONB; v_changed TEXT[];
+BEGIN
+IF TG_OP='DELETE' THEN v_old:=to_jsonb(OLD); v_new:=NULL;
+ELSIF TG_OP='INSERT' THEN v_old:=NULL; v_new:=to_jsonb(NEW);
+ELSE v_old:=to_jsonb(OLD); v_new:=to_jsonb(NEW);
+SELECT array_agg(key) INTO v_changed FROM jsonb_each(v_old)
+WHERE (v_old->key)::text IS DISTINCT FROM (v_new->key)::text;
+END IF;
+INSERT INTO audit_trails(table_name,record_id,operation,actor_type,actor_id,
+ip_address,request_id,old_values,new_values,changed_fields)
+VALUES(TG_TABLE_NAME,
+COALESCE((v_new->>'id')::BIGINT,(v_old->>'id')::BIGINT),
+TG_OP,
+NULLIF(current_setting('app.actor_type',TRUE),''),
+NULLIF(current_setting('app.actor_id',TRUE),'')::BIGINT,
+NULLIF(current_setting('app.ip_address',TRUE),'')::INET,
+NULLIF(current_setting('app.request_id',TRUE),'')::UUID,
+v_old,v_new,v_changed);
+RETURN COALESCE(NEW,OLD);
+END; $$;
+## 15.2 Remaining Compliance & Audit Tables
+
+# 16. Part M: System & Integration Domain
+The system domain handles API key management, outbound webhooks, background job tracking, third-party integration logging, system health monitoring, and feature flags. This domain forms the operational backbone connecting SahulatKar's services with external providers.
+## 16.1 Table: api_keys
+CREATE TABLE api_keys (
+id              BIGSERIAL PRIMARY KEY,
+uuid            UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+key_hash        VARCHAR(64) UNIQUE NOT NULL,   -- SHA-256 (raw key never stored)
+key_prefix      VARCHAR(8) NOT NULL,           -- First 8 chars shown for identification
+name            VARCHAR(100) NOT NULL,
+owner_type      VARCHAR(20) NOT NULL
+CHECK (owner_type IN ('admin','merchant_partner','internal_service')),
+owner_id        BIGINT,
+scopes          TEXT[] NOT NULL,
+rate_limit_rpm  INTEGER NOT NULL DEFAULT 60,
+allowed_ips     INET[],
+is_active       BOOLEAN NOT NULL DEFAULT TRUE,
+last_used_at    TIMESTAMP,
+expires_at      TIMESTAMP,
+created_by      BIGINT REFERENCES admin_users(id),
+revoked_at      TIMESTAMP,
+revoke_reason   TEXT,
+created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE UNIQUE INDEX idx_api_keys_hash ON api_keys(key_hash) WHERE is_active=TRUE;
+## 16.2 Table: background_jobs
+-- PostgreSQL durable job audit log (BullMQ/Redis is the live queue)
+CREATE TABLE background_jobs (
+id              BIGSERIAL PRIMARY KEY,
+uuid            UUID UNIQUE NOT NULL DEFAULT gen_random_uuid(),
+queue_name      VARCHAR(50) NOT NULL
+CHECK (queue_name IN ('scraping','purchase','notifications',
+'billing','kyc','fraud_review','reconciliation')),
+job_type        VARCHAR(100) NOT NULL,
+payload         JSONB NOT NULL,
+status          VARCHAR(20) NOT NULL DEFAULT 'pending'
+CHECK (status IN ('pending','running','completed','failed','cancelled')),
+priority        SMALLINT NOT NULL DEFAULT 5 CHECK (priority BETWEEN 1 AND 10),
+attempts        SMALLINT NOT NULL DEFAULT 0,
+max_attempts    SMALLINT NOT NULL DEFAULT 3,
+result          JSONB,
+error_message   TEXT,
+worker_id       VARCHAR(100),
+scheduled_at    TIMESTAMP NOT NULL DEFAULT NOW(),
+started_at      TIMESTAMP,
+completed_at    TIMESTAMP,
+created_at      TIMESTAMP NOT NULL DEFAULT NOW()
+);
+CREATE INDEX idx_jobs_queue_status ON background_jobs(queue_name, status, scheduled_at)
+WHERE status IN ('pending','running');
+## 16.3 Remaining System Tables
+## 16.4 External Integration Services Summary
+
+# Volume I — Summary & Transition to Volume II
+This volume has defined the complete entity relationships and full SQL DDL for all 169 tables across SahulatKar's 13 functional domains. Every design decision reflects the dual constraints of Shariah compliance and Pakistan's regulatory environment (SECP, SBP, NADRA, PECA 2016).
+## Volume I Coverage Summary
+## Critical Utility Functions Referenced Throughout
+## Immediate Next Steps Before Production Launch
+P0 — Critical (Before First User): Run all migrations via Flyway, set up RDS with Multi-AZ, configure PgBouncer, create all DB roles with least-privilege access, seed prohibited_categories and charity_organizations, seed ledger_accounts chart of accounts.
+P0 — Critical: Deploy pg_cron for daily installment sweep, nightly credit review, monthly partition creation. Configure WAL archiving to S3 for PITR. Enable SSL-only connections.
+P1 — Pre-Launch: Set up read replicas, configure Redis Cluster, enable RLS policies, deploy materialized views for admin dashboards, validate all AFTER audit triggers on 30 tables.
+P2 — Week 1 Post-Launch: Enable TimescaleDB on tracking_events, configure compression and retention policies, set up pg_stat_statements monitoring, deploy Grafana dashboard for DB health.
+P3 — Month 1: Load test to validate partition pruning effectiveness, review slow query log, tune autovacuum per-table, evaluate PgBouncer pool sizing against actual connection patterns.
+
+Volume II covers: Indexing Strategy (Section 17) | Partitioning & Sharding Plan (18) | Security Architecture & RLS (19) | Backup & Disaster Recovery (20) | Performance Optimization & PgBouncer (21) | Migration Strategy with Flyway (22) | Pakistan-Specific Considerations (23) | Comprehensive Audit Logging (24) | Database Sizing & 5-Year Cost Projections (25) | Appendices: Trigger Library, Operational Runbooks, Production Readiness Checklist
+| Module | Tables | Key Entities |
+| --- | --- | --- |
+| User & Identity | 15 | users, kyc_verifications, user_devices, user_payment_methods, user_addresses |
+| Credit & Risk | 18 | credit_applications, risk_assessments, fraud_alerts, velocity_checks, blacklisted_entities |
+| Product & Merchant | 10 | products, merchants, scraping_jobs, product_prices_history, prohibited_categories |
+| Order & Purchase | 14 | orders, virtual_cards, purchase_executions, order_state_history, hitl_queue |
+| Payment & Installment | 18 | loans, installments, payment_transactions, refunds, charity_allocations, settlements |
+| Delivery & Logistics | 9 | shipments, tracking_events, couriers, delivery_attempts, delivery_proofs |
+| Shariah Compliance | 9 | murabaha_contracts, wakalah_agreements, prohibited_items_log, shariah_audit_reports |
+| Financial Accounting | 13 | ledger_accounts, journal_entries, journal_entry_lines, reconciliations |
+| Support & Comms | 12 | support_tickets, notifications_queue, email_templates, customer_communications |
+| Marketing & Growth | 11 | campaigns, referrals, promo_codes, ab_test_experiments, conversion_events |
+| Admin & Team | 9 | admin_users, roles, permissions, role_permissions, admin_activity_logs |
+| Compliance & Audit | 9 | audit_trails, regulatory_reports, data_deletion_requests, consent_logs |
+| System & Integration | 12 | api_keys, webhooks, background_jobs, integration_logs, scheduled_tasks |
+| TOTAL | 169 | All domains combined — all tables documented with full DDL in this volume |
+| Component | Technology | Purpose | AWS Sizing (Year 1) |
+| --- | --- | --- | --- |
+| Primary OLTP | PostgreSQL 16 | All transactional data, financial records, contracts | RDS r6g.xlarge — 32GB RAM, 4 vCPU, 500GB gp3 |
+| Read Replica x2 | PostgreSQL 16 | Admin dashboards, reports, analytics | RDS r6g.large — 16GB RAM each |
+| Cache & Queue | Redis 7 Cluster | Sessions, BullMQ queues, hot data cache | ElastiCache r6g.large, 3-node cluster |
+| Object Storage | AWS S3 | KYC docs, contract PDFs, product images, screenshots | S3 Standard + S3 Glacier Deep Archive |
+| Time-Series | TimescaleDB (PG ext) | Tracking events, system metrics, API logs | Co-located on primary PostgreSQL |
+| Search | PG Full-Text + GIN | Product search in English and Urdu | GIN indexes on tsvector columns |
+| Connection Pool | PgBouncer | Transaction-mode pooling (2000 client → 180 PG) | EC2 t3.small, redundant pair |
+| Data Warehouse | AWS Redshift Serverless | BI analytics, executive dashboards (Phase 2) | Serverless, pay-per-query |
+| Parent Table | Child Table | Cardinality | FK Column | On Delete | Business Rule |
+| --- | --- | --- | --- | --- | --- |
+| users | orders | 1:N | orders.user_id | RESTRICT | Cannot delete user with order history |
+| users | credit_applications | 1:N | credit_applications.user_id | RESTRICT | Credit history preserved |
+| users | user_kyc_verifications | 1:N | user_kyc_verifications.user_id | RESTRICT | KYC records immutable |
+| users | user_addresses | 1:N | user_addresses.user_id | CASCADE | Addresses follow user |
+| users | user_payment_methods | 1:N | user_payment_methods.user_id | CASCADE | Methods follow user |
+| orders | loans | 1:1 | loans.order_id | RESTRICT | One Murabaha loan per order |
+| orders | virtual_cards | 1:1 | virtual_cards.order_id | RESTRICT | One VCN per order |
+| orders | order_state_history | 1:N | order_state_history.order_id | CASCADE | State log cascades |
+| orders | purchase_executions | 1:N | purchase_executions.order_id | CASCADE | Attempt log cascades |
+| orders | murabaha_contracts | 1:1 | murabaha_contracts.order_id | RESTRICT | Contract immutable |
+| orders | wakalah_agreements | 1:1 | wakalah_agreements.order_id | RESTRICT | Contract immutable |
+| loans | installments | 1:N | installments.loan_id | RESTRICT | Financial records preserved |
+| installments | payment_transactions | 1:N | payment_transactions.installment_id | RESTRICT | Payment records preserved |
+| payment_transactions | journal_entry_lines | 1:N | source_id (polymorphic) | RESTRICT | Accounting immutable |
+| products | merchants | N:1 | products.merchant_id | RESTRICT | Merchant must exist |
+| support_tickets | ticket_messages | 1:N | ticket_messages.ticket_id | CASCADE | Messages follow ticket |
+| Table | Key Columns | Design Notes |
+| --- | --- | --- |
+| user_sessions | id, user_id, access_token_hash, refresh_token_hash, device_id, ip, expires_at, revoked_at | JWT session tracking. Refresh tokens SHA-256 hashed. TTL: 15min access, 24h refresh. Redis mirrors active sessions. |
+| user_bank_accounts | id, user_id, bank_name, iban_encrypted, account_title, is_primary, is_verified | Separate table for Raast direct-debit setup. IBAN AES-256 encrypted. Verified via penny-drop test. |
+| user_consent_records | id, user_id, consent_type, version, decision, consented_at, ip, user_agent | Immutable append-only. Legal record for Wakalah/Murabaha acceptance. consent_type: tnc/privacy/murabaha/wakalah. |
+| user_activity_logs | id, user_id, event_type, event_detail JSONB, ip, device_id, created_at | Behavioral analytics for fraud ML. Partitioned monthly. Events: url_pasted, offer_viewed, contract_signed, payment_made. |
+| user_biometric_data | id, user_id, biometric_type, template_hash, liveness_score, vendor, captured_at | Template stored as hash only — raw biometric never persisted. Used for re-verification on high-risk orders. |
+| user_preferences | id, user_id, key VARCHAR(50), value TEXT, updated_at | Key-value config store. Keys: default_payment_method, language, notification_channels, default_address. |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| credit_limit_history | Immutable audit log of every credit limit change | user_id, old_limit, new_limit, reason_code, changed_by_type, changed_by_id, created_at |
+| blacklisted_entities | Blocked users/IPs/devices/CNICs/merchants | entity_type, entity_value, reason_code, severity, blacklisted_by, expires_at, is_active |
+| fraud_rules | Configurable rule engine definitions | rule_code, rule_name, condition_json JSONB, threshold, action (block/flag/review), priority, is_active |
+| manual_review_queue | Items requiring human fraud/risk review | entity_type, entity_id, queue_type, priority 1-5, assigned_to, status, sla_deadline |
+| bank_statement_analysis | Parsed bank/wallet statement data | user_id, period_start, period_end, avg_balance, income_estimate, expense_ratio, salary_detected, source |
+| device_fingerprints | Raw FingerprintJS signals for ML models | user_id, raw_fingerprint JSONB, computed_hash, risk_flags TEXT[], is_known_fraud_device, computed_at |
+| ip_intelligence | Geolocation and reputation per IP | ip INET, country, city, isp, is_proxy, is_vpn, is_tor, threat_score DECIMAL(5,4), looked_up_at |
+| synthetic_identity_indicators | ML model outputs for fake identity flags | user_id, indicator_type, confidence_score, supporting_signals JSONB, model_version, flagged_at |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| product_variants | id, product_id, variant_type (Size/Color/Storage), variant_value, price_delta, stock_status, sku | All selectable options per product. linked to order_items.variant_id. |
+| product_prices_history | id, product_id, price, original_price, recorded_at | Immutable price log. Enables Murabaha price dispute resolution — contract locks price at snapshot time. |
+| product_images | id, product_id, image_url, s3_cached_url, is_primary, sort_order | S3-cached mirror of merchant images. Prevents broken image links in PDF contracts. |
+| prohibited_categories | id, category_name, keywords TEXT[], shariah_basis TEXT, added_by, created_at | Shariah-prohibited: alcohol, gambling, adult content, weapons, interest-bearing instruments. |
+| merchant_performance_metrics | id, merchant_id, date, success_rate, avg_checkout_sec, captcha_failure_rate, ban_rate | Daily aggregated KPIs. Used by scraper orchestrator to deprioritize underperforming merchants. |
+| product_availability_history | id, product_id, is_available, price, checked_at | Point-in-time availability/price snapshot on each scrape. For dispute resolution. |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| order_items | Line items within an order | id, order_id, product_id, variant_id, quantity, unit_price, subtotal |
+| order_addresses | Frozen address snapshot at order time | id, order_id, address_type (delivery/billing), all address fields, created_at |
+| order_cancellations | Detailed cancellation records | id, order_id, reason_code, reason_detail, requested_by (user/admin/system), approved_by, refund_initiated_at |
+| order_returns | Return/refund request tracking | id, order_id, reason_code, return_status, return_shipment_id, refund_amount, approved_at |
+| order_notes | Internal admin notes per order | id, order_id, note_text, created_by_admin_id, is_pinned, created_at |
+| hitl_queue | Human-In-The-Loop escalations for failed automated purchases | id, order_id, execution_id, priority 1-5, assigned_to, status, screenshot_s3, resolution, resolved_at |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| late_fee_charity_allocations | Per-installment charity routing record | id, installment_id, loan_id, amount, charity_org_id, allocated_at, disbursed_at, receipt_s3 |
+| charity_organizations | Shariah board approved charity recipients | id, name, bank_iban, registration_number, is_active, approved_by_shariah_board, approval_date |
+| refunds | Refund records linked to transactions | id, payment_txn_id, order_id, refund_amount, reason_code, gateway_refund_id, status, processed_at |
+| chargebacks | Dispute/chargeback tracking | id, payment_txn_id, reason_code, amount, status, evidence_due_date, resolution, gateway_case_id |
+| settlements | Gateway settlement batch records | id, gateway, settlement_batch_id, settlement_date, gross_amount, fee_amount, net_amount, status |
+| payment_retries | Scheduled retry queue for failed payments | id, installment_id, scheduled_at, attempt_number, gateway_to_try, status, triggered_at |
+| payment_arrangements | Restructured plans for defaulting users | id, loan_id, reason, new_schedule JSONB, approved_by_admin, shariah_compliance_note |
+| early_payoff_discounts | Discounts for early full settlement | id, loan_id, remaining_balance, discount_amount, discount_pct, valid_until, applied_at, shariah_note |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| delivery_attempts | id, shipment_id, attempt_number, attempted_at, outcome, failure_reason, next_attempt_at | 3 failed attempts triggers return-to-sender. Each attempt triggers customer notification. |
+| delivery_proofs | id, shipment_id, proof_type (photo/signature/otp_confirmation), proof_s3_url, recipient_name, delivered_at | Immutable proof stored for dispute resolution. |
+| return_shipments | id, original_shipment_id, order_id, courier_id, tracking_number, reason, status, created_at | Tracks return shipments. Triggers refund initiation on confirmed return. |
+| courier_performance_metrics | id, courier_id, date, on_time_rate, delivery_success_rate, avg_transit_days, complaint_count | Daily KPIs. Used by courier selection algorithm to route to best performer per city. |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| prohibited_items_log | Immutable log of orders blocked for Shariah violation | id, order_id, user_id, product_url, detected_category, detection_method, block_reason, blocked_at |
+| late_fee_charity_allocations | Per-installment charity routing (see also Payment domain) | id, installment_id, loan_id, late_fee_amount, charity_org_id, allocated_at, disbursed_at, receipt_s3 — immutable once disbursed |
+| shariah_audit_reports | Periodic Shariah board audit reports | id, report_period, audit_type (quarterly/annual), findings, recommendations, board_member_ids JSONB, approved_at, report_pdf_s3 |
+| shariah_board_approvals | Approvals for contract templates and category decisions | id, approval_type (contract_template/category), subject_reference, scholar_name, decision, issued_at, valid_until |
+| contract_digital_signatures | Cryptographic signature log for legal non-repudiation | id, contract_type (wakalah/murabaha), contract_id, user_id, otp_hash, signed_at, ip, user_agent, verified_at |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| reconciliations | Gateway settlement reconciliation batch runs | id, gateway, settlement_date, expected_amount, actual_amount, discrepancy, status (open/matched/discrepant) |
+| reconciliation_items | Per-transaction reconciliation line items | id, reconciliation_id, payment_txn_id, gateway_ref, expected_amount, actual_amount, status, discrepancy_note |
+| revenue_transactions | Revenue recognition events for P&L reporting | id, revenue_type (murabaha_profit/commission/late_fee), source_id, amount, recognized_at, journal_entry_id |
+| gateway_settlements | Raw settlement batch files from gateways | id, gateway, settlement_batch_id, settlement_date, gross_amount, fee_amount, net_amount, transaction_count, raw_data JSONB |
+| financial_reports | Generated regulatory and management reports | id, report_type (monthly_pl/quarterly_bs/secp_bnpl_return), period_start, period_end, data_snapshot JSONB, pdf_s3 |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| ticket_messages | id, ticket_id, sender_type (user/agent/system), message_text, attachments_s3 TEXT[], is_internal_note, created_at | Immutable once sent. Internal notes hidden from customer view. |
+| email_templates | id, template_code, language (en/ur), subject_template, body_html, body_text, required_variables TEXT[], version | Versioned templates. Both English and Urdu variants required for all transactional emails. |
+| sms_templates | id, template_code, language, body_en, body_ur, max_length, gateway_template_id, is_active | Jazz/Telenor/Zong require pre-approved template IDs for P2P SMS — stored per operator. |
+| customer_communications | id, user_id, channel, direction (inbound/outbound), content_hash, gateway_message_id, sent_at, delivery_status | Immutable compliance log. Content hashed for storage efficiency. |
+| canned_responses | id, title, body, category, language, tags TEXT[], usage_count, last_used_at | Support agent quick-replies. Usage count drives prioritization in agent UI. |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| marketing_campaigns | id, name, channel, target_segment, budget, start_date, end_date, status, utm_parameters JSONB | Channel: meta_ads/google/sms_blast/influencer. Status: draft/active/paused/completed. |
+| campaign_metrics | id, campaign_id, date, impressions, clicks, registrations, first_orders, cac, roi | Daily performance aggregation per campaign. |
+| user_acquisition_attribution | id, user_id, first_touch_source, last_touch_source, utm_source, utm_medium, utm_campaign, attributed_at | Multi-touch attribution. First-touch and last-touch both stored. |
+| ab_test_experiments | id, experiment_name, hypothesis, variants JSONB, metric_to_optimize, start_date, end_date, winner_variant, status | A/B test management for product, UI, and growth experiments. |
+| ab_test_assignments | id, experiment_id, user_id, variant_name, assigned_at | Deterministic assignment via hash(user_id + experiment_id). |
+| conversion_events | id, user_id, session_id, event_name, event_properties JSONB, created_at | Funnel: url_pasted, product_extracted, offer_viewed, contracts_signed, payment_made, delivered. |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| admin_sessions | id, admin_user_id, token_hash, ip, device_info, created_at, expires_at, revoked_at | TTL: 8 hours. Extended by activity. Requires MFA. Separate from customer sessions. |
+| system_settings | id, key VARCHAR(100), value JSONB, description, is_sensitive, updated_by, updated_at | Keys: min_credit_limit, max_credit_limit, default_profit_rate, late_fee_rate, fee_waiver_threshold. |
+| feature_flags | id, flag_key, is_enabled, rollout_percentage 0-100, target_user_ids BIGINT[], target_cities TEXT[], updated_by, updated_at | Gradual rollout control. Checked at request time via Redis cache (60 sec TTL). |
+| Table | Purpose | Key Columns |
+| --- | --- | --- |
+| regulatory_reports | Compliance reports for SECP/SBP | id, report_type (monthly_bnpl/annual_kyc/aml_sar/secp_return), period, generated_at, submitted_at, pdf_s3, reference_number |
+| data_deletion_requests | User data erasure requests (privacy rights) | id, user_id, request_type, verification_method, status, verified_at, executed_at, tables_cleared TEXT[] |
+| kyc_verification_queue | Pending KYC submissions for manual review | id, user_id, kyc_id, priority 1-5, assigned_to, status, sla_deadline, created_at |
+| consent_logs | Point-in-time consent decisions (immutable) | id, user_id, consent_type, version, decision (accepted/withdrawn), consented_at, ip — append-only |
+| aml_suspicious_activity_reports | AML/STR records for FMU Pakistan | id, user_id, alert_id, transaction_amount, suspicion_basis, filed_with (FMU), filed_at, reference_number |
+| Table | Key Columns | Notes |
+| --- | --- | --- |
+| webhooks | id, name, endpoint_url, secret_hash, events TEXT[], owner_type, is_active, retry_max, timeout_seconds | Outbound webhook config for merchant partners. HMAC-SHA256 request signing. |
+| webhook_deliveries | id, webhook_id, event_type, payload JSONB, attempt_number, status, response_code, duration_ms, next_retry_at | 5 retries with exponential backoff over 24 hours. Partitioned monthly. |
+| integration_logs | id, service_name, operation, endpoint, request_body JSONB (sanitized), response_code, latency_ms, is_success, user_id, created_at | All outbound third-party calls: NADRA, Safepay, JazzCash, Stripe, Lithic, AfterShip, BrightData. |
+| error_logs | id, service, severity (debug/info/warn/error/fatal), error_code, message, stack_trace, context JSONB, request_id, resolved_at | Application error tracking. Alerts on severity=error or fatal. |
+| system_health_metrics | id, metric_name, metric_value, labels JSONB, recorded_at | TimescaleDB hypertable. Compressed after 24h. Deleted after 90 days. |
+| scheduled_tasks | id, task_name UNIQUE, cron_expression, last_run_at, last_run_status, last_run_duration_ms, next_run_at, is_enabled, failure_count | Registry of all pg_cron and external scheduled tasks. |
+| Service | Purpose | Key Tables Used | Critical Fields |
+| --- | --- | --- | --- |
+| NADRA Verisys API | CNIC identity verification for KYC | user_kyc_verifications | nadra_request_id, nadra_response_code, nadra_raw_response JSONB |
+| BrightData / Oxylabs | Rotating proxies for Playwright scraper | scraping_jobs | proxy_used, worker_id, duration_ms |
+| GPT-4o Vision API | Product data extraction via LLM | scraping_jobs, products | result (UPO), extraction_confidence, extraction_method |
+| Stripe / Lithic | Virtual card (VCN) issuance | virtual_cards | issuer_card_id, authorized_amount, mcc_lock, merchant_lock |
+| Safepay | Primary payment gateway (debit cards) | payment_transactions | gateway_txn_id, gateway_response JSONB |
+| JazzCash API | Mobile wallet payment collection | payment_transactions | wallet_number, gateway_txn_id |
+| Raast (SBP) | Instant bank-to-bank payment (IBFT) | payment_transactions, user_bank_accounts | raast_id, settlement confirmation |
+| AfterShip | Unified shipment tracking (all couriers) | shipments, tracking_events | aftership_tracking_id, event_time stream |
+| AWS S3 | Document storage: KYC, contracts, screenshots | kyc_verifications, murabaha_contracts | *_s3 VARCHAR(512) fields across 15+ tables |
+| PBCL (Bureau) | Credit bureau scores where available | credit_applications, risk_assessments | bureau_score, bureau_score in risk_assessments |
+| Domain | Tables | Key Design Decisions Documented |
+| --- | --- | --- |
+| User & Identity | 15 | AES-256 CNIC encryption, SHA-256 hash for uniqueness, device fingerprinting, covering index for credit checks |
+| Credit & Risk | 18 | Risk bands A-F, per-order assessments, velocity checks, fraud rule engine, bank statement scoring |
+| Product & Merchant | 10 | Vendor-agnostic URL scraping, UPO structure, prohibited category blocking, TimescaleDB for tracking |
+| Order & Purchase | 14 | 19-state machine, quarterly partitioning, HITL queue for failed agentic checkouts, VCN MCC-locking |
+| Payment & Installment | 18 | Murabaha loan structure, partial indexes for billing sweep, late fee charity routing constraint |
+| Delivery & Logistics | 9 | AfterShip webhook integration, TimescaleDB hypertable, Pakistan courier network (TCS/LEO/MNP) |
+| Shariah Compliance | 9 | Wakalah + Murabaha two-contract model, OTP-based digital signing (PECA 2016), prohibited item blocking |
+| Financial Accounting | 13 | Double-entry bookkeeping, chart of accounts for BNPL, debit/credit constraint enforcement |
+| Support & Comms | 12 | SLA tracking, partitioned notifications, Urdu + English templates, SMS pre-approval per operator |
+| Marketing & Growth | 11 | Multi-touch attribution, deterministic A/B assignment, funnel event tracking |
+| Admin & Team | 9 | RBAC (roles, permissions, role_permissions, admin_user_roles), mandatory MFA, activity logging |
+| Compliance & Audit | 9 | Universal audit trigger, 7-year retention, monthly partitions, SECP/AML/STR compliance |
+| System & Integration | 12 | API key hashing, BullMQ durable audit log, integration_logs for all 10 external APIs, feature flags |
+| Function | Trigger Timing | Applied To | Purpose |
+| --- | --- | --- | --- |
+| fn_set_updated_at() | BEFORE UPDATE | 13 tables: users, orders, loans, installments, etc. | Auto-maintain updated_at timestamp |
+| fn_log_audit() | AFTER INSERT/UPDATE/DELETE | 30 sensitive tables | Write to audit_trails with actor context from session settings |
+| fn_generate_order_number() | BEFORE INSERT | orders | Generate human-readable SAK-YYYY-NNNNNNN order number |
+| fn_recalculate_available_credit() | AFTER INSERT/UPDATE on loans | loans (triggers users update) | Recalculate users.available_credit when loan changes |
+| fn_apply_late_fee() | Called by pg_cron daily | installments | Apply late fee, create charity_allocation record |
+| fn_create_monthly_partition() | pg_cron monthly | audit_trails, notifications_queue, etc. | Auto-create next month's partition |

@@ -27,14 +27,14 @@ export default function PaymentMethodsPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
+  const load = () => {
+    paymentMethodsApi.list().then(setMethods).finally(() => setLoaded(true))
+  }
+
   useEffect(() => {
     // Auth is enforced server-side by middleware.ts before this page ever renders.
     load()
   }, [])
-
-  const load = () => {
-    paymentMethodsApi.list().then(setMethods).finally(() => setLoaded(true))
-  }
 
   const selectedProvider = PROVIDERS.find((p) => p.id === provider)!
 

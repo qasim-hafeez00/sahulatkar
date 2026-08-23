@@ -141,6 +141,27 @@ async def fire_overdue_reminders() -> dict:
     return stats
 
 
+async def run_reminder_worker(interval_seconds: int = 3600) -> None:
+    """
+    Continuous loop: fire upcoming-due and overdue installment reminders every
+    `interval_seconds`. This is the only thing that ever calls
+    fire_installment_reminders()/fire_overdue_reminders() in production — they
+    previously existed only as a `python -m` entrypoint with no scheduler
+    (no k8s CronJob, no in-process task) ever invoking it, so due-date and
+    overdue reminders never fired. Intended to be started as a background
+    asyncio task alongside the main FastAPI app, same as run_scheduled_worker.
+    """
+    logger.info("Reminder worker started", extra={"interval_seconds": interval_seconds})
+    while True:
+        try:
+            upcoming_stats = await fire_installment_reminders()
+            overdue_stats = await fire_overdue_reminders()
+            logger.info("Reminder sweep complete", extra={"upcoming": upcoming_stats, "overdue": overdue_stats})
+        except Exception as exc:
+            logger.error("Reminder worker sweep failed", extra={"error": str(exc)})
+        await asyncio.sleep(interval_seconds)
+
+
 if __name__ == "__main__":
     async def _main():
         upcoming_stats = await fire_installment_reminders()

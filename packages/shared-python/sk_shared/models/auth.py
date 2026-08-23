@@ -5,6 +5,8 @@ from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
+from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
+
 
 class InetType(TypeDecorator):
     """INET for PostgreSQL, VARCHAR(45) for SQLite (tests)."""
@@ -15,8 +17,6 @@ class InetType(TypeDecorator):
         if dialect.name == "postgresql":
             return dialect.type_descriptor(INET())
         return dialect.type_descriptor(String(45))
-
-from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
 
 
 class User(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):

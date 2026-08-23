@@ -9,7 +9,6 @@ The fix is:  lpush + brpop = FIFO (oldest job processed first).
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import fakeredis.aioredis
@@ -23,8 +22,6 @@ from sk_shared.redis_client import RedisClient
 async def test_queue_job_uses_lpush_for_fifo(db_session, redis_mock):
     """queue_job() must use lpush so brpop delivers jobs in FIFO order."""
     from src.services.checkout import CheckoutAgentService
-    from sk_shared.models.order import Order
-    from sk_shared.models.payment import VirtualCard
 
     # Track which push method is called
     push_calls: list[str] = []

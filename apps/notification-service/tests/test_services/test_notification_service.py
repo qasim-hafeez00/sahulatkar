@@ -1,8 +1,7 @@
 import pytest
 from unittest.mock import AsyncMock, patch, MagicMock
 from src.services.notification_service import NotificationService
-from sk_shared.models.notification import Notification, NotificationStatus
-from datetime import datetime, timezone
+from sk_shared.models.notification import Notification
 
 @pytest.fixture
 def mock_deps():

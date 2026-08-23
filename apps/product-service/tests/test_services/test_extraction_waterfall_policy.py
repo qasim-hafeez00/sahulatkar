@@ -109,3 +109,26 @@ async def test_all_tiers_fail_returns_hitl_required_when_enabled(monkeypatch):
     result = await service.extract("https://example.com/product/unknown", "CUSTOM")
     assert result.status in {"hitl_required", "failed"}
     assert result.error_code == "EXTRACTION_FAILED"
+
+
+@pytest.mark.asyncio
+async def test_social_commerce_platform_skips_every_tier_and_routes_to_hitl(monkeypatch):
+    """Instagram (and other DM-based social-commerce storefronts) have no
+    structured product page or checkout to automate — every tier would just
+    waste an attempt. UrlNormalizerService.detect_platform tags these as
+    SOCIAL_COMMERCE; the waterfall must short-circuit before calling any
+    tier at all, not merely fail through them."""
+    service = ExtractionWaterfallService()
+
+    async def fail_if_called(*_args, **_kwargs):
+        raise AssertionError("no extraction tier should run for SOCIAL_COMMERCE")
+
+    monkeypatch.setattr(service, "_tier1_rye", fail_if_called)
+    monkeypatch.setattr(service, "_tier2a_violet", fail_if_called)
+    monkeypatch.setattr(service, "_tier2b_html", fail_if_called)
+    monkeypatch.setattr(service, "run_tier3", fail_if_called)
+
+    result = await service.extract("https://www.instagram.com/p/abc123/", "SOCIAL_COMMERCE")
+
+    assert result.status == "hitl_required"
+    assert result.error_code == "SOCIAL_COMMERCE_MANUAL_ONLY"

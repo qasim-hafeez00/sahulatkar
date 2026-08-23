@@ -17,8 +17,7 @@ from __future__ import annotations
 
 import json
 import logging
-import os
-from datetime import date, datetime, timezone
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import List

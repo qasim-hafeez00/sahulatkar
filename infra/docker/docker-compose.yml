@@ -1,5 +1,3 @@
-version: "3.9"
-
 x-python-service: &python-service
   build:
     context: ../../
@@ -20,7 +18,7 @@ services:
   postgres:
     image: timescale/timescaledb:2.14.2-pg16
     container_name: sk-postgres
-    ports: ["5432:5432"]
+    ports: ["5434:5432"]
     environment:
       POSTGRES_DB: sahulatkar
       POSTGRES_USER: sk_admin
@@ -39,12 +37,17 @@ services:
     container_name: sk-pgbouncer
     ports: ["6432:6432"]
     environment:
-      DATABASE_URL: postgres://sk_admin:${PG_PASSWORD:-localdev123}@postgres:5432/sahulatkar
-      POOL_MODE: transaction
-      MAX_CLIENT_CONN: "2000"
-      DEFAULT_POOL_SIZE: "40"
-      MIN_POOL_SIZE: "10"
-      SERVER_TLS_SSLMODE: prefer
+      DATABASES_HOST: postgres
+      DATABASES_PORT: "5432"
+      DATABASES_USER: sk_admin
+      DATABASES_PASSWORD: ${PG_PASSWORD:-localdev123}
+      DATABASES_DBNAME: sahulatkar
+      PGBOUNCER_LISTEN_PORT: "6432"
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: "2000"
+      PGBOUNCER_DEFAULT_POOL_SIZE: "40"
+      PGBOUNCER_MIN_POOL_SIZE: "10"
+      PGBOUNCER_SERVER_TLS_SSLMODE: prefer
     depends_on:
       postgres:
         condition: service_healthy
@@ -80,6 +83,19 @@ services:
       SERVICE_NAME: gateway
       DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
       REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/0
+      # Shared internal-service secret. Each service defaults this to a
+      # DIFFERENT placeholder value (gateway/credit-engine: "local-internal-
+      # token", product-service: "dev-secret-token", payment-orchestrator:
+      # "" empty) — with no override, every internal service-to-service call
+      # 401s. Live-verified: payment-orchestrator's gateway.payment_confirmed
+      # callback failed this way until this was added. Must match the value
+      # set on product-service/credit-engine/payment-orchestrator below.
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+      # Same class of bug as GATEWAY_URL below for credit-engine: defaults to
+      # http://localhost:8001, which inside this container resolves to
+      # itself, not product-service. Discovered live-testing the order
+      # pipeline's product-extract nudge (order_service.py).
+      PRODUCT_SERVICE_BASE_URL: http://product-service:8000
 
 
   product-service:
@@ -93,6 +109,95 @@ services:
       SERVICE_NAME: product-service
       DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
       REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      # Must match gateway's INTERNAL_SERVICE_TOKEN — see the comment there.
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
+  # product-service's pyproject.toml declares 6 worker console-scripts
+  # (scraping-worker, checkout-worker, event-listener, vcn-verifier,
+  # dlq-monitor, price-staleness-worker) but the Dockerfile never installs
+  # the package itself (only its deps — src/ is just COPY'd), so those
+  # scripts never existed in the image, AND none of them were ever wired up
+  # as services here — only event-listener happened to run, because
+  # product-service's own main.py starts it in-process. The result: nothing
+  # ever consumed the scraping queue gateway's order-initiate pushes to, so
+  # every order got stuck at "processing" forever, and nothing ever executed
+  # the actual merchant purchase after a VCN was issued. Run every worker via
+  # `python -c "from ... import main; main()"` instead of the (nonexistent)
+  # console script, reusing the same already-built image.
+  product-service-scraping-worker:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-scraping-worker
+    command: ["python", "-c", "from src.workers.scraping_worker import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
+  product-service-checkout-worker:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-checkout-worker
+    command: ["python", "-c", "from src.workers.checkout_consumer import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
+  product-service-vcn-verifier:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-vcn-verifier
+    command: ["python", "-c", "from src.workers.vcn_verification_worker import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
+  product-service-price-staleness-worker:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-price-staleness-worker
+    command: ["python", "-c", "from src.workers.price_staleness_worker import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
+  product-service-dlq-monitor:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-dlq-monitor
+    command: ["python", "-c", "from src.workers.dlq_worker import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
 
 
   credit-engine:
@@ -106,6 +211,13 @@ services:
       SERVICE_NAME: credit-engine
       DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
       REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/2
+      # Without this, GATEWAY_URL defaults to http://localhost:8000, which
+      # inside this container resolves to itself, not Gateway — every
+      # push_credit_result() callback 404s. Discovered by live-running the
+      # stack: same gap existed for payment-orchestrator below.
+      GATEWAY_URL: http://gateway:8000
+      # Must match gateway's INTERNAL_SERVICE_TOKEN — see the comment there.
+      INTERNAL_SERVICE_TOKEN: local-internal-token
 
 
   payment-orchestrator:
@@ -119,6 +231,19 @@ services:
       SERVICE_NAME: payment-orchestrator
       DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
       REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/3
+      # Cluster-internal — used for the gateway.payment_confirmed outbox
+      # callback. Without this it defaults to http://localhost:8000, which
+      # inside this container resolves to itself, not Gateway (live-verified:
+      # the callback 404s and the outbox event dead-letters after retries).
+      GATEWAY_URL: http://gateway:8000
+      # Public-facing — handed to JazzCash/SafePay/Raast as the webhook
+      # callback_url. No real vendor reaches this in local dev, but it must
+      # not be the cluster-internal URL above.
+      GATEWAY_PUBLIC_URL: http://localhost:8000
+      # Payment Orchestrator names this INTERNAL_API_TOKEN (not
+      # INTERNAL_SERVICE_TOKEN like the other services) but it's the same
+      # shared secret — must match gateway's INTERNAL_SERVICE_TOKEN above.
+      INTERNAL_API_TOKEN: local-internal-token
 
 
   ledger-service:
@@ -149,21 +274,55 @@ services:
 
   # ─── FRONTENDS ───
   web-customer:
+    image: docker-web-customer:latest
     build:
-      context: ../../apps/web-customer
+      context: ../../
+      dockerfile: apps/web-customer/Dockerfile
+      args:
+        # Despite the NEXT_PUBLIC_ prefix, every real call site
+        # (session.ts, app/api/**/route.ts, middleware.ts) uses this
+        # server-side only — the browser always talks same-origin to
+        # Next.js's own /api/* routes, which then proxy to the gateway from
+        # inside the container. So this must be the Docker-internal DNS
+        # name, not a host-browser-reachable address. Live-verified:
+        # switching this to localhost:8000 broke POST /api/auth/login with
+        # a 500 (Next.js's own server tried to reach itself on port 8000
+        # instead of the gateway container) — reverted.
+        NEXT_PUBLIC_API_URL: http://gateway:8000/api/v1
     container_name: sk-web-customer
     ports: ["3000:3000"]
+    env_file: ../../.env
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_API_URL: http://gateway:8000/api/v1
+      HOSTNAME: 0.0.0.0
+      # No TLS termination in front of local Docker Compose — see
+      # packages/shared-ts/src/session.ts::gatewayCookieOptions. Without
+      # this, the session cookie is issued with Secure=true (NODE_ENV is
+      # correctly "production" for a built image) and the browser silently
+      # drops it since we're serving over plain HTTP, so login looks like
+      # it fails with no error. Never set this behind a real HTTPS
+      # load balancer/ingress.
+      COOKIE_INSECURE: "true"
     networks: [sahulatkar]
 
   web-admin:
+    image: docker-web-admin:latest
     build:
-      context: ../../apps/web-admin
+      context: ../../
+      dockerfile: apps/web-admin/Dockerfile
+      args:
+        # See the matching comment on web-customer above — every call site
+        # (admin-api-server.ts, app/api/**/route.ts) is server-side only, so
+        # this must stay the Docker-internal DNS name.
+        NEXT_PUBLIC_GATEWAY_URL: http://gateway:8000/api/v1
     container_name: sk-web-admin
     ports: ["3001:3000"]
+    env_file: ../../.env
     environment:
-      NEXT_PUBLIC_API_URL: http://localhost:8000
+      NEXT_PUBLIC_GATEWAY_URL: http://gateway:8000/api/v1
+      HOSTNAME: 0.0.0.0
+      # See the matching comment on web-customer above.
+      COOKIE_INSECURE: "true"
     networks: [sahulatkar]
 
   pgadmin:

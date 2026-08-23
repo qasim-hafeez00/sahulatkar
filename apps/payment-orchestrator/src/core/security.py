@@ -1,7 +1,6 @@
 """
 Security utilities for the payment orchestrator.
 """
-import hmac
 import secrets
 from functools import wraps
 from typing import Callable

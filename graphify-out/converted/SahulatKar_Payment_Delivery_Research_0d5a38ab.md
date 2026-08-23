@@ -1,0 +1,645 @@
+<!-- converted from SahulatKar_Payment_Delivery_Research.docx -->
+
+
+SahulatKar
+Your Ethical Financial Partner
+Technical Research Report — Volume 2
+Payment Execution  |  Shariah Compliance  |  Delivery Workflow  |  Dashboard Design
+
+Competitive Analysis: KalPay  |  Zilch  |  Klarna  |  Affirm
+
+FYP Team — NUCES Chiniot — 2026  |  Supervisor: Dr. Muhammad Usama
+
+
+# 1. KalPay (Pakistan) — Deep Dive
+## 1.1 Business Model & Shariah Structure
+KalPay is Pakistan's largest Shariah-aligned BNPL platform, co-founded by two LUMS graduates and working with 500+ merchants since 2021. It is Pakistan's first formally Shariah-aligned BNPL and is the most directly comparable competitor to SahulatKar.
+
+
+
+## 1.2 KalPay Payment Technical Flow
+- User selects KalPay at partner merchant checkout. Widget loads.
+- User enters CNIC + phone. OTP sent. Risk engine runs (24-48h approval).
+- If approved: 1/3 down payment collected (debit card / JazzCash / EasyPaisa).
+- Merchant receives full amount upfront from KalPay. KalPay bears all credit risk.
+- Installments 2 and 3: SMS payment links sent. No auto-debit capability.
+- Collections are manual (payment link model), not automated bank debits.
+
+# 2. Zilch (UK) — Architecture & Learnings
+## 2.1 How Zilch Works Technically
+Zilch operates via a PERSISTENT virtual Visa/Mastercard — NOT browser automation. This is fundamentally different from SahulatKar's approach. Users carry a Zilch virtual card and use it at any checkout where Visa is accepted.
+
+
+
+## 2.2 Key Zilch Lessons to Apply at SahulatKar
+- Progressive credit limit: Start small, increase as user makes on-time payments — apply directly.
+- Dual-mode: Pay in Full (discount/reward) vs Pay in 4 (BNPL). SahulatKar: "Pay full now = 1% wallet credit" vs "Pay in 4 = 4% markup".
+- Credit bureau reporting as deterrence AND loyalty tool — TASDEEQ equivalent for SahulatKar.
+- Zilch Pay (2026 one-click button) shows the Phase 3 direction for SahulatKar — browser extension or SDK button at checkout.
+
+# 3. Klarna (Sweden/Global) — Best Practices
+## 3.1 Klarna's One-Time Card — Technical Flow
+Klarna's One-Time Card is the closest global precedent to SahulatKar's virtual card approach for non-integrated merchants.
+- User selects product at non-Klarna-integrated merchant website.
+- Opens Klarna app, generates One-Time Card for that specific purchase amount.
+- Klarna issues a unique 16-digit virtual Visa card, valid for ~2 hours, exact amount.
+- User manually copies card details from app into merchant checkout form.
+- Card is charged. First installment (25%) collected from linked debit immediately.
+- Remaining installments follow standard Pay-in-4 schedule.
+
+
+# 4. Affirm (USA) — Enterprise Scale Learnings
+
+
+# 5. Payment Gateway Comparison
+## 5.1 Master Comparison Matrix
+
+
+## 5.2 Safepay Integration — Payment Session & Webhook
+
+## 5.3 JazzCash Direct API — Installment Collection
+
+## 5.4 Raast (SBP Instant Payment) — Phase 3 Integration
+Raast is Pakistan's national instant payment rail — zero transaction fees, 24/7, instant settlement. For SahulatKar this is the endgame for installment collection: send Raast payment request link via SMS, user approves in banking app with one tap.
+- Access: Via banking partner MOU (ABHI MFB, Telenor MFB, or U MFB). Requires SBP-regulated bank sponsorship.
+- Raast ID: Each user's mobile number IS their Raast ID. No card number needed.
+- Cost: Near-zero per transaction (government infrastructure vs Rs. 30+2.9% for card processing).
+- Settlement: Instant T+0 — funds available immediately for SahulatKar to confirm payment.
+- SBP reports: Raast processed over PKR 10 trillion in transactions in 2024, demonstrating scale readiness.
+
+
+# 6. Murabaha vs Wakalah — Structure Comparison
+## 6.1 Side-by-Side Comparison for BNPL
+
+
+## 6.2 Complete Transaction Flow Under Agency Murabaha
+- Customer submits URL, confirms variant and delivery address in SahulatKar app.
+- System shows: Cost Price Rs. 10,000 + Profit Rs. 400 (4%) = Total Rs. 10,400. All three disclosed upfront per Murabaha requirements.
+- Customer digitally signs WAKALAH AGREEMENT (OTP-verified): "I appoint SahulatKar as my Wakeel to purchase [product] from [merchant] on my behalf."
+- Customer digitally signs MURABAHA AGREEMENT (OTP-verified): "SahulatKar has sold me [product] for Rs. 10,400 payable in 4 installments."
+- Customer pays first installment Rs. 2,600 via Safepay. Contract is now binding.
+- SahulatKar (as Wakeel) executes purchase at merchant using virtual card. Takes constructive ownership at point of order.
+- Merchant ships product to customer. Ownership transfers to customer upon delivery.
+- Installments 2-4 collected per schedule. Contract fully discharged.
+
+## 6.3 Wakalah Agreement — Digital Contract Template
+
+## 6.4 Murabaha Sale Agreement — Digital Contract Template
+
+## 6.5 Late Payment Handling — Shariah Options
+
+
+# 7. Complete Purchase Execution Workflow
+## 7.1 Collect First, Then Buy — The Correct Sequence
+Based on analysis of Affirm (USA) and KalPay (PK): ALWAYS collect the down payment BEFORE executing the automated purchase. The Murabaha structure also demands this — the buyer must commit before the platform procures. Never take the reverse risk of executing a purchase and then failing to collect.
+
+
+## 7.2 Payment Schedule Calculator
+
+## 7.3 Payment Schedule Display — User View
+### Example: Rs. 10,000 Product — Pay in 4
+
+
+# 8. Automated Collection System
+## 8.1 Collection Escalation Timeline
+
+## 8.2 SMS Templates — Urdu + English
+
+
+# 9. Pakistan Courier Integration
+## 9.1 Courier Comparison Matrix
+
+## 9.2 AfterShip — Universal Tracking Aggregator (Recommended)
+AfterShip (aftership.com) supports 1,100+ carriers including ALL major Pakistani couriers (TCS, Leopards, PostEx, M&P, Trax, BlueEx, Pakistan Post). One integration covers everything.
+
+
+
+# 10. Dashboard Specifications
+## 10.1 User Single Order Tracking View
+
+## 10.2 Multi-Order User Dashboard
+
+## 10.3 Admin Operations Dashboard — Full Spec
+
+
+# 11. Return & Refund Workflow
+## 11.1 Shariah-Compliant Refund Calculation
+
+# 12. Per-Transaction Financial Model
+## 12.1 Revenue vs Cost — Rs. 10,000 Order
+
+
+
+# 13. Phase-by-Phase Plan
+
+
+SahulatKar — Your Ethical Financial Partner  |  NUCES Chiniot  |  FYP 2026
+| PART A — COMPETITIVE ANALYSIS |
+| --- |
+| Parameter | KalPay Detail |
+| --- | --- |
+| Payment Terms | Pay in 3 equal monthly installments OR full payment within 14 days of purchase. |
+| Consumer Charges | ZERO additional charges to consumer. No markup, no interest, no hidden fees. |
+| Revenue Model | Merchant-side commission only. Platform earns from merchants for bringing higher-value sales and better conversion. |
+| Shariah Structure | Shariah-aligned via merchant-commission model. No consumer markup means no Murabaha needed — simpler structure. |
+| Late Fees | Applied after "cushion period" of constant reminders. Structured as actual damages, not interest. |
+| Payment Methods | Debit/credit cards, JazzCash, EasyPaisa, bank transfers. |
+| KYC | CNIC number, smartphone, phone number, email. Manual verification bottleneck: 24-48 hours. |
+| Credit Limits | Rs. 1,500 to Rs. 15,000. Mandatory 1/3 down payment as primary fraud filter. |
+| Coverage | MERCHANT-INTEGRATED ONLY. User must shop at one of 500+ KalPay partner merchants. |
+| Scale | Double-digit month-on-month growth. Hit profitability in 2024. Forbes 30 Under 30 Asia 2023. |
+| Critical Lesson for SahulatKar
+KalPay proves Pakistan STRONGLY prefers Shariah-aligned, zero-riba financing. However KalPay is MERCHANT-INTEGRATED ONLY — cannot serve any product from any website. SahulatKar's vendor-agnostic "paste any URL" model fills a massive gap KalPay cannot address. KalPay's 24-48 hour manual KYC is a major UX weakness — SahulatKar's NADRA Verisys instant verification is a clear competitive advantage. |
+| --- |
+| Parameter | Zilch Detail |
+| --- | --- |
+| Core Technology | Persistent virtual Visa card with pre-approved credit limit. User manually enters card details at any checkout. |
+| Pay in 4 | 25% at checkout, then 25% every 2 weeks. Total duration: 6 weeks. Zero interest. |
+| Pay in 1 | Full payment at checkout earns 2-5% cashback in Zilch Rewards. Zero fee. |
+| Zilch Anywhere | At non-partner merchants: fee of GBP 2.50-4.50 per transaction (absorbed into pricing). |
+| Card Network | Mastercard (migrating to Visa in 2025 for physical card launch with Visa partnership). |
+| Revenue Model | Ad-Subsidized Payment Network (ASPN). Brands pay Zilch for targeted ads. At partner merchants, Zilch earns interchange + affiliate commission. |
+| Credit Bureau | Reports to Experian and TransUnion (since Jan 2023). Timely payments build credit. Missed payments damage score. |
+| Scale (2025) | 4.5 million customers. GBP 3.6 billion total sales. GBP 145M annual revenue run rate. Top 5 fastest-growing UK tech company. |
+| Zilch Pay (H1 2026) | Launching one-click checkout button at brand websites — connects Zilch app, wallet, and card directly. |
+| Pakistan Adaptation Problem
+Zilch's virtual card model requires Visa/MC acceptance everywhere. In Pakistan where less than 1% of transactions are card-based and 90% are still cash, a virtual card alone does NOT reach the target market. SahulatKar's agentic automation (SahulatKar does the checkout, user pays via JazzCash) is the correct Pakistan-specific adaptation. |
+| --- |
+| SahulatKar Goes Further Than Klarna
+Klarna One-Time Card still requires the USER to manually paste card details at checkout. SahulatKar's agentic system completes the ENTIRE checkout autonomously — the user never touches the merchant site. This is a superior UX and eliminates user errors, checkout abandonment, and the complexity of managing virtual card details. |
+| --- |
+| Klarna Feature | Description |
+| --- | --- |
+| Pay in 4 | Split into 4 payments every 2 weeks. Zero interest. First payment at checkout. |
+| Pay in 30 | Buy now, pay full amount in 30 days. Zero fee if paid on time. |
+| Monthly Plans | Interest-bearing 6-36 month plans. NOT Shariah-compliant — do not copy. |
+| Ghost Commerce | Klarna AI agent can browse and buy on user behalf — closest global parallel to SahulatKar. |
+| Webhooks | Merchant receives order.confirmed, payment.captured, refund.processed events in real-time. |
+| Affirm Feature | Implementation & SahulatKar Lesson |
+| --- | --- |
+| Payment Sequence | COLLECT FIRST, THEN BUY. Affirm always collects first installment at checkout BEFORE triggering order. SahulatKar must follow same pattern. |
+| Credit Decision Speed | Real-time in under 2 seconds. Soft pull + alternative data. No waiting. |
+| ACH vs Card | Prefers bank ACH for installments (flat $0.30 vs 2.9%+$0.30 for card). Pakistan equivalent: Raast + 1Link IBFT. |
+| Retry Logic | 3 ACH retry attempts, 24h intervals. Then manual payment link. New purchases restricted after 10 DPD. |
+| Split Shipments | Loan amount only charged when merchant marks item as shipped. SahulatKar: virtual card only charged when checkout completes. |
+| Return Processing | Merchant refunds to Affirm virtual account. Affirm refunds user for paid installments. Future installments cancelled. |
+| Collections Timeline | Day 0-30: Automated SMS/email. Day 31-90: Internal team. Day 91+: Write-off + third-party debt buyer. |
+| PART B — PAKISTAN PAYMENT ECOSYSTEM |
+| --- |
+| Feature | Safepay | JazzCash | EasyPaisa | Kuickpay | Paymob | XPay |
+| --- | --- | --- | --- | --- | --- | --- |
+| Txn Fee | 2.9%+Rs.30 | 1.5-2.5% | 1.5-2.5% | 1.5-2% | 1.5-2.5% | 1.8-2.5% |
+| Settlement | T+2 | T+1 | T+1 | T+2 | T+2 | T+1 |
+| Recurring | No | Limited | Limited | Yes | Yes | Yes |
+| Raast (SBP) | Yes | Yes | Yes | No | No | Yes |
+| Refund API | Instant | Yes | Yes | Yes | Yes | Yes |
+| Webhooks | Yes | Yes | Yes | Yes | Yes | Yes |
+| Sandbox | Yes (free) | Yes | Yes | Yes | Yes | Yes |
+| Max Txn | Rs.250K | Rs.200K | Rs.200K | Rs.500K | Rs.500K | Rs.500K |
+| SBP Licensed | Yes(2022) | Yes | Yes | Yes | Yes | Yes |
+| PCI DSS | Yes | Yes | Yes | Partial | Yes | Yes |
+| Best For | Cards+Raast | Jazz wallets | EP wallets | Recurring | Multi-method | Subscriptions |
+| Recommended Stack: Two-Gateway Approach
+PRIMARY: Safepay for first-payment collection (covers cards, Raast, JazzCash, EasyPaisa, bank transfer via single integration). Fee: 2.9% + Rs. 30. Excellent developer API, YC-backed, SBP licensed. SECONDARY: JazzCash Direct API + EasyPaisa Direct API for installment payment links (lower fees ~1.5-2%, higher user trust for wallet payments). At scale (Phase 3): Raast via banking partner for near-zero-fee auto-debits. |
+| --- |
+| // Safepay — Collect First Installment (Down Payment)
+const safepay = require('@sfpy/node-core')(process.env.SAFEPAY_SECRET_KEY, {
+  host: 'https://api.getsafepay.com'
+});
+
+async function collectDownPayment(order) {
+  const session = await safepay.payments.session.setup({
+    merchant_api_key: process.env.SAFEPAY_PUBLIC_KEY,
+    intent: "CYBERSOURCE",
+    mode: "payment",
+    currency: "PKR",
+    amount: Math.round(order.down_payment_pkr * 100),  // In paisas
+    order_id: order.sahulatkar_order_id,
+    source: "mobile",
+    cancel_url: "https://app.sahulatkar.pk/payment/cancelled",
+    webhook_url: "https://api.sahulatkar.pk/webhooks/safepay"
+  });
+  return { payment_url: `https://getsafepay.com/checkout/pay?tracker=${session.tracker.token}` };
+}
+
+// Webhook handler
+app.post('/webhooks/safepay', async (req, res) => {
+  const { event, data } = req.body;
+  if (event === 'payment:created' && data.state === 'PAID') {
+    await db.payments.markInstallmentPaid(data.metadata.order_id, 1, data.tracker);
+    await triggerPurchaseExecution(data.metadata.order_id);  // BUY NOW
+  }
+  res.status(200).json({ received: true });
+}); |
+| --- |
+| // JazzCash Merchant Payment API for installments 2/3/4
+async function chargeJazzCashInstallment(installment) {
+  const payload = {
+    pp_MerchantID: process.env.JAZZCASH_MERCHANT_ID,
+    pp_Password: process.env.JAZZCASH_PASSWORD,
+    pp_TxnRefNo: `TXN${Date.now()}-INST${installment.number}`,
+    pp_Amount: String(installment.amount_pkr * 100).padStart(12, '0'), // Paisas
+    pp_TxnCurrency: "PKR",
+    pp_TxnDateTime: new Date().toISOString().replace(/[-:T.Z]/g,'').slice(0,14),
+    pp_BillReference: installment.order_id,
+    pp_Description: `SahulatKar Installment ${installment.number} of 4`,
+    pp_MobileNumber: installment.user_phone,   // +923001234567
+    pp_CNIC: installment.user_cnic_last6,      // Last 6 digits of CNIC
+    pp_TxnType: "MWALLET",
+    ppmpf_1: installment.order_id,
+  };
+  payload.pp_SecureHash = generateHMAC(payload, process.env.JAZZCASH_INTEGRITY_KEY);
+  const resp = await axios.post(
+    'https://payments.jazzcash.com.pk/ApplicationAPI/API/Payment/DoTransaction',
+    payload
+  );
+  return resp.data;  // { pp_ResponseCode: "000" = success }
+} |
+| --- |
+| PART C — SHARIAH COMPLIANCE FRAMEWORK |
+| --- |
+| Dimension | Murabaha (Cost-Plus Sale) | Wakalah (Agency Model) |
+| --- | --- | --- |
+| Definition | SahulatKar BUYS the product and RE-SELLS to customer at cost + disclosed profit markup. | SahulatKar acts as AGENT appointed by customer to buy on their behalf. |
+| Ownership During Purchase | SahulatKar takes legal/constructive ownership before transferring to customer. | Customer is the principal owner throughout. SahulatKar only facilitates. |
+| Revenue Disclosure | Must disclose cost price, profit amount, and total sale price upfront. All three are contractually fixed. | SahulatKar charges a fixed Wakalah fee (agency fee) separate from product cost. |
+| Risk During Transit | SahulatKar bears risk while goods are in constructive possession. | Customer bears own risk (as principal). SahulatKar liable only for agent negligence. |
+| Late Payments | Additional profit CANNOT be charged. Total is fixed from Day 1. Late fees (if any) must go to charity. | Wakalah fee is fixed. No additional charges permitted for delay. |
+| Scholarly Acceptance | Most widely used structure in Islamic banking globally. High acceptance. | Growing preference for OTT/proxy-buyer models. Increasingly accepted for digital commerce. |
+| Best Fit for SahulatKar | Better for high-value items (>Rs. 20K) where formal ownership transfer matters. | BETTER FIT for "paste-any-URL" model. Customer directs purchase. SK executes as agent. |
+| RECOMMENDATION: Agency Murabaha Hybrid (Two Contracts)
+The scholarly consensus for agentic/proxy-buying platforms is a two-contract hybrid: (1) WAKALAH: Customer appoints SahulatKar as Wakeel to purchase on their behalf. (2) MURABAHA: SahulatKar sells the procured goods to customer at cost + 4% disclosed profit. This two-contract structure is used by Meezan Bank, ABHI MFB, and is the framework reviewed by Pakistan's Federal Shariat Court. It aligns with SECP Islamic Finance Guidelines 2023 and is the academically cleanest structure for SahulatKar's specific model. |
+| --- |
+| WAKALAH (AGENCY) AGREEMENT
+Principal: [Customer Full Name]  |  CNIC: [CNIC Number]  |  Phone: [+92-XXX-XXXXXXX]
+Agent (Wakeel): SahulatKar (Pvt) Ltd., SECP-registered NBFC, Pakistan
+Order Reference: [SAK-ORDER-XXXXX]  |  Date & Time: [Timestamp]
+
+APPOINTMENT: The Principal hereby appoints the Agent as their Wakeel (agent) to purchase:
+Product: [Product Name as extracted]  |  Variant: [Size/Color/Model]
+Merchant: [Merchant Name / Domain]  |  Product URL: [Canonical URL]
+Estimated Purchase Cost: Rs. [Amount]
+
+AGENT'S AUTHORITY: The Agent is authorized to navigate to the Merchant's website and complete
+the purchase using a single-use virtual payment instrument on behalf of the Principal.
+The Agent shall not proceed if merchant price has increased more than 5% without Principal confirmation.
+
+WAKALAH FEE: The Agent's compensation is included within the Murabaha profit margin defined
+in the separate Murabaha Sale Agreement.
+
+TERMINATION: This Wakalah is discharged upon successful order placement at the merchant.
+
+ELECTRONIC SIGNATURE: OTP-verified consent at [Timestamp] is a valid electronic signature
+under Pakistan Electronic Transactions Ordinance 2002, Section 15. |
+| --- |
+| MURABAHA SALE AGREEMENT (BAI MUAJJAL — DEFERRED PAYMENT)
+Seller: SahulatKar (Pvt) Ltd.  |  Buyer: [Customer Full Name], CNIC [CNIC Number]
+Order Reference: [SAK-ORDER-XXXXX]  |  Date: [Transaction Date]
+
+THE SALE — Having procured the Product under Wakalah, the Seller now sells to the Buyer:
+Product: [Product Name]  |  Variant: [Selected Variant]  |  Merchant: [Merchant Name]
+
+MURABAHA PRICING (All amounts disclosed upfront as required by Shariah):
+  Merchant Purchase Price (Cost Price):  Rs. [COST_AMOUNT]
+  SahulatKar Profit (Disclosed Markup):  Rs. [MARKUP] ([PCT]% of cost price)
+  Total Murabaha Sale Price:             Rs. [TOTAL]
+
+PAYMENT SCHEDULE (Bai Muajjal — Deferred Installments):
+  Installment 1 (Down Payment, due now):   Rs. [AMT1]   Due: [DATE1]
+  Installment 2:                           Rs. [AMT2]   Due: [DATE2] (Day 14)
+  Installment 3:                           Rs. [AMT3]   Due: [DATE3] (Day 28)
+  Installment 4 (Final):                   Rs. [AMT4]   Due: [DATE4] (Day 42)
+
+OWNERSHIP: Title and risk transfer from Seller to Buyer upon physical delivery to Buyer's address.
+
+LATE PAYMENT: The total Murabaha price is FIXED at Rs. [TOTAL]. No additional profit, penalty,
+or charge shall be levied for late payment beyond a charitable donation of Rs. 150 per late
+installment to Edhi Foundation (disclosed herein, not retained by SahulatKar).
+SahulatKar reserves the right to restrict future BNPL facilities and report payment
+behavior to TASDEEQ Credit Bureau.
+
+SHARIAH COMPLIANCE: Reviewed by [Shariah Advisor Name] — Certificate No. [XXX].
+
+ELECTRONIC SIGNATURE: OTP-verified consent at [Timestamp] is valid under ETO 2002. |
+| --- |
+| Option | Structure | SahulatKar Recommendation |
+| --- | --- | --- |
+| A: No Fees | Zero penalty. Only credit restriction and future purchase block. | Cleanest Shariah. Low deterrent. Use ONLY with strong credit bureau deterrence. |
+| B: Charity Donation (RECOMMENDED) | Rs. 150 per late installment donated in full to Edhi Foundation/Al-Khidmat. Disclosed upfront in Murabaha agreement. | BEST OPTION. Scholarly consensus allows this. Deters default. No riba (money goes to charity, not to SK). Strong moral/social accountability in Pakistan context. |
+| C: Actual Damages | Charge only provable costs — SMS, call center, admin costs. Typically Rs. 25-75. | Permitted under Shariah but very weak deterrent. Difficult to audit each cost. |
+| D: Account Restriction | All future purchases blocked until overdue cleared. Credit bureau negative report. | COMBINE with Option B. Effective social and financial deterrent without riba. |
+| Shariah Board Certification — Steps
+Step 1: Engage SECP Islamic Finance Division for regulatory review. Step 2: Retain a qualified Shariah advisor (Mufti Irshad Ahmad Aijaz or SECP-recognized scholars). Step 3: Submit two-contract structure (Wakalah + Murabaha) for review. Step 4: Get SSB (Shariah Supervisory Board) approval. Budget: PKR 200,000-500,000 initial; PKR 100,000-200,000 annual audit. ROI: "Shariah Certified" badge drives 25-35% higher app install rates in Pakistan. |
+| --- |
+| PART D — AUTOMATED PAYMENT EXECUTION WORKFLOW |
+| --- |
+| Step | Action | System | Duration |
+| --- | --- | --- | --- |
+| 1 | User confirms product, variant, delivery address in app | Frontend | 10-30 seconds |
+| 2 | Backend re-validates availability + price via Rye/extraction API | Product Service | <5 seconds |
+| 3 | Credit engine checks order against user limit (cached score) | Credit Service | <1 second |
+| 4 | Murabaha pricing: Cost + 4% markup + shipping estimate computed | Pricing Engine | <100ms |
+| 5 | Wakalah + Murabaha contracts shown for OTP e-signature | Contract Service | 30-60 seconds (user action) |
+| 6 | Down payment (25%) collected — Safepay redirect (JazzCash/Card) | Payment Service | 30-120 seconds (user action) |
+| 7 | Safepay webhook confirms payment → purchase execution triggered | Temporal.io Orchestration | Immediate on webhook |
+| 8 | Virtual card issued (Stripe Issuing): exact amount + 5% buffer | Card Service | <3 seconds |
+| 9 | Rye API or Playwright automation executes checkout at merchant | Execution Engine | 5-45 seconds |
+| 10 | Merchant order ID + confirmation screenshot captured | Execution Engine | On confirmation page |
+| 11 | User notified: "Order placed! Order #12345 from nike.com" | Notification Service | Immediate |
+| 12 | Installment schedule activated. Payment reminders queued. | Ledger Service | Immediate |
+| 13 | Merchant ships, tracking email received and parsed automatically | Tracking Service | Async — hours to days |
+| // SahulatKar Murabaha Payment Schedule Calculator
+const MARKUP_RATES = {
+  pay_in_4:  0.04,   // 4% for 6-week plan
+  pay_in_3:  0.025,  // 2.5% shorter plan
+  monthly_3: 0.06,   // 6% for 3-month plan
+  monthly_6: 0.10,   // 10% for 6-month plan
+};
+
+function calculateMurabahaSchedule(productCostPkr, shippingPkr, planType) {
+  const cost = productCostPkr + shippingPkr;
+  const markup = Math.round(cost * MARKUP_RATES[planType]);
+  const totalSalePrice = cost + markup;
+  const today = new Date();
+
+  let installments = [];
+  if (planType === 'pay_in_4') {
+    const base = Math.round(totalSalePrice / 4);
+    const adj = totalSalePrice - (base * 4);  // Rounding adjustment
+    installments = [
+      { num: 1, amount: base, due: today, label: 'Down Payment' },
+      { num: 2, amount: base, due: addDays(today,14), label: 'Installment 2' },
+      { num: 3, amount: base, due: addDays(today,28), label: 'Installment 3' },
+      { num: 4, amount: base+adj, due: addDays(today,42), label: 'Final Installment' },
+    ];
+  }
+
+  return {
+    product_cost_pkr: productCostPkr,
+    shipping_pkr: shippingPkr,
+    total_cost_pkr: cost,
+    murabaha_profit_pkr: markup,
+    total_sale_price_pkr: totalSalePrice,
+    markup_pct: MARKUP_RATES[planType] * 100,
+    installments,
+    // MANDATORY MURABAHA DISCLOSURE FIELDS:
+    disclosure: {
+      cost_price: cost,
+      profit_margin: markup,
+      total_price: totalSalePrice,
+      plan_type: planType
+    }
+  };
+} |
+| --- |
+| # | Amount | Due Date | Status |
+| --- | --- | --- | --- |
+| 1 — Down Payment | Rs. 2,600 | Today (at purchase) | PAID |
+| 2 — Installment | Rs. 2,600 | + 14 days | PENDING |
+| 3 — Installment | Rs. 2,600 | + 28 days | PENDING |
+| 4 — Final | Rs. 2,600 | + 42 days | PENDING |
+| Murabaha Breakdown | Product cost: Rs. 10,000   Profit (4%): Rs. 400   Total: Rs. 10,400 |  |  |
+| PART E — COLLECTIONS & PAYMENT REMINDERS |
+| --- |
+| Day | Stage | Action | Channel |
+| --- | --- | --- | --- |
+| Day -7 | Pre-Reminder | "Rs. 2,600 payment due on [date]. Tap to pay early." | SMS + Push |
+| Day -3 | Reminder | "Payment due in 3 days. [Pay Now link]" | SMS + Email + Push |
+| Day -1 | Final Reminder | "Final reminder: Rs. 2,600 due tomorrow." | SMS + WhatsApp + Push |
+| Day 0 | Due Date | "Rs. 2,600 is due TODAY. [Pay Now button in app]" | SMS + App badge + Push |
+| Day +1 | Soft Overdue | "Payment missed. Please pay today to avoid restrictions." | SMS + Email + Push |
+| Day +3 | Overdue | "Urgent: Rs. 2,600 overdue 3 days. Pay: [link]" | SMS + Automated IVR Call |
+| Day +7 | Moderate | Account restrictions activated. Human call from team. | Call + SMS + App banner |
+| Day +15 | Firm | No new purchases. Daily SMS. Payment plan offer. | SMS + Call + Legal warning |
+| Day +30 | Final | Formal notice. TASDEEQ negative report. Settlement offer. | Registered mail + SMS |
+| Day +60 | Write-Off | Write-off consideration. TASDEEQ report filed. | Legal proceedings |
+| Trigger | English | Urdu |
+| --- | --- | --- |
+| Day -3 | SahulatKar: Rs 2,600 due in 3 days (Feb 15). Pay now: sk.pk/pay/123 | سہولت کار: روپے 2,600 کی قسط 3 دن میں (15 فروری) ادا کریں: sk.pk/pay/123 |
+| Day 0 Due | SahulatKar: Rs 2,600 DUE TODAY for Order #12345. Pay: sk.pk/pay/123. Helpline: 051-XXXXXXX | سہولت کار: آج روپے 2,600 کی قسط لازم ہے۔ ابھی ادا کریں: sk.pk/pay/123 |
+| Day +1 Missed | SahulatKar: Payment missed. Pay Rs 2,600 today to avoid account restriction. [link] | سہولت کار: قسط رہ گئی۔ آج ادا کریں ورنہ اکاؤنٹ بند ہو جائے گا۔ |
+| Day +7 Restricted | SahulatKar: Account RESTRICTED. Rs 2,600 overdue 7 days. Pay immediately: [link] or call 051-XXXXXXX | سہولت کار: اکاؤنٹ بند ہے — 7 دن سے قسط باقی۔ فوری ادا کریں |
+| Payment Confirmed | SahulatKar: Rs 2,600 received (Ref: TXN123). Next: Rs 2,600 on Mar 1. JazakAllah Khair! | سہولت کار: روپے 2,600 موصول۔ شکریہ! اگلی قسط 1 مارچ کو ہے۔ جزاک اللہ |
+| PART F — DELIVERY TRACKING & LOGISTICS |
+| --- |
+| Courier | Coverage | Developer API | Avg Delivery | COD | Priority |
+| --- | --- | --- | --- | --- | --- |
+| TCS Express | Nationwide, 1000+ offices, 500+ cities | Full REST API + developer portal + UAT/prod environments | Major cities: 1-2 days | Yes | PRIMARY |
+| Leopards Courier | Nationwide, strong tier-2 reach | REST API, Shopify plugin, booking + tracking | 2-3 days | Yes | SECONDARY |
+| PostEx | E-commerce focused, major cities | Best API docs in PK. Real-time webhooks. COD advance. | 2-3 days | Yes + advance | SECONDARY |
+| M&P Express | Nationwide, large B2C volume | Basic REST API | 3-4 days | Yes | FALLBACK |
+| DHL Pakistan | International + major cities | Global DHL API | 1-3 days (intl) | No | International only |
+| Feature | AfterShip Detail |
+| --- | --- |
+| PK Carriers | TCS, Leopards, PostEx, M&P, CallCourier, Trax, BlueEx, Pakistan Post — all natively supported |
+| Pricing | Free: 50/month. Essentials: $11/month (200 trackings). Pro: $119/month (2,000). Enterprise: custom. |
+| Webhooks | Real-time status push: InTransit, OutForDelivery, Delivered, AttemptFail, Exception, Returned. |
+| Tracking URL | Branded tracking page (aftership.com/track or custom domain). Shareable with user. |
+| Integration | Single REST API call registers tracking number. All updates pushed via webhook to SahulatKar. |
+| // AfterShip — Register tracking and handle webhook
+const Aftership = require('aftership');
+const aftership = new Aftership(process.env.AFTERSHIP_API_KEY);
+
+// Register tracking number after merchant ships
+async function registerTracking(orderId, trackingNum, carrier) {
+  await aftership.tracking.createTracking({
+    tracking: {
+      tracking_number: trackingNum,
+      slug: carrier, // 'tcs' | 'leopards' | 'postex' | 'mnp'
+      custom_fields: { sahulatkar_order_id: orderId },
+    }
+  });
+}
+
+// Webhook handler — push on each status change
+app.post('/webhooks/aftership', async (req, res) => {
+  const { msg } = req.body;
+  const orderId = msg.custom_fields?.sahulatkar_order_id;
+  const statusMap = {
+    'InTransit': 'in_transit',
+    'OutForDelivery': 'out_for_delivery',
+    'Delivered': 'delivered',
+    'AttemptFail': 'delivery_attempted',
+    'Exception': 'delivery_exception',
+  };
+  const status = statusMap[msg.tag] || 'unknown';
+  await db.orders.updateStatus(orderId, status);
+  if (['out_for_delivery','delivered','delivery_attempted'].includes(status)) {
+    await sendUserPushNotification(orderId, status);
+    await sendUserSMS(orderId, status);
+  }
+  res.status(200).json({ ok: true });
+}); |
+| --- |
+| PART G — DELIVERY & PAYMENT DASHBOARDS |
+| --- |
+| SCREEN: Order Detail & Live Tracking
+══════════════════════════════════════════════════════
+
+[<- Back]    Order #SAK-12345              [Share] [Menu]
+
+[ PRODUCT IMAGE — Full Width Card ]
+ Nike Air Max 270 — Size 10, Color: Black
+ From: nike.com  |  Total: Rs. 10,400
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DELIVERY STATUS
+  ─────────────────
+  [GREEN BADGE] OUT FOR DELIVERY
+  Expected: Today by 6:00 PM
+
+  Progress:
+  [●━━━━━━━━━━━━━━━━━━━━━━━━━━━○]
+  Ordered  Shipped  On Way  Delivered
+  [check] [check]  [blue]  [empty]
+
+  Courier: TCS Express
+  Tracking: TCS-987654321
+  [Track on TCS Website ->]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DELIVERY TIMELINE
+  Feb 1, 10:30 AM  [check] Order placed on sahulatkar.pk
+  Feb 2, 3:00 PM   [check] Shipped from Karachi warehouse
+  Feb 4, 9:00 AM   [check] Reached Lahore TCS Hub
+  Feb 5, 7:30 AM   [blue]  Out for delivery in DHA Phase 5
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  PAYMENT SCHEDULE
+  [check] Rs. 2,600  Feb 1  (Down Payment — Paid)
+  [warn]  Rs. 2,600  Feb 15 (Due in 10 days)
+  [grey]  Rs. 2,600  Mar 1  (Upcoming)
+  [grey]  Rs. 2,600  Mar 15 (Upcoming)
+
+  [======== PAY NOW — Rs. 2,600 ========]
+
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+  DELIVERY ADDRESS
+  House 123, Street 5, DHA Phase 5, Lahore
+  +92 300 1234567
+  [Edit Address]  [Call Courier]
+
+  [Confirm Received]  [Report Issue]  [Return Item] |
+| --- |
+| SCREEN: My Orders
+══════════════════════════════════════════════════
+
+[Active (3)] [Delivered (12)] [All Orders]
+
+┌──────────────────────────────────────────────┐
+│ [shoe img] ORDER #SAK-12345                  │
+│            Nike Air Max — OUT FOR DELIVERY   │
+│            Arrives TODAY by 6 PM             │
+│            Next payment: Rs.2,600 Feb 15 [!] │
+│            [Track ->]        [Pay Now ->]    │
+├──────────────────────────────────────────────┤
+│ [laptop img] ORDER #SAK-12344                │
+│              Dell XPS 15 — IN TRANSIT        │
+│              Expected: Feb 8, 2026           │
+│              Next payment: Rs.8,000 Feb 20   │
+│              [Track ->]                      │
+├──────────────────────────────────────────────┤
+│ [phone img] ORDER #SAK-12343                 │
+│             Samsung S25 — PROCESSING         │
+│             Down payment paid. Ordering now. │
+│             [View Details ->]                │
+└──────────────────────────────────────────────┘
+
+UPCOMING PAYMENTS
+┌──────────────────────────────────────────────┐
+│ [!] Feb 15  Nike Shoes    Rs. 2,600  [PAY]   │
+│     Feb 20  Dell Laptop   Rs. 8,000  [PAY]   │
+│     Mar 1   Nike Shoes    Rs. 2,600  [---]   │
+└──────────────────────────────────────────────┘ |
+| --- |
+| ADMIN DASHBOARD — Operations Team
+══════════════════════════════════════════════════════════════
+
+LIVE METRICS (Auto-refreshing every 60 seconds)
+┌──────────────┬──────────────┬──────────────┬────────────────┐
+│ Active Orders│ Out for Del. │ Payments Due │ Overdue        │
+│    1,245     │     187      │ Today: 234   │ 1-7d: 45       │
+│    orders    │   orders     │ Rs. 1.2M     │ 8-30d: 12      │
+└──────────────┴──────────────┴──────────────┴────────────────┘
+┌──────────────┬──────────────┬──────────────┬────────────────┐
+│ Collection   │ Automation   │ HITL Queue   │ Failed Checkouts│
+│  Rate 94.2%  │ Rate 87.3%   │  5 pending   │  2 today        │
+└──────────────┴──────────────┴──────────────┴────────────────┘
+
+DELIVERY ISSUE QUEUE [Needs Attention]
+┌────────┬──────────────┬────────────────┬──────────────────────┐
+│Order ID│ Customer     │ Issue          │ Actions              │
+├────────┼──────────────┼────────────────┼──────────────────────┤
+│SAK-340 │ Ahmed K.     │ Delivery fail  │ [Call] [Rebook]      │
+│        │              │ (2 attempts)   │                      │
+├────────┼──────────────┼────────────────┼──────────────────────┤
+│SAK-338 │ Fatima S.    │ Returned to    │ [Process Return]     │
+│        │              │ sender         │ [Refund]             │
+├────────┼──────────────┼────────────────┼──────────────────────┤
+│SAK-335 │ Ali R.       │ Customer says  │ [Investigate POD]    │
+│        │              │ not received   │ [Contact Courier]    │
+└────────┴──────────────┴────────────────┴──────────────────────┘
+
+COURIER PERFORMANCE (This Month)
+┌───────────┬────────┬──────────────┬─────────────┬───────────┐
+│ Courier   │ Orders │ Avg Delivery │ Success Rate│ Issues    │
+├───────────┼────────┼──────────────┼─────────────┼───────────┤
+│ TCS       │  520   │   2.3 days   │   97.8%     │   12      │
+│ Leopards  │  380   │   3.1 days   │   94.2%     │   22      │
+│ PostEx    │  290   │   2.9 days   │   95.5%     │   13      │
+│ M&P       │  140   │   4.1 days   │   91.4%     │   12      │
+└───────────┴────────┴──────────────┴─────────────┴───────────┘
+
+OVERDUE PAYMENT QUEUE
+┌────────┬──────────┬──────────┬────────────┬────────────────────┐
+│Order ID│ Customer │ Overdue  │ Amount     │ Actions            │
+├────────┼──────────┼──────────┼────────────┼────────────────────┤
+│SAK-301 │ Umar A.  │  7 days  │ Rs. 2,600  │ [Reminder] [Call] │
+│SAK-298 │ Sara M.  │ 15 days  │ Rs. 5,200  │ [Restrict] [Plan] │
+│SAK-290 │ Bilal K. │ 31 days  │ Rs. 7,800  │ [Legal] [TASDEEQ] │
+└────────┴──────────┴──────────┴────────────┴────────────────────┘ |
+| --- |
+| PART H — RETURNS, REFUNDS & FINANCIAL MODELING |
+| --- |
+| Scenario | Financial Position | Shariah-Correct Refund |
+| --- | --- | --- |
+| Full return, user paid 1/4 installments (Rs. 2,600) | Merchant refunds Rs. 10,000. User paid Rs. 2,600. | Refund Rs. 2,600 to user. Cancel remaining 3 installments. SahulatKar retains Rs. 400 markup (service fully rendered upon procurement). |
+| Full return, user paid 2/4 installments (Rs. 5,200) | Merchant refunds Rs. 10,000. User paid Rs. 5,200. | Refund Rs. 5,200 to user. Cancel remaining 2 installments. SahulatKar retains Rs. 400 markup. |
+| Defective item, merchant refuses refund | Merchant does not cooperate. | Takaful product insurance covers claim. User refunded in full. SahulatKar pursues chargeback separately. |
+| Non-delivery (merchant fraud) | Product never shipped despite confirmation. | Virtual card chargeback immediately. Full refund to user including down payment. TASDEEQ merchant alert. |
+| Line Item | Amount (PKR) | Amount (USD) | Notes |
+| --- | --- | --- | --- |
+| REVENUE |  |  |  |
+| Murabaha Service Fee (4%) | +Rs. 400 | +$1.45 | Core revenue, fixed at contract |
+| Interchange Income (~1.5% via bank partner) | +Rs. 150 | +$0.54 | Via banking partner arrangement |
+| TOTAL REVENUE | +Rs. 550 | +$1.99 | 5.5% effective yield |
+| COSTS |  |  |  |
+| Safepay (first payment: 2.9% + Rs.30) | -Rs. 119 | -$0.43 | On Rs. 2,600 down payment |
+| JazzCash/EP installment links (3x Rs.20) | -Rs. 60 | -$0.22 | Lower fee for wallet-to-wallet |
+| Rye API ($0.02 + $0.05) | -Rs. 21 | -$0.07 | Product fetch + checkout |
+| Stripe Issuing virtual card | -Rs. 28 | -$0.10 | $0.10 per card |
+| SMS reminders (8 messages avg) | -Rs. 8 | -$0.03 | Rs.1/SMS blended |
+| AfterShip tracking | -Rs. 3 | -$0.01 | $0.01 per shipment at scale |
+| Infrastructure (amortized) | -Rs. 15 | -$0.05 | At 5K orders/month |
+| TOTAL TECH COSTS | -Rs. 254 | -$0.91 |  |
+| NET PRE-DEFAULT MARGIN | +Rs. 296 | +$1.08 | 2.96% net tech margin |
+| Cost of capital (fund Rs.7,800 for 42 days @ 3% annual) | -Rs. 50 | -$0.18 |  |
+| NET CONTRIBUTION (before defaults) | +Rs. 246 | +$0.89 | Break-even at ~2.4% default rate |
+| Break-Even Analysis
+At 3% default rate (conservative for Pakistan BNPL), SahulatKar loses approximately Rs. 312 per defaulted transaction. Net contribution is Rs. 246. Break-even default rate is ~2.4%. To operate profitably at 3% default: raise markup to 5% (Rs. 500 fee on Rs. 10,000 order), strengthening KYC + first-payment barrier reduces defaults to 1.5-2%, or secure credit default insurance covering losses above 2% (Adamjee/Jubilee Insurance). |
+| --- |
+| PART I — IMPLEMENTATION ROADMAP |
+| --- |
+| Phase | Timeline | Features | Success Metrics |
+| --- | --- | --- | --- |
+| Phase 1 MVP | Weeks 1-8 | Rye API (Shopify + Amazon only). Safepay for first payment. SMS payment links for installments 2-4. Wakalah + Murabaha OTP contracts. Basic order + tracking screen. Manual HITL fallback. | 10 end-to-end test orders. Less than 5 min onboarding. Zero contract errors. |
+| Phase 2 | Weeks 9-20 | Playwright automation for top 20 PK merchants (Daraz, Shophive, iStyle, Foodpanda Shop). JazzCash + EasyPaisa direct installment APIs. AfterShip universal tracking. Email parsing for confirmations. Admin dashboard V1. TASDEEQ credit bureau integration. | 60%+ automation rate. 500 live customer orders. Less than 3% HITL rate. |
+| Phase 3 | Weeks 21-40 | Universal Playwright (any URL). Shariah board certification. Lithic MCC-locked virtual cards. 1Link Standing Instructions auto-debit. WhatsApp Business API reminders. Full analytics dashboard. KalPay-competitive 24h approval migrated to instant. | 85%+ automation rate. 5,000 active users. Default rate under 2%. |
+| Phase 4 Scale | Month 10+ | Local bank BIN partnership (HBL/MCB) for PKR-native virtual cards. Raast-based installment collection (near-zero fees). Mobile browser extension. Machine learning collection optimization. Cross-border abandonment fraud model. | 10K+ orders/month. Positive unit economics. SECP NBFC license active. |
+| Final Architecture Summary — Complete Stack
+SahulatKar's complete technical stack: (1) NADRA Verisys + Shufti Pro for instant KYC; (2) XGBoost ML for credit scoring; (3) Rye API + Playwright for agentic purchase execution; (4) Stripe Issuing virtual cards (migration to Lithic for MCC-locking); (5) Safepay + JazzCash/EasyPaisa for payment collection; (6) Agency Murabaha (Wakalah + Murabaha) two-contract Shariah structure; (7) AfterShip + TCS/Leopards/PostEx APIs for delivery tracking; (8) Temporal.io for fault-tolerant checkout workflows; (9) TASDEEQ for positive/negative credit bureau reporting; (10) Jazz SMS API + WhatsApp Business for payment reminders. This full stack is buildable in 8 weeks for MVP at under Rs. 500,000 monthly operating cost at 1K orders/month scale. |
+| --- |

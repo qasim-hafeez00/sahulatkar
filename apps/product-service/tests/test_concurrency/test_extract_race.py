@@ -11,7 +11,7 @@ async def test_extract_race_creates_single_product(client, db_session, monkeypat
     from src.services.extraction_waterfall import ExtractionResult
     from src.services.extraction_waterfall import ExtractionWaterfallService
 
-    async def slow_extract(self, canonical_url: str, platform: str):
+    async def slow_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",

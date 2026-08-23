@@ -26,7 +26,7 @@ async def test_safepay_webhook_processes_paid_event(client, test_user, redis_moc
 
     payload = {"order_id": order.id, "amount_pkr": 1300, "gateway_txn_id": "sp_abc123", "status": "PAID"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp = await client.post(
         "/api/v1/webhooks/safepay",
@@ -37,7 +37,6 @@ async def test_safepay_webhook_processes_paid_event(client, test_user, redis_moc
     assert resp.json()["status"] == "ok"
     
     # VCN issue should be queued in Outbox
-    from sqlalchemy import select
     async with TestingSessionLocal() as session:
         result = await session.execute(select(OutboxEvent).where(OutboxEvent.event_name == "vcn.issue"))
         events = result.scalars().all()
@@ -60,7 +59,7 @@ async def test_safepay_webhook_deduplicates_repeated_events(client, test_user, r
 
     payload = {"order_id": order.id, "amount_pkr": 1300, "gateway_txn_id": "sp_dedup_test", "status": "PAID"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp1 = await client.post("/api/v1/webhooks/safepay", content=body, headers={"X-Safepay-Signature": sig})
     resp2 = await client.post("/api/v1/webhooks/safepay", content=body, headers={"X-Safepay-Signature": sig})
@@ -75,7 +74,7 @@ async def test_safepay_webhook_ignores_non_paid_status(client, test_user, seed_s
 
     payload = {"order_id": order.id, "amount_pkr": 1300, "status": "FAILED"}
     body = json.dumps(payload).encode()
-    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET).sign_payload(body)
+    sig = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET).sign_payload(body)
 
     resp = await client.post("/api/v1/webhooks/safepay", content=body, headers={"X-Safepay-Signature": sig})
     assert resp.status_code == 200

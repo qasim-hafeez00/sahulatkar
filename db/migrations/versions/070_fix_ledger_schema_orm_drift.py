@@ -60,10 +60,9 @@ def upgrade() -> None:
     # insert) and make sure a matching ledger_periods row exists for the FK.
     op.execute(
         """
-        INSERT INTO ledger_periods (period_key, fiscal_year, start_date, end_date, status, created_at, updated_at)
+        INSERT INTO ledger_periods (period_key, start_date, end_date, status, created_at, updated_at)
         SELECT DISTINCT
             to_char(je.entry_date, 'YYYY-MM'),
-            EXTRACT(YEAR FROM je.entry_date)::int,
             date_trunc('month', je.entry_date)::date,
             (date_trunc('month', je.entry_date) + INTERVAL '1 month - 1 day')::date,
             'closed',

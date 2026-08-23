@@ -4,7 +4,7 @@ import hmac
 import json
 import httpx
 import respx
-from unittest.mock import patch, MagicMock, AsyncMock
+from unittest.mock import AsyncMock
 from src.config import settings
 
 @pytest.mark.asyncio

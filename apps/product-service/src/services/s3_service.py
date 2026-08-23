@@ -21,6 +21,20 @@ class S3Service:
         self._session = aioboto3.Session()
         self.bucket_screenshots = settings.S3_BUCKET_SCREENSHOTS
 
+    def _client_kwargs(self) -> dict:
+        """Real AWS: default credential chain (env/IAM role), settings.AWS_REGION.
+        S3-compatible provider (e.g. Cloudflare R2): explicit keys +
+        endpoint_url, region "auto" — R2 ignores the region value but
+        requires SigV4's region field to be present."""
+        if settings.S3_ENDPOINT_URL:
+            return {
+                "endpoint_url": settings.S3_ENDPOINT_URL,
+                "aws_access_key_id": settings.S3_ACCESS_KEY,
+                "aws_secret_access_key": settings.S3_SECRET_KEY,
+                "region_name": "auto",
+            }
+        return {"region_name": settings.AWS_REGION}
+
     async def upload_bytes(self, data: bytes, key: str, content_type: str = "image/jpeg") -> str:
         """Upload raw bytes. Returns S3 key."""
         try:
@@ -29,11 +43,16 @@ class S3Service:
                 "Key": key,
                 "Body": data,
                 "ContentType": content_type,
-                "ServerSideEncryption": "aws:kms",
             }
+            # SSE-KMS is an AWS-specific feature R2 (and most S3-compatible
+            # providers) don't implement — sending it unconditionally 400s
+            # every upload against R2. Only apply it when a real KMS key is
+            # actually configured (i.e. real AWS), matching how AWS_KMS_KEY_ARN
+            # is already optional everywhere else in this service's config.
             if settings.AWS_KMS_KEY_ARN:
+                kwargs["ServerSideEncryption"] = "aws:kms"
                 kwargs["SSEKMSKeyId"] = settings.AWS_KMS_KEY_ARN
-            async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+            async with self._session.client("s3", **self._client_kwargs()) as client:
                 await client.put_object(**kwargs)
             return key
         except Exception as exc:
@@ -68,7 +87,7 @@ class S3Service:
     async def presign_url(self, key: str, bucket: str | None = None, expires_in: int = 3600) -> str:
         """Generate a presigned GET URL for an S3 object."""
         try:
-            async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+            async with self._session.client("s3", **self._client_kwargs()) as client:
                 return await client.generate_presigned_url(
                     "get_object",
                     Params={"Bucket": bucket or self.bucket_screenshots, "Key": key},
@@ -79,11 +98,11 @@ class S3Service:
             return ""
 
     async def delete_object(self, key: str, bucket: str | None = None) -> None:
-        async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+        async with self._session.client("s3", **self._client_kwargs()) as client:
             await client.delete_object(Bucket=bucket or self.bucket_screenshots, Key=key)
 
     async def list_objects(self, prefix: str, bucket: str | None = None) -> list[str]:
-        async with self._session.client("s3", region_name=settings.AWS_REGION) as client:
+        async with self._session.client("s3", **self._client_kwargs()) as client:
             response = await client.list_objects_v2(Bucket=bucket or self.bucket_screenshots, Prefix=prefix)
         contents = response.get("Contents") or []
         return [obj.get("Key") for obj in contents if obj.get("Key")]

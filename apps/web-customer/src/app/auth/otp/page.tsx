@@ -21,11 +21,14 @@ export default function OTP() {
   const [isLoading, setIsLoading] = useState(false)
   const [focusedIndex, setFocusedIndex] = useState<number | null>(null)
   const [timeLeft, setTimeLeft] = useState(59)
-  const [canResend, setCanResend] = useState(false)
   const [devOtp, setDevOtp] = useState<string | null>(null)
   const router = useRouter()
+  const canResend = timeLeft <= 0
 
   useEffect(() => {
+    // sessionStorage is a browser-only API and unavailable during SSR, so this
+    // value can't be computed synchronously during render.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDevOtp(sessionStorage.getItem("sk_otp_dev_code"))
   }, [])
 
@@ -33,8 +36,6 @@ export default function OTP() {
     if (timeLeft > 0) {
       const timer = setTimeout(() => setTimeLeft(timeLeft - 1), 1000)
       return () => clearTimeout(timer)
-    } else {
-      setCanResend(true)
     }
   }, [timeLeft])
 
@@ -119,7 +120,6 @@ export default function OTP() {
         setDevOtp(result.dev_otp)
       }
       setTimeLeft(59)
-      setCanResend(false)
     } catch (err) {
       const message = err instanceof ApiError
         ? OTP_ERROR_MESSAGES[String(err.detail)] ?? String(err.detail)

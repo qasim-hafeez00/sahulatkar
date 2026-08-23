@@ -5,7 +5,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from typing import AsyncGenerator
-from unittest.mock import MagicMock, patch
+from unittest.mock import MagicMock
 
 import pytest
 from cryptography.hazmat.primitives import serialization
@@ -17,11 +17,6 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_asyn
 from sqlalchemy.ext.compiler import compiles
 
 # Models
-from sk_shared.models import auth, contracts, order, payment, product, kyc, credit, delivery, hitl, audit
-from src.models.payment_workflow import PaymentWorkflow, PaymentEvent
-from src.models.outbox import OutboxEvent
-from src.models.refund_workflow import RefundWorkflow
-from src.models.payment_mandate import PaymentMandate
 from sk_shared.models.base import Base
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import create_access_token

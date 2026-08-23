@@ -14,6 +14,7 @@ dependencies = [
     "cryptography>=42.0.0",
     "prometheus-client>=0.20.0",
     "python-json-logger>=2.0.7",
+    "stripe>=9.0.0",
     "sk-shared==0.1.0",
 ]
 
@@ -29,8 +30,10 @@ test = [
 ]
 
 [project.scripts]
-vcn-worker        = "src.workers.vcn_issue_worker:main"
-recon-worker      = "src.workers.reconciliation_worker:main"
+vcn-worker            = "src.workers.vcn_issue_worker:main"
+recon-worker          = "src.workers.reconciliation_worker:main"
+payment-webhook-worker = "src.workers.payment_webhook_consumer:main"
+payment-initiate-worker = "src.workers.payment_initiate_consumer:main"
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

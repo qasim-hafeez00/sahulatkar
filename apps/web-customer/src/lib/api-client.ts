@@ -1,8 +1,6 @@
 import { ApiError } from "sk-shared-ts"
 import { getGatewayBaseUrl } from "@/lib/gateway-config"
 
-const API_BASE_URL = getGatewayBaseUrl()
-
 // Authenticated calls are proxied through this same-origin route (see
 // src/app/api/gateway/[...path]/route.ts) instead of hitting the gateway
 // directly — the proxy attaches the session JWT server-side from an
@@ -16,6 +14,10 @@ export { ApiError }
 interface RequestOptions extends RequestInit {
   /** Route this call through the authenticated same-origin proxy instead of hitting the gateway directly. */
   auth?: boolean
+}
+
+function resolveApiBaseUrl(): string {
+  return getGatewayBaseUrl()
 }
 
 /**
@@ -33,7 +35,7 @@ export function hasClientSession(): boolean {
 
 export async function apiFetch<T>(path: string, options: RequestOptions = {}): Promise<T> {
   const { auth = false, headers, ...rest } = options
-  const base = auth ? PROXY_BASE : API_BASE_URL
+  const base = auth ? PROXY_BASE : resolveApiBaseUrl()
 
   const mergedHeaders: Record<string, string> = {
     // Let the browser set multipart/form-data (with boundary) itself for FormData bodies.

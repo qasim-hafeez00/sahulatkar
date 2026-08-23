@@ -1,9 +1,9 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+from datetime import timedelta
 
-from fastapi import APIRouter, Depends
-from sqlalchemy import desc, select
+from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import User
@@ -75,8 +75,6 @@ async def credit_status(
 # ============================================================================
 # TASK-23: Credit History Endpoint
 # ============================================================================
-
-from fastapi import Query
 
 @router.get("/history")
 async def credit_history(

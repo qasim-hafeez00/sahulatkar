@@ -18,7 +18,6 @@ from __future__ import annotations
 
 import contextvars
 import uuid
-from typing import Mapping
 
 from starlette.requests import Request
 

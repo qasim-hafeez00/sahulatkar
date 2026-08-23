@@ -4,6 +4,7 @@ import pyotp
 from fastapi import APIRouter, Depends, HTTPException, Request, status
 from pydantic import BaseModel, Field
 from sqlalchemy import select
+from sqlalchemy import text as _text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sk_shared.models.auth import AdminUser, Role
 from src.core.kms import KMSProvider
@@ -277,9 +278,6 @@ async def list_roles(
 # ============================================================================
 # Module 12 — active session management, session policy
 # ============================================================================
-
-from sqlalchemy import text as _text
-
 
 @router.get("/sessions")
 async def list_admin_sessions(

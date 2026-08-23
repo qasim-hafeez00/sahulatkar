@@ -7,7 +7,6 @@ Used by the Web Admin dashboard for payment visibility.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
 from decimal import Decimal
 from typing import Optional
 
@@ -20,7 +19,7 @@ from src.models.payment_workflow import PaymentWorkflow
 from src.models.outbox import OutboxEvent
 from src.state.payment_workflow import PaymentStatus
 
-from src.core.dependencies import RequireRole, get_current_admin, get_db, get_redis
+from src.core.dependencies import RequireRole, get_current_admin, get_db
 from src.core.metrics import RECONCILIATION_DISCREPANCY_TOTAL, RECONCILIATION_MATCHED_TOTAL
 from src.schemas.admin import AdjustmentRequest, GatewayHealthSummary, PaginatedTransactions, TransactionSummary, VcnAdminSummary
 from src.schemas.reconciliation import ReconciliationImportRequest, ReconciliationReport
@@ -264,7 +263,6 @@ async def create_adjustment(
 
     # Emit outbox event instead of creating PaymentTransaction directly
     from sk_shared.events import build_event_envelope
-    from src.models.outbox import OutboxEvent
     from dataclasses import asdict
 
     envelope = build_event_envelope(

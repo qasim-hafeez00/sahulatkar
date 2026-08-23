@@ -109,12 +109,36 @@ class OrderService:
             await redis.redis.lpush(QueueName.PRODUCT_EXTRACT, json.dumps(job))
 
         # Best-effort internal kickoff; do not fail user request if unavailable.
+        #
+        # Two real bugs fixed here (found live-testing the full order flow):
+        # 1. InternalServiceClient's httpx.AsyncClient has no base_url at all
+        #    (see core/http_client.py) — a relative path here always raised
+        #    "Request URL is missing a protocol", silently swallowed by this
+        #    try/except, so this call NEVER once succeeded. Build the full
+        #    URL from settings.PRODUCT_SERVICE_BASE_URL instead, matching the
+        #    pattern InternalServiceClient.send_otp already uses.
+        # 2. product-service's ExtractRequest schema takes order_id (used to
+        #    link the resulting Product back to this Order — see
+        #    apply_product_extracted_envelope) — it was never sent.
+        # 3. product-service's internal-auth dependency (core/dependencies.py
+        #    get_current_user_id) reads the header "x-internal-service-token"
+        #    — signed_headers()'s "X-Internal-Token" is gateway's OWN
+        #    internal-endpoint convention (api/v1/internal.py), a different
+        #    name product-service has never accepted. 403'd every call.
+        #    orders.py's agent-status endpoint already works around this the
+        #    same way for its own product-service call.
         try:
+            from src.config import settings
+
             client = InternalServiceClient.get_client()
             await client.post(
-                "/v1/products/extract",
-                json={"raw_url": product_url},
-                headers=InternalServiceClient.signed_headers(request_id=request_id),
+                f"{settings.PRODUCT_SERVICE_BASE_URL}/api/v1/products/extract",
+                json={"raw_url": product_url, "order_id": order.id, "correlation_id": request_id},
+                headers={
+                    "x-internal-service-token": settings.INTERNAL_SERVICE_TOKEN,
+                    "X-Request-ID": request_id or "",
+                    "Content-Type": "application/json",
+                },
             )
         except Exception as exc:
             logger.warning("PRODUCT_EXTRACT_NUDGE_FAILED order=%s error=%s", order.id, exc)
@@ -148,6 +172,11 @@ class OrderService:
                 "name": product.name,
                 "url": product.url,
                 "price": sale_price,
+                "brand": product.brand,
+                "image_url": product.primary_image_s3,
+                "availability": product.stock_status,
+                "in_stock": product.in_stock,
+                "variants": product.variants or [],
             },
             "financing": {
                 "cost_price": cost_price,

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Optional
 
 from src.config import settings
 from sk_shared.redis_client import RedisClient

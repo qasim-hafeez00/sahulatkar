@@ -14,7 +14,6 @@ from src.config import settings
 from src.core.audit import record_audit_event
 from src.core.dependencies import RequirePermission, get_current_user, get_db, get_redis
 from src.schemas.contracts import (
-    AdminContractResponse,
     ContractDisclosure,
     ContractSignResponse,
     ContractStatusResponse,

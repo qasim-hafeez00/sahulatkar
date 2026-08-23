@@ -2,27 +2,26 @@ import uuid
 import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
-from typing import Optional, Tuple
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, text
 from fastapi import HTTPException, status
+import pyotp
+
+from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token, get_password_hash
+from sk_shared.redis_client import RedisClient
+from sk_shared.models.auth import User, UserSession, AdminUser
+from src.schemas.auth import (
+    RegisterInitiateRequest, RegisterInitiateResponse, VerifyOtpRequest,
+    AuthResponse, LoginRequest, AdminLoginRequest, AdminAuthResponse,
+    TokenRefreshRequest, TokenRefreshResponse
+)
+from src.config import settings
 
 logger = logging.getLogger("gateway")
 
 def _utcnow():
     """Naive UTC datetime for TIMESTAMP WITHOUT TIME ZONE DB columns."""
     return datetime.utcnow()
-
-from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token, get_password_hash
-from sk_shared.redis_client import RedisClient
-from sk_shared.models.auth import User, UserSession, AdminUser
-from src.schemas.auth import (
-    RegisterInitiateRequest, RegisterInitiateResponse, VerifyOtpRequest, 
-    AuthResponse, LoginRequest, AdminLoginRequest, AdminAuthResponse,
-    TokenRefreshRequest, TokenRefreshResponse
-)
-from src.config import settings
-import pyotp
 
 class AuthService:
     @staticmethod
@@ -47,6 +46,11 @@ class AuthService:
         await redis.set(f"sk:auth:token:{otp_token}", json.dumps(payload), settings.OTP_TTL)
 
         logger.info(f"[DEV] OTP for {req.phone}: {otp}")
+        if settings.NOTIFICATION_SMS_ENABLED:
+            from src.core.http_client import InternalServiceClient
+            await InternalServiceClient.send_otp(
+                phone=req.phone, otp_code=otp, purpose="registration", expires_in_seconds=settings.OTP_TTL,
+            )
 
         # Format masked phone
         masked_phone = req.phone[:5] + "******" + req.phone[-2:] if len(req.phone) >= 11 else "******"
@@ -413,13 +417,10 @@ class AuthService:
         await redis.set(f"sk:auth:token:{reset_token}:reset", _json.dumps({"phone": phone, "user_id": user.id}), settings.OTP_TTL)
 
         if settings.NOTIFICATION_SMS_ENABLED:
-            from sk_shared.notifications import NotificationClient
-            notify_backend = redis.redis if hasattr(redis, "redis") else redis
-            client = NotificationClient(notify_backend)
-            try:
-                await client.push_otp(phone, otp)
-            except Exception:
-                pass
+            from src.core.http_client import InternalServiceClient
+            await InternalServiceClient.send_otp(
+                phone=phone, otp_code=otp, purpose="password_reset", expires_in_seconds=settings.OTP_TTL,
+            )
 
         result = {"masked_phone": masked, "reset_token": reset_token}
         if settings.ENVIRONMENT != "production":

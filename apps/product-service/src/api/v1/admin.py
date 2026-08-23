@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime, timezone
 from decimal import Decimal
-from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Body, Depends, HTTPException, Query, Request, status
-from sqlalchemy import select, func, desc, or_
+from sqlalchemy import select, func, desc
 from sqlalchemy.ext.asyncio import AsyncSession
 from pydantic import BaseModel
 
@@ -23,7 +21,6 @@ from src.repositories.prohibited_category_repository import ProhibitedCategoryRe
 from src.repositories.scraping_job_repository import ScrapingJobRepository
 from src.schemas.admin import (
     AdminCheckoutExecutionItem,
-    AdminExecutionDetailResponse,
     AdminExecutionListItem,
     AdminExecutionListResponse,
     AdminExecutionRetryResponse,
@@ -52,7 +49,6 @@ from src.services.audit_service import AuditService
 from src.services.dlq_service import DLQService
 from src.services.merchant_service import MerchantService
 from src.services.product_catalog_service import ProductCatalogService
-from src.services.product_extraction_service import build_upo
 from src.services.product_lifecycle_service import ProductLifecycleService
 from src.services.checkout.agent import CheckoutAgentService
 
@@ -87,7 +83,7 @@ async def list_products(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
-    repo = ProductRepository(db)
+    ProductRepository(db)
     decoded_cursor = _decode_cursor(cursor)
     
     # Total count for the response
@@ -127,7 +123,7 @@ async def get_product(
     _: None = Depends(require_service_token),
 ):
     product_repo = ProductRepository(db)
-    job_repo = ScrapingJobRepository(db)
+    ScrapingJobRepository(db)
     exec_repo = ExecutionRepository(db)
 
     product = await product_repo.find_by_uuid(product_uuid)
@@ -296,7 +292,7 @@ async def list_executions(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
-    repo = ExecutionRepository(db)
+    ExecutionRepository(db)
     decoded_cursor = _decode_cursor(cursor)
     product_filter_id: int | None = None
     if product_id is not None:
@@ -375,7 +371,7 @@ async def list_scraping_jobs(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
-    repo = ScrapingJobRepository(db)
+    ScrapingJobRepository(db)
     decoded_cursor = _decode_cursor(cursor)
     
     where_clause = []
@@ -468,7 +464,7 @@ async def list_merchants(
     db: AsyncSession = Depends(get_db),
     _: None = Depends(require_service_token),
 ):
-    repo = MerchantRepository(db)
+    MerchantRepository(db)
     decoded_cursor = _decode_cursor(cursor)
     
     total = await db.scalar(select(func.count(Merchant.id)).where(Merchant.deleted_at.is_(None)))

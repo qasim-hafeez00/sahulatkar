@@ -1,4 +1,4 @@
-from typing import List, Literal
+from typing import List, Literal, Optional
 import logging
 import os
 from decimal import Decimal
@@ -20,13 +20,28 @@ class Settings(BaseSettings):
     # GAP-B FIX: explicit dialect flag avoids deprecated session.bind usage in SQLAlchemy 2.x.
     # Set to "sqlite" in test environments via conftest.py / environment variable.
     DATABASE_DIALECT: str = "postgresql"
+
+    # P1-05: PricingService.is_shariah_approved used to be a hardcoded
+    # `True` class attribute backed only by a code comment claiming
+    # sign-off — unverifiable and untraceable to any actual approval record.
+    # It is now derived from these two fields instead: empty by default (not
+    # approved), and only reads as approved once a real Shariah-board
+    # reference/date is configured — see PricingService.is_shariah_approved.
+    SHARIAH_MARKUP_APPROVAL_REFERENCE: str = ""
+    SHARIAH_MARKUP_APPROVAL_DATE: str = ""
     REDIS_URL: str = "redis://localhost:6379/1"
     REDIS_DB: int = 1
 
+    # Free-tier posture: Rye ($0.02/fetch) and OpenAI Vision (paid self-heal
+    # fallback) stay off by default; Groq (generous free tier) is the only
+    # LLM used for Tier 3 extraction until a paid budget is approved. Violet
+    # and CAPTCHA solving are effectively no-ops anyway without an API key
+    # configured (see VIOLET_API_KEY / CAPTCHA_API_KEY below), so their flags
+    # don't need to change — cost is gated by the key, not just the flag.
     FEATURE_RYE_ENABLED: bool = False
     FEATURE_VIOLET_ENABLED: bool = True
     FEATURE_GROQ_ENABLED: bool = True
-    FEATURE_OPENAI_FALLBACK: bool = True
+    FEATURE_OPENAI_FALLBACK: bool = False
     FEATURE_HITL_ESCALATION: bool = True
     FEATURE_CHECKOUT_AGENT: bool = True
     FEATURE_CAPTCHA_SOLVING: bool = False
@@ -90,6 +105,12 @@ class Settings(BaseSettings):
     S3_BUCKET_SCREENSHOTS: str = "sk-screenshots-dev"
     PRODUCT_IMAGE_BUCKET: str = "sk-product-images-dev"
     AWS_KMS_KEY_ARN: str = ""
+    # Set to use an S3-compatible provider (e.g. Cloudflare R2) instead of
+    # real AWS — see src/services/s3_service.py::S3Service._client_kwargs.
+    # Leave all three unset to use real AWS via the default credential chain.
+    S3_ENDPOINT_URL: Optional[str] = None
+    S3_ACCESS_KEY: Optional[str] = None
+    S3_SECRET_KEY: Optional[str] = None
     INTERNAL_SERVICE_TOKEN: str = "dev-secret-token"
     JWT_PUBLIC_KEY: str = ""
 
@@ -146,6 +167,8 @@ _SECRETS_MANAGER_FIELD_MAP = {
     "fernet-key": "FERNET_KEY",
     "internal-service-token": "INTERNAL_SERVICE_TOKEN",
     "jwt-public-key": "JWT_PUBLIC_KEY",
+    "s3-access-key": "S3_ACCESS_KEY",
+    "s3-secret-key": "S3_SECRET_KEY",
 }
 
 

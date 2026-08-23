@@ -6,8 +6,8 @@ from src.services.safepay import SafepayClient
 
 
 class SafepayAdapter(PaymentAdapter):
-    def __init__(self, api_key: str, api_secret: str, base_url: str):
-        self.client = SafepayClient(api_key, api_secret, base_url)
+    def __init__(self, api_key: str, api_secret: str, base_url: str, webhook_secret: str = ""):
+        self.client = SafepayClient(api_key, api_secret, base_url, webhook_secret)
 
     async def initiate_payment(
         self, 

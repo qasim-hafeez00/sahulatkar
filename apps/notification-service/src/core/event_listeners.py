@@ -422,7 +422,7 @@ async def listen_to_redis_events(app):
     listener_state["running"] = True
     while True:
         try:
-            pubsub = redis._client.pubsub()
+            pubsub = redis.redis.pubsub()
             await pubsub.subscribe(*SUBSCRIBED_CHANNELS)
             listener_state["subscribed_channels"] = len(SUBSCRIBED_CHANNELS)
             listener_state["error"] = None

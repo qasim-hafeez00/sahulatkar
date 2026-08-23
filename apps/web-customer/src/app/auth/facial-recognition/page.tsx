@@ -18,11 +18,6 @@ export default function FacialRecognition() {
   const videoRef = useRef<HTMLVideoElement>(null)
   const router = useRouter()
 
-  useEffect(() => {
-    if (cameraActive) startCamera()
-    return () => stopCamera()
-  }, [cameraActive])
-
   const startCamera = async () => {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "user" } })
@@ -39,6 +34,13 @@ export default function FacialRecognition() {
       stream.getTracks().forEach((track) => track.stop())
     }
   }
+
+  useEffect(() => {
+    // Starting the camera requires an async browser media API call, which can only happen in an effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    if (cameraActive) startCamera()
+    return () => stopCamera()
+  }, [cameraActive])
 
   const captureFrame = (): Promise<Blob | null> =>
     new Promise((resolve) => {

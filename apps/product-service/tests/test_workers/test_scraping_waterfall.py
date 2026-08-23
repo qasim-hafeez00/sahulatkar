@@ -9,9 +9,8 @@ instead of <1s via Rye).
 """
 from __future__ import annotations
 
-from datetime import datetime, timezone
 from decimal import Decimal
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import patch
 
 import pytest
 
@@ -36,7 +35,7 @@ async def test_scraping_worker_calls_extract_not_run_tier3(db_session, redis_moc
     extract_called = {"count": 0}
     tier3_called = {"count": 0}
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         extract_called["count"] += 1
         return ExtractionResult(
             status="completed",

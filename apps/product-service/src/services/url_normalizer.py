@@ -139,6 +139,14 @@ class UrlNormalizerService:
 
     def detect_platform(self, domain: str, path: str = "") -> str:
         path = path.lower()
+        # Social-commerce storefronts (Instagram DM-based selling, etc.) have
+        # no structured product page or checkout flow to automate at all —
+        # ordering happens via DM negotiation with the seller. Flagging this
+        # at platform-detection time lets the extraction waterfall skip
+        # straight to HITL/manual-concierge instead of burning automated
+        # attempts against a site that can never support them.
+        if domain.endswith("instagram.com") or domain == "instagr.am":
+            return "SOCIAL_COMMERCE"
         if "amazon." in domain:
             return "AMAZON"
         if domain.endswith("daraz.pk") or "daraz." in domain:

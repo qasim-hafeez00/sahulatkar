@@ -1,5 +1,4 @@
 import sys
-import os
 sys.path.append("apps/notification-service")
 sys.path.append("packages/shared-python")
 

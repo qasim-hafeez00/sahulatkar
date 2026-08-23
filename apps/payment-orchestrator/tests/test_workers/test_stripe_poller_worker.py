@@ -25,7 +25,6 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from sk_shared.models.payment import VirtualCard
-from sqlalchemy import select
 
 from src.config import settings
 from src.services.stripe_poller import StripePoller

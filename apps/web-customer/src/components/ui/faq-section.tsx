@@ -145,7 +145,7 @@ export function FAQSection() {
             </span>
           </h2>
           <p className="text-xl text-theme-muted max-w-3xl mx-auto">
-            Everything you need to know about SahulatKar's halal financing solutions
+            Everything you need to know about SahulatKar&apos;s halal financing solutions
           </p>
         </motion.div>
 

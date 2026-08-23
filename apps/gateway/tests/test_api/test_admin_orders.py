@@ -1,10 +1,8 @@
 import pytest
 from httpx import AsyncClient
 from sk_shared.models.order import Order
-from sk_shared.models.auth import User
 from sk_shared.models.order import OrderStatusHistory
 from sk_shared.models.payment import Loan, PaymentTransaction
-import uuid
 
 pytestmark = pytest.mark.asyncio
 
@@ -43,6 +41,49 @@ async def test_filter_admin_orders_by_status(client: AsyncClient, db_session, te
     data = response.json()
     for o in data["orders"]:
         assert o["status"] == "completed"
+
+async def test_admin_override_order_status_accepts_valid_state(client: AsyncClient, db_session, test_admin, test_user):
+    admin, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="purchase_failed", total_amount=1500)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    response = await client.put(
+        f"/api/v1/admin/orders/{order.id}/status",
+        json={"status": "purchasing", "reason": "Manual retry after checkout agent stall"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 200
+    assert response.json()["status"] == "purchasing"
+
+    await db_session.refresh(order)
+    assert order.status == "purchasing"
+
+
+async def test_admin_override_order_status_rejects_unknown_state(client: AsyncClient, db_session, test_admin, test_user):
+    """P1-07: an unrecognized status string (typo or otherwise) must be
+    rejected with a 422, not written straight to Order.status."""
+    admin, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="purchase_failed", total_amount=1500)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    response = await client.put(
+        f"/api/v1/admin/orders/{order.id}/status",
+        json={"status": "purchasingg", "reason": "Typo'd status string"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 422
+
+    await db_session.refresh(order)
+    assert order.status == "purchase_failed"
+
 
 async def test_get_admin_order_detail(client: AsyncClient, db_session, test_admin, test_user):
     admin, admin_token = test_admin

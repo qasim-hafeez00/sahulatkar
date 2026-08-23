@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -314,8 +315,6 @@ async def update_integration(
 # ============================================================================
 # GAP-15: System Health Dashboard
 # ============================================================================
-
-from datetime import datetime, timezone
 
 @router.get("/health")
 async def system_health(

@@ -1,5 +1,4 @@
 from decimal import Decimal
-from unittest.mock import patch
 
 import pytest
 from sqlalchemy import select
@@ -40,6 +39,15 @@ async def _make_card(db_session) -> VirtualCard:
     return card
 
 
+async def test_handle_stripe_payment_intent_event_is_noop_not_missing_card_warning(db_session):
+    """payment_intent.* events have no `card` field — must be recognized as an
+    intentional no-op (nothing creates PaymentIntents in this system) rather
+    than falling into the generic 'missing card ID' branch."""
+    orchestrator = VcnOrchestrator(db_session)
+    # Must not raise, and must not touch any VirtualCard row.
+    await orchestrator.handle_stripe_event("payment_intent.payment_failed", {"id": "pi_123", "status": "requires_payment_method"})
+
+
 async def test_handle_stripe_transaction_created_queues_vcn_charged(db_session):
     card = await _make_card(db_session)
     orchestrator = VcnOrchestrator(db_session)
@@ -66,7 +74,7 @@ async def test_handle_stripe_authorization_request_approves(db_session):
     orchestrator = VcnOrchestrator(db_session)
 
     import stripe as stripe_module
-    from unittest.mock import MagicMock, AsyncMock
+    from unittest.mock import MagicMock
 
     mock_auth = MagicMock()
     approve_fn = MagicMock(return_value=None)

@@ -5,8 +5,7 @@ import pytest
 from sqlalchemy import select
 
 from sk_shared.models.audit import AuditTrail
-from sk_shared.models.checkout import PurchaseExecution
-from sk_shared.models.product import Merchant, Product, ProhibitedCategory, ScrapingJob
+from sk_shared.models.product import Merchant, Product, ScrapingJob
 
 
 @pytest.mark.asyncio
@@ -244,8 +243,8 @@ async def test_admin_merchants_list_detail_and_block(client, db_session, service
 
 @pytest.mark.asyncio
 async def test_admin_products_cursor_pagination(client, db_session, make_product, service_header):
-    p1 = await make_product(db_session, name="Cursor Product A", canonical_url="https://example.com/cursor-a")
-    p2 = await make_product(db_session, name="Cursor Product B", canonical_url="https://example.com/cursor-b")
+    await make_product(db_session, name="Cursor Product A", canonical_url="https://example.com/cursor-a")
+    await make_product(db_session, name="Cursor Product B", canonical_url="https://example.com/cursor-b")
     await db_session.commit()
 
     first = await client.get("/api/v1/admin/products", headers=service_header, params={"limit": 1})
@@ -267,8 +266,8 @@ async def test_admin_products_cursor_pagination(client, db_session, make_product
 
 @pytest.mark.asyncio
 async def test_admin_executions_cursor_pagination(client, db_session, make_execution, service_header):
-    e1 = await make_execution(db_session, order_id=501, vcn_id=601)
-    e2 = await make_execution(db_session, order_id=502, vcn_id=602)
+    await make_execution(db_session, order_id=501, vcn_id=601)
+    await make_execution(db_session, order_id=502, vcn_id=602)
     await db_session.commit()
 
     first = await client.get("/api/v1/admin/executions", headers=service_header, params={"limit": 1})

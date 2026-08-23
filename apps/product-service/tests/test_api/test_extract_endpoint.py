@@ -56,7 +56,7 @@ async def test_extract_async_job_path_with_monkeypatch(client, monkeypatch, user
     from src.services.extraction_waterfall import ExtractionResult
     from src.services.extraction_waterfall import ExtractionWaterfallService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="extracting",
             method="playwright_llm",
@@ -85,7 +85,7 @@ async def test_extract_blocks_prohibited_category(client, db_session, monkeypatc
     from src.services.prohibited_checker import ProhibitedDecision
     from src.services.prohibited_checker import ProhibitedCheckerService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",
@@ -121,7 +121,7 @@ async def test_extract_prohibited_escalates_to_hitl_with_order_id(client, db_ses
     from src.services.prohibited_checker import ProhibitedDecision
     from src.services.prohibited_checker import ProhibitedCheckerService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",
@@ -155,7 +155,7 @@ async def test_extract_idempotent_for_same_url(client, db_session, monkeypatch, 
     from src.services.extraction_waterfall import ExtractionResult
     from src.services.extraction_waterfall import ExtractionWaterfallService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="completed",
             method="json_ld",
@@ -186,7 +186,7 @@ async def test_extract_async_job_is_deduped(client, db_session, monkeypatch, use
     from src.services.extraction_waterfall import ExtractionResult
     from src.services.extraction_waterfall import ExtractionWaterfallService
 
-    async def fake_extract(self, canonical_url: str, platform: str):
+    async def fake_extract(self, canonical_url: str, platform: str, scrape_config=None):
         return ExtractionResult(
             status="extracting",
             method="playwright_llm",

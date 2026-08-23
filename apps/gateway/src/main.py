@@ -13,7 +13,15 @@ from sk_shared.database import SessionLocal
 from src.core.dependencies import get_db
 from sk_shared.events import EVENT_DELIVERY_CONFIRMED, EVENT_DELIVERY_STATUS_CHANGED, event_channel
 from sk_shared.redis_client import get_redis_client
-from src.services.delivery_events import apply_delivery_confirmed_envelope, apply_delivery_status_envelope
+from src.services.delivery_events import (
+    apply_delivery_confirmed_envelope,
+    apply_delivery_status_envelope,
+    apply_product_extracted_envelope,
+    apply_product_extraction_failed_envelope,
+)
+
+EVENT_PRODUCT_EXTRACTED = "product.extracted"
+EVENT_PRODUCT_EXTRACTION_FAILED = "product.extraction_failed"
 from src.core.http_client import InternalServiceClient
 from src.core.middleware import RequestIDMiddleware, SecurityHeadersMiddleware
 from src.core.logging import setup_logging, logger
@@ -21,7 +29,12 @@ from src.core.metrics import setup_metrics
 
 
 async def delivery_event_listener(app: FastAPI) -> None:
-    channels = [event_channel(EVENT_DELIVERY_STATUS_CHANGED), event_channel(EVENT_DELIVERY_CONFIRMED)]
+    channels = [
+        event_channel(EVENT_DELIVERY_STATUS_CHANGED),
+        event_channel(EVENT_DELIVERY_CONFIRMED),
+        event_channel(EVENT_PRODUCT_EXTRACTED),
+        event_channel(EVENT_PRODUCT_EXTRACTION_FAILED),
+    ]
     pubsub = app.state.redis.redis.pubsub()
     await pubsub.subscribe(*channels)
     try:
@@ -45,6 +58,26 @@ async def delivery_event_listener(app: FastAPI) -> None:
                 continue
 
             event_name = envelope.get("event")
+
+            # This listener runs once per uvicorn worker process (4 here) —
+            # Redis pub/sub fans a single publish out to every subscriber,
+            # so with no dedup every event was processed once per worker.
+            # Harmless for the delivery handlers (idempotent status checks
+            # mostly caught it), but apply_product_extracted_envelope's
+            # credit-reservation deduction isn't idempotent against a
+            # same-process-generation race: live-tested and reproduced a
+            # genuine double-deduction (two workers both read
+            # status="url_received" before either committed the transition
+            # to "offer_presented"). Dedup by event_id — same SETNX pattern
+            # already used for the AfterShip webhook in notification-service.
+            event_id = envelope.get("event_id")
+            if event_id:
+                claimed = await app.state.redis.redis.set(
+                    f"sk:events:dedup:{event_id}", "1", nx=True, ex=300
+                )
+                if not claimed:
+                    continue
+
             # BUG-08 FIX: Wrap DB session block in try/except to prevent listener death on DB errors
             try:
                 async with SessionLocal() as session:
@@ -52,6 +85,10 @@ async def delivery_event_listener(app: FastAPI) -> None:
                         await apply_delivery_status_envelope(session, envelope)
                     elif event_name == EVENT_DELIVERY_CONFIRMED:
                         await apply_delivery_confirmed_envelope(session, envelope)
+                    elif event_name == EVENT_PRODUCT_EXTRACTED:
+                        await apply_product_extracted_envelope(session, envelope)
+                    elif event_name == EVENT_PRODUCT_EXTRACTION_FAILED:
+                        await apply_product_extraction_failed_envelope(session, envelope)
             except Exception as exc:
                 logger.error("Delivery event processing failed event=%s error=%s", event_name, exc, exc_info=True)
                 # Continue the loop — do not propagate; individual message errors must not kill the listener

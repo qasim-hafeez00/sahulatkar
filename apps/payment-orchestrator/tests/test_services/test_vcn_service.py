@@ -3,7 +3,6 @@ Unit tests for VcnService business logic.
 Ensures DDD compliance (no direct Loan mutations) and proper event emission.
 """
 from decimal import Decimal
-from dataclasses import asdict
 
 import pytest
 from sqlalchemy import select
@@ -35,6 +34,26 @@ async def test_issue_vcn_success(db_session, redis_mock, test_user, seed_signed_
     events = result.scalars().all()
     assert len(events) == 1
     assert events[0].payload["payload"]["order_id"] == order.id
+
+
+async def test_issue_vcn_success_after_down_payment_received(db_session, redis_mock, test_user, seed_signed_order):
+    """Live-verified regression: by the time the queued vcn.issue job actually
+    runs (after confirm_down_payment's Gateway notification advances Order.status),
+    the order is in DOWN_PAYMENT_RECEIVED, not CONTRACTS_SIGNED — issue_vcn must
+    accept both."""
+    from sk_shared.models.order import Order
+
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+    order_row = await db_session.get(Order, order.id)
+    order_row.status = "down_payment_received"
+    await db_session.commit()
+
+    service = VcnService(db_session, redis_mock)
+    card = await service.issue_vcn(order_id=order.id, amount_pkr=Decimal("5200"))
+
+    assert card.status == "active"
+    assert card.order_id == order.id
 
 
 async def test_issue_vcn_blocks_without_signed_contract(db_session, redis_mock, test_user, seed_signed_order):
@@ -111,7 +130,7 @@ async def test_confirm_down_payment_is_idempotent_event_wise(db_session, redis_m
     """Verifies that calling confirm_down_payment multiple times is safe (emits multiple events which are deduped downstream)."""
     user, _ = test_user
     order, _ = await seed_signed_order(user.id)
-    
+
     service = VcnService(db_session, redis_mock)
     await service.confirm_down_payment(order_id=order.id, amount_pkr=Decimal("1300"), gateway_txn_id="txn_a")
     await service.confirm_down_payment(order_id=order.id, amount_pkr=Decimal("1300"), gateway_txn_id="txn_b")
@@ -122,6 +141,71 @@ async def test_confirm_down_payment_is_idempotent_event_wise(db_session, redis_m
     )
     events = result.scalars().all()
     assert len(events) == 2
+
+
+async def test_confirm_down_payment_queues_gateway_notification_when_txn_found(
+    db_session, redis_mock, test_user, seed_signed_order
+):
+    """P0-01: a real down payment must also queue a control event that makes
+    OutboxPublisher call Gateway's /internal/payments/{id}/confirm — otherwise
+    Gateway's Order.status never advances past CONTRACTS_SIGNED for a real
+    (non-dev-simulated) payment.
+    """
+    from sk_shared.models.payment import PaymentTransaction
+
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    txn = PaymentTransaction(
+        user_id=user.id,
+        order_id=order.id,
+        amount=1300,
+        status="initiated",
+        gateway="jazzcash",
+        transaction_type="down_payment",
+    )
+    db_session.add(txn)
+    await db_session.flush()
+
+    service = VcnService(db_session, redis_mock)
+    await service.confirm_down_payment(
+        order_id=order.id,
+        amount_pkr=Decimal("1300"),
+        gateway_txn_id="txn_gw_001",
+    )
+    await db_session.flush()
+
+    result = await db_session.execute(
+        select(OutboxEvent).where(OutboxEvent.event_name == "gateway.payment_confirmed")
+    )
+    events = result.scalars().all()
+    assert len(events) == 1
+    assert events[0].payload == {
+        "payment_id": txn.id,
+        "gateway_txn_id": "txn_gw_001",
+        "status": "confirmed",
+    }
+
+
+async def test_confirm_down_payment_skips_gateway_notification_when_no_txn(
+    db_session, redis_mock, test_user, seed_signed_order
+):
+    """No matching Gateway PaymentTransaction (e.g. test/dev seeding without one)
+    must not raise — it just can't notify Gateway, so no control event is queued.
+    """
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+
+    service = VcnService(db_session, redis_mock)
+    await service.confirm_down_payment(
+        order_id=order.id, amount_pkr=Decimal("1300"), gateway_txn_id="txn_none"
+    )
+    await db_session.flush()
+
+    result = await db_session.execute(
+        select(OutboxEvent).where(OutboxEvent.event_name == "gateway.payment_confirmed")
+    )
+    assert result.scalars().all() == []
 
 
 async def test_vcn_pan_starts_with_4(db_session, redis_mock, test_user, seed_signed_order):

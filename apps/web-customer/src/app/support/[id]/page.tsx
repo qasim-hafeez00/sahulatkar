@@ -19,15 +19,15 @@ export default function TicketDetailPage() {
   const [isSending, setIsSending] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
+  const load = () => {
+    supportApi.get(ticketId).then(setTicket).finally(() => setLoaded(true))
+  }
+
   useEffect(() => {
     // Auth is enforced server-side by middleware.ts before this page ever renders.
     load()
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [ticketId])
-
-  const load = () => {
-    supportApi.get(ticketId).then(setTicket).finally(() => setLoaded(true))
-  }
 
   const handleReply = async (e: React.FormEvent) => {
     e.preventDefault()

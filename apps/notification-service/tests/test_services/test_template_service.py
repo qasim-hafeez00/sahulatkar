@@ -1,4 +1,3 @@
-import pytest
 from src.services.template_service import TemplateService
 
 def test_sms_template_max_160_chars():

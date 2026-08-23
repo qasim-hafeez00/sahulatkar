@@ -16,11 +16,26 @@ target_metadata = Base.metadata
 config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL", config.get_main_option("sqlalchemy.url")))
 
 def do_run_migrations(connection: Connection) -> None:
-    from sqlalchemy import String
+    from sqlalchemy import text
+
+    # Several revision IDs in this project (e.g. "020_financial_accounting_remaining")
+    # exceed Alembic's default alembic_version.version_num VARCHAR(32). Alembic has
+    # no real `configure()` option to widen this column at creation time — passing
+    # version_num_col_type is silently ignored — so it's done explicitly here,
+    # both for a fresh table and to widen one already created at the old size.
+    connection.execute(text(
+        "CREATE TABLE IF NOT EXISTS alembic_version ("
+        "version_num VARCHAR(255) NOT NULL, "
+        "CONSTRAINT alembic_version_pkc PRIMARY KEY (version_num))"
+    ))
+    connection.execute(text(
+        "ALTER TABLE alembic_version ALTER COLUMN version_num TYPE VARCHAR(255)"
+    ))
+    connection.commit()
+
     context.configure(
         connection=connection,
         target_metadata=target_metadata,
-        version_num_col_type=String(128),
         transaction_per_migration=True,
     )
     with context.begin_transaction():

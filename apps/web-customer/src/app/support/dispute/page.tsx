@@ -29,11 +29,6 @@ export default function DisputePage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [loaded, setLoaded] = useState(false)
 
-  useEffect(() => {
-    // Auth is enforced server-side by middleware.ts before this page ever renders.
-    Promise.all([ordersApi.list(), loadTickets()]).then(([o]) => setOrders(o)).finally(() => setLoaded(true))
-  }, [])
-
   const loadTickets = () =>
     Promise.all([
       supportApi.list("refund_request"),
@@ -45,6 +40,11 @@ export default function DisputePage() {
       setTickets(merged)
       return merged
     })
+
+  useEffect(() => {
+    // Auth is enforced server-side by middleware.ts before this page ever renders.
+    Promise.all([ordersApi.list(), loadTickets()]).then(([o]) => setOrders(o)).finally(() => setLoaded(true))
+  }, [])
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault()

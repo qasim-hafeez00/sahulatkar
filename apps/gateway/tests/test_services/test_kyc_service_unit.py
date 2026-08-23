@@ -14,13 +14,12 @@ import pytest
 import sys
 from pathlib import Path
 from datetime import datetime, timezone
-from unittest.mock import AsyncMock, MagicMock, patch, call
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from sk_shared.models.kyc import (
     KycStatus,
     UserKycVerification,
     CustomerProfile,
-    KycVerificationQueue,
 )
 
 
@@ -527,7 +526,7 @@ class TestSubmitForVerification:
             "ROR mutant (not removed) skips the add."
         )
         # Verify at least one added object is queue-like (has kyc_verification_id)
-        with patch("src.services.kyc.KycVerificationQueue") as MockQueue:
+        with patch("src.services.kyc.KycVerificationQueue"):
             # Confirm the service creates a queue object — already checked via add call
             pass
 
