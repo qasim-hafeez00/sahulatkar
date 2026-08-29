@@ -47,9 +47,11 @@ from src.schemas.admin import (
 )
 from src.services.audit_service import AuditService
 from src.services.dlq_service import DLQService
+from src.services.execution_reaper_service import ExecutionReaperService
 from src.services.merchant_service import MerchantService
 from src.services.product_catalog_service import ProductCatalogService
 from src.services.product_lifecycle_service import ProductLifecycleService
+from src.services.prohibited_checker import ProhibitedCheckerService
 from src.services.checkout.agent import CheckoutAgentService
 
 
@@ -350,13 +352,25 @@ async def retry_execution(
     execution = await repo.find_by_uuid(execution_uuid)
     if not execution:
         raise HTTPException(status_code=404, detail="EXECUTION_NOT_FOUND")
-    
+
     if execution.status == "succeeded":
         raise HTTPException(status_code=409, detail="EXECUTION_ALREADY_SUCCEEDED")
-    
+
     if execution.status == "running":
-        return AdminExecutionRetryResponse(status="running", execution_id=str(execution.uuid))
-    
+        # HIGH-02 fix: this used to no-op unconditionally on 'running', which
+        # meant a row stuck 'running' forever because its owning worker
+        # crashed had NO recovery path at all -- not even a manual retry.
+        # If it's been running long enough to be considered stuck (see
+        # ExecutionReaperService), reap it right now instead of waiting for
+        # the next scheduled sweep, then fall through to the normal requeue
+        # below. A genuinely in-flight execution still gets the "still
+        # running, come back later" response.
+        reaper = ExecutionReaperService(db)
+        if reaper.is_stuck(execution):
+            await reaper.reap(execution)
+        else:
+            return AdminExecutionRetryResponse(status="running", execution_id=str(execution.uuid))
+
     service = CheckoutAgentService(db, redis)
     await service.requeue_execution(execution)
     return AdminExecutionRetryResponse(status="queued", execution_id=str(execution.uuid))
@@ -430,6 +444,7 @@ async def list_prohibited_categories(
 async def upsert_prohibited_category(
     payload: ProhibitedCategoryCreateRequest,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: None = Depends(require_service_token),
 ):
     repo = ProhibitedCategoryRepository(db)
@@ -439,6 +454,10 @@ async def upsert_prohibited_category(
         shariah_basis=payload.shariah_basis,
     )
     await db.commit()
+    # MEDIUM fix: invalidate the negative-result cache so a category/keyword
+    # added just now isn't masked by an up-to-5-minute-old "not prohibited"
+    # cache entry for a URL that would now match it.
+    await ProhibitedCheckerService.invalidate_cache(redis)
     return ProhibitedCategoryUpsertResponse(status="created" if created else "updated", id=row.id)
 
 
@@ -446,6 +465,7 @@ async def upsert_prohibited_category(
 async def delete_prohibited_category(
     cat_id: int,
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: None = Depends(require_service_token),
 ):
     repo = ProhibitedCategoryRepository(db)
@@ -453,6 +473,7 @@ async def delete_prohibited_category(
     if not success:
         raise HTTPException(status_code=404, detail="CATEGORY_NOT_FOUND")
     await db.commit()
+    await ProhibitedCheckerService.invalidate_cache(redis)
     return ProhibitedCategoryDeleteResponse(status="deleted", category_id=cat_id)
 
 
@@ -629,8 +650,14 @@ async def get_extraction_stats(
 @router.post("/prohibited-categories/sync")
 async def sync_prohibited_categories(
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
     _: None = Depends(require_service_token),
 ):
+    # Even though this endpoint doesn't itself mutate rows today, invalidate
+    # the negative-result cache defensively so any out-of-band catalog
+    # change a "sync" is meant to pick up isn't masked by stale cache
+    # entries until they naturally expire.
+    await ProhibitedCheckerService.invalidate_cache(redis)
     return {"status": "synced", "count": 0}
 
 @router.get("/extraction-waterfall/config")

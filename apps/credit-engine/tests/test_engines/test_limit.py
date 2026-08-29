@@ -1,7 +1,63 @@
+from datetime import date, timedelta
+
 import pytest
 
+from sk_shared.models.payment import Installment, Loan
 from src.engines.limit import LimitEngine
 from src.policy.rule_policy import RulePolicy
+
+
+async def _seed_loan(
+    db_session,
+    user,
+    *,
+    order_id: int,
+    status: str = "fully_paid",
+    late_fee_total: float = 0.0,
+    installment_status: str = "paid",
+    installment_late_fee: float = 0.0,
+) -> None:
+    """A completed BNPL loan cycle for LimitEngine.has_repayment_track_record tests. Principal/
+    profit figures are arbitrary but internally consistent; only status/late_fee fields matter
+    to the graduation rule itself."""
+    loan = Loan(
+        order_id=order_id,
+        user_id=user.id,
+        loan_number=f"SAK-LOAN-TEST-{order_id}",
+        principal_amount=4000.0,
+        profit_amount=200.0,
+        total_repayable=4200.0,
+        down_payment_amount=1000.0,
+        balance_financed=3200.0,
+        profit_rate_pct=5.0,
+        plan_type="pay_in_4",
+        installment_count=4,
+        installment_amount=800.0,
+        status=status,
+        total_paid=4200.0 if status == "fully_paid" else 0.0,
+        total_outstanding=0.0 if status == "fully_paid" else 3200.0,
+        late_fee_total=late_fee_total,
+    )
+    db_session.add(loan)
+    await db_session.flush()
+    for i in range(1, 5):
+        db_session.add(Installment(
+            loan_id=loan.id,
+            user_id=user.id,
+            installment_number=i,
+            is_down_payment=False,
+            principal_portion=750.0,
+            profit_portion=50.0,
+            total_amount=800.0,
+            due_date=date.today() - timedelta(days=30 * (5 - i)),
+            status=installment_status,
+            paid_amount=800.0 if installment_status == "paid" else 0.0,
+            days_overdue=0,
+            late_fee_amount=installment_late_fee,
+            late_fee_waived=False,
+            retry_count=0,
+        ))
+    await db_session.commit()
 
 
 def test_prohibited_category_blocks_overlay():
@@ -83,3 +139,80 @@ async def test_portfolio_concentration_flags_high_utilization(db_session, approv
     )
     assert result.blocked is False
     assert "high_utilization" in result.flags
+
+
+# ── has_repayment_track_record (Phase 6 cold-start graduation bugfix) ──────────────────────
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_false_for_applicant_with_no_loan_history(db_session, approved_user):
+    """(a) A brand-new applicant with zero completed loans has no track record to graduate
+    on — existing cold-start behavior is preserved for them."""
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_false_below_the_graduation_threshold(db_session, approved_user):
+    # Two clean, fully-repaid loans is real history, but RulePolicy.graduation_min_repaid_loans
+    # defaults to 3 — a single or a pair of completed cycles isn't yet the repeated pattern the
+    # rule requires.
+    await _seed_loan(db_session, approved_user, order_id=1)
+    await _seed_loan(db_session, approved_user, order_id=2)
+
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_true_for_strong_clean_history(db_session, approved_user):
+    """(b) At (or above) the threshold, with every loan fully repaid and every installment
+    clean, the applicant graduates."""
+    await _seed_loan(db_session, approved_user, order_id=1)
+    await _seed_loan(db_session, approved_user, order_id=2)
+    await _seed_loan(db_session, approved_user, order_id=3)
+
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is True
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_false_when_any_loan_carries_a_late_fee(db_session, approved_user):
+    """(c) Mixed history: three fully-paid loans, but one of them accrued a late fee at some
+    point. ANY negative signal disqualifies the whole applicant, not just that one loan."""
+    await _seed_loan(db_session, approved_user, order_id=1)
+    await _seed_loan(db_session, approved_user, order_id=2)
+    await _seed_loan(db_session, approved_user, order_id=3, late_fee_total=50.0, installment_late_fee=50.0)
+
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_false_when_an_installment_was_ever_overdue(db_session, approved_user):
+    # Loan-level late_fee_total can be 0 (e.g. a late fee was waived) while an installment still
+    # carries an "overdue" status from its history — checked independently so this can't slip
+    # through.
+    await _seed_loan(db_session, approved_user, order_id=1)
+    await _seed_loan(db_session, approved_user, order_id=2)
+    await _seed_loan(db_session, approved_user, order_id=3, installment_status="overdue")
+
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_ignores_loans_that_are_not_fully_paid(db_session, approved_user):
+    # An active/in-progress loan (however clean so far) doesn't count toward the threshold —
+    # only completed cycles do.
+    await _seed_loan(db_session, approved_user, order_id=1)
+    await _seed_loan(db_session, approved_user, order_id=2)
+    await _seed_loan(db_session, approved_user, order_id=3, status="active", installment_status="pending")
+
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, str(approved_user.uuid)) is False
+
+
+@pytest.mark.asyncio
+async def test_repayment_track_record_invalid_user_id_returns_false(db_session):
+    engine = LimitEngine(RulePolicy(), maximum_limit=500000.0)
+    assert await engine.has_repayment_track_record(db_session, "not-a-uuid") is False

@@ -156,6 +156,32 @@ async def test_refund_webhook_deduplicates_repeated_events(client, test_user, re
     assert resp2.json()["status"] == "duplicate"
 
 
+async def test_refund_webhook_deduplicates_retry_with_different_body_same_reference(client, test_user, redis_mock, seed_signed_order):
+    """PO-CRIT-04 regression: refund-completion dedup must key on
+    refund_reference (the stable id in this payload), not a hash of the raw
+    body -- otherwise a retry with different bytes (e.g. an added field)
+    slips past dedup and double-settles the refund."""
+    user, _ = test_user
+    order, _ = await seed_signed_order(user.id)
+    refund = await _seed_pending_refund(order.id, user.id, "refund-webhook-retry-diffbody-001")
+
+    gw_client = SafepayClient(settings.SAFEPAY_API_KEY, settings.SAFEPAY_API_SECRET, webhook_secret=settings.SAFEPAY_WEBHOOK_SECRET)
+
+    payload1 = {"refund_reference": refund.refund_reference, "gateway_refund_id": "sp_rfnd_retry", "status": "success"}
+    body1 = json.dumps(payload1).encode()
+    sig1 = gw_client.sign_payload(body1)
+
+    payload2 = {**payload1, "retried": True}
+    body2 = json.dumps(payload2).encode()
+    sig2 = gw_client.sign_payload(body2)
+
+    resp1 = await client.post("/api/v1/webhooks/safepay/refund", content=body1, headers={"X-Safepay-Signature": sig1})
+    resp2 = await client.post("/api/v1/webhooks/safepay/refund", content=body2, headers={"X-Safepay-Signature": sig2})
+
+    assert resp1.json()["status"] == "ok"
+    assert resp2.json()["status"] == "duplicate"
+
+
 async def test_refund_webhook_ignores_non_success_status(client, test_user, seed_signed_order):
     user, _ = test_user
     order, _ = await seed_signed_order(user.id)

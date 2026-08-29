@@ -127,7 +127,7 @@ async def require_internal_token(request: Request) -> None:
     """
     token = request.headers.get("X-Internal-Token", "")
     if not settings.INTERNAL_API_TOKEN:
-        if settings.ENVIRONMENT != "local":
+        if not settings.test_payment_fallbacks_enabled:
             raise HTTPException(status_code=503, detail="INTERNAL_AUTH_NOT_CONFIGURED")
         import logging
         logging.getLogger(__name__).warning(

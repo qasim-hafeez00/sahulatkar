@@ -149,7 +149,13 @@ class ContractSignerService:
         otp_code: str,
         ip_address: str | None,
         device_id: str | None,
-    ) -> tuple[MurabahaContract, Order]:
+    ) -> tuple[MurabahaContract, Order, tuple[str, str] | None]:
+        """Returns (contract, order, pending_event). pending_event, when not
+        None, is a (channel, message) pair for EVENT_LOAN_CREATED that the
+        caller MUST publish only after its own `db.commit()` succeeds — see
+        HIGH-1 in docs/PRODUCTION_GAPS_REPORT_2026-08.md: publishing before
+        commit lets a fast consumer (e.g. Ledger Service) query for a loan
+        that doesn't exist in the DB yet."""
         result = await db.execute(
             select(MurabahaContract).where(
                 MurabahaContract.id == contract_id,
@@ -231,7 +237,7 @@ class ContractSignerService:
         )
         if not all_signed:
             await db.flush()
-            return contract, order
+            return contract, order, None
 
         sibling_orders = (
             await db.execute(select(Order).where(Order.id.in_(sibling_order_ids)))
@@ -299,7 +305,15 @@ class ContractSignerService:
 
         await db.flush()
 
-        # Cross-Service: Publish loan.created so Ledger Service can post initial GL entries.
+        # Cross-Service: loan.created must be delivered so Ledger Service can post
+        # initial GL entries. HIGH-1 fix: do NOT publish here -- this method's
+        # writes (loan, installments, order.loan_id) are not committed yet, they
+        # are only flushed within the caller's still-open transaction. A consumer
+        # reacting to the event before the caller's db.commit() can query for
+        # this loan and find nothing. Build the envelope now (payload only
+        # depends on data already flushed/known in-memory) but hand the
+        # (channel, message) pair back to the caller, who must publish it only
+        # after db.commit() succeeds.
         from sk_shared.events import EVENT_LOAN_CREATED, build_event_envelope, event_channel
         envelope = build_event_envelope(
             event=EVENT_LOAN_CREATED,
@@ -314,7 +328,7 @@ class ContractSignerService:
                 "installment_count": loan.installment_count,
             },
         )
-        await redis.publish(event_channel(EVENT_LOAN_CREATED), envelope.to_json())
+        pending_event = (event_channel(EVENT_LOAN_CREATED), envelope.to_json())
 
         await notify(
             db, user_id, "credit",
@@ -323,4 +337,4 @@ class ContractSignerService:
             source_event="loan.created", source_reference=f"loan:{loan.id}",
         )
 
-        return contract, order
+        return contract, order, pending_event

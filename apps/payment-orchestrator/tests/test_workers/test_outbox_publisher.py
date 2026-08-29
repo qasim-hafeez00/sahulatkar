@@ -4,10 +4,13 @@ Tests for OutboxPublisher worker.
 Covers:
   - Publisher processes pending events and marks them published
   - Publisher publishes vcn.issue events to Redis VCN queue
-  - Publisher publishes standard events via pub/sub channel
+  - Publisher hands standard events off durably via a Redis Stream (XADD)
   - Publisher increments retry_count on failure
   - Publisher stops processing events past retry_count=5
   - stop() method signals graceful shutdown
+  - PO-CRIT-03: stream delivery loop (XREADGROUP/XACK) actually forwards to
+    the legacy pub/sub channel, and a crash between XREADGROUP and XACK
+    leaves the entry claimable (XAUTOCLAIM) instead of losing it
 """
 import json
 from unittest.mock import AsyncMock, patch
@@ -15,7 +18,11 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.models.outbox import OutboxEvent
-from src.workers.outbox_publisher import OutboxPublisher
+from src.workers.outbox_publisher import (
+    OUTBOX_CONSUMER_GROUP,
+    OUTBOX_STREAM_KEY,
+    OutboxPublisher,
+)
 
 pytestmark = pytest.mark.asyncio
 
@@ -77,8 +84,9 @@ async def test_publisher_increments_retry_count_on_failure(db_session, redis_moc
 
     publisher = OutboxPublisher(redis_mock)
 
-    # Make publish raise an exception
-    with patch.object(redis_mock, "publish", side_effect=Exception("Redis down")):
+    # Standard events are now handed off durably via XADD (see PO-CRIT-03) —
+    # make that call raise to exercise the same retry/backoff path.
+    with patch.object(redis_mock, "xadd", side_effect=Exception("Redis down")):
         await publisher._process_event(db_session, event)
 
     assert event.status == "failed"
@@ -174,6 +182,97 @@ async def test_publisher_retries_gateway_payment_confirmed_on_http_failure(db_se
     assert event.status == "failed"
     assert event.retry_count == 1
     assert "connection refused" in event.last_error
+
+
+async def test_deliver_stream_events_publishes_to_channel_and_acks(db_session, redis_mock):
+    """PO-CRIT-03: a standard event durably queued via _process_event (XADD)
+    must be forwarded to its legacy pub/sub channel and XACK'd by
+    deliver_stream_events(), leaving nothing pending in the consumer group."""
+    from sk_shared.events import event_channel
+
+    event = await _create_outbox_event(
+        db_session,
+        "payment.confirmed",
+        {"payload": {"workflow_id": 99}},
+    )
+
+    publisher = OutboxPublisher(redis_mock)
+    await publisher._process_event(db_session, event)
+    await db_session.commit()
+    assert event.status == "published"
+
+    received = []
+
+    async def _fake_publish(channel, message):
+        received.append((channel, message))
+
+    with patch.object(redis_mock, "publish", side_effect=_fake_publish):
+        await publisher.deliver_stream_events()
+
+    assert len(received) == 1
+    channel, message = received[0]
+    assert channel == event_channel("payment.confirmed")
+    assert json.loads(message) == {"payload": {"workflow_id": 99}}
+
+    # Fully acknowledged -- nothing left pending in the consumer group.
+    pending = await redis_mock.redis.xpending(OUTBOX_STREAM_KEY, OUTBOX_CONSUMER_GROUP)
+    assert pending["pending"] == 0
+
+
+async def test_crashed_consumer_entry_is_reclaimed_not_lost(db_session, redis_mock):
+    """PO-CRIT-03 durability regression test.
+
+    Simulates a consumer/worker that read a stream entry (XREADGROUP) and
+    then crashed before XACK'ing it -- exactly what a process kill between
+    XREADGROUP and XACK looks like from Redis's point of view: the entry
+    stays in the consumer group's Pending Entries List, attributed to a
+    consumer that will never come back.
+
+    Asserts the event is NOT lost: a second worker instance (e.g. this
+    worker after a restart, or another replica) reclaims it via XAUTOCLAIM
+    and completes delivery.
+    """
+    event = await _create_outbox_event(
+        db_session,
+        "payment.confirmed",
+        {"payload": {"workflow_id": 100}},
+    )
+
+    crashed_publisher = OutboxPublisher(redis_mock, consumer_name="crashed-consumer")
+    await crashed_publisher._process_event(db_session, event)
+    await db_session.commit()
+
+    # Simulate the crash: read the entry into the PEL (as XREADGROUP does)
+    # but never XACK it.
+    await crashed_publisher._ensure_stream_group()
+    read = await redis_mock.xreadgroup(
+        OUTBOX_CONSUMER_GROUP, "crashed-consumer", streams={OUTBOX_STREAM_KEY: ">"}, count=10
+    )
+    assert read, "expected the XADD'd entry to be readable by XREADGROUP"
+
+    # Confirm it is sitting unacknowledged in the PEL -- not delivered, not lost.
+    pending_before = await redis_mock.redis.xpending(OUTBOX_STREAM_KEY, OUTBOX_CONSUMER_GROUP)
+    assert pending_before["pending"] == 1
+
+    # A second worker instance comes along. Bypass the real idle-time window
+    # (STREAM_CLAIM_MIN_IDLE_MS) so the test doesn't have to sleep 30s --
+    # what's under test is that XAUTOCLAIM reclaims it at all, not the timing.
+    recovering_publisher = OutboxPublisher(redis_mock, consumer_name="recovering-consumer")
+    received = []
+
+    async def _fake_publish(channel, message):
+        received.append((channel, message))
+
+    with patch("src.workers.outbox_publisher.STREAM_CLAIM_MIN_IDLE_MS", 0), \
+         patch.object(redis_mock, "publish", side_effect=_fake_publish):
+        await recovering_publisher.deliver_stream_events()
+
+    # The event was reclaimed and delivered by the second consumer, not dropped.
+    assert len(received) == 1
+    assert json.loads(received[0][1]) == {"payload": {"workflow_id": 100}}
+
+    pending_after = await redis_mock.redis.xpending(OUTBOX_STREAM_KEY, OUTBOX_CONSUMER_GROUP)
+    assert pending_after["pending"] == 0
 
 
 async def test_publisher_stop_signals_graceful_shutdown():

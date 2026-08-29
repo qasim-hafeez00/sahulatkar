@@ -82,3 +82,47 @@ async def test_webhook_wrong_content_type_rejected(client: AsyncClient):
     )
     assert response.status_code == 415
     assert response.json()["detail"] == "UNSUPPORTED_CONTENT_TYPE: application/json required"
+
+
+async def test_jazzcash_webhook_dedup_via_db_fallback_when_redis_key_missing(
+    client: AsyncClient, db_session, redis_mock
+):
+    """MEDIUM fix: webhook dedup previously relied solely on a 24h Redis
+    SETNX marker with no fallback. This proves the DB-backed second layer
+    actually catches a duplicate when Redis has no marker for the key --
+    simulated directly by pre-seeding processed_webhook_events (NOT by
+    going through Redis first), so this only passes if _enqueue_webhook
+    genuinely checks the DB and not just Redis.
+    """
+    from datetime import datetime, timezone
+
+    from sk_shared.constants import QueueName
+    from sk_shared.models.webhook import ProcessedWebhookEvent
+
+    idempotency_key = "jazzcash:TXN-DB-DEDUP-1"
+    db_session.add(
+        ProcessedWebhookEvent(
+            idempotency_key=idempotency_key,
+            gateway="jazzcash",
+            processed_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    # Confirm Redis genuinely has no marker for this key before the call.
+    assert await redis_mock.redis.get(f"sk:webhook:processed:{idempotency_key}") is None
+
+    raw_body = b'{"pp_ResponseCode":"000","pp_TxnRefNo":"TXN-DB-DEDUP-1"}'
+    response = await client.post(
+        "/api/v1/webhooks/payment/jazzcash",
+        content=raw_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-JazzCash-Signature": _signature(settings.JAZZCASH_WEBHOOK_SECRET, raw_body),
+        },
+    )
+    assert response.status_code == 200
+
+    # The duplicate must NOT have been re-enqueued for processing.
+    queue_len = await redis_mock.redis.llen(QueueName.PAYMENT_WEBHOOK)
+    assert queue_len == 0

@@ -1,10 +1,12 @@
+import asyncio
 import pytest
 import hashlib
 import pyotp
 from httpx import AsyncClient
+from sqlalchemy import select
 from sk_shared.redis_client import RedisClient
 from sk_shared.security import get_password_hash
-from sk_shared.models.auth import AdminUser
+from sk_shared.models.auth import AdminUser, AdminSession
 from src.core.kms import KMSProvider
 from tests.conftest import TestingSessionLocal
 
@@ -37,6 +39,58 @@ async def test_admin_login_success(client: AsyncClient, db_session, redis_mock: 
     token_hash = hashlib.sha256(data["access_token"].encode()).hexdigest()
     session_data = await redis_mock.get(f"sk:auth:admin_session:{token_hash}")
     assert session_data is not None
+
+
+async def test_admin_login_persists_and_enforces_single_session(client: AsyncClient, db_session, redis_mock: RedisClient):
+    """Bug 1 regression: admin_login must actually write to the admin_sessions
+    table (not just Redis) via the AdminSession ORM model, and logging in a
+    second time must revoke the first session row — proving the
+    single-session-per-admin policy is genuinely enforced end-to-end, not
+    silently skipped because the table didn't exist."""
+    async with TestingSessionLocal() as session:
+        admin = AdminUser(
+            email="dualsession@test.com",
+            password_hash=get_password_hash("ValidPass123"),
+            mfa_enabled=False,
+        )
+        session.add(admin)
+        await session.commit()
+        await session.refresh(admin)
+        admin_id = admin.id
+
+    payload = {"email": "dualsession@test.com", "password": "ValidPass123"}
+
+    # First login
+    resp1 = await client.post("/api/v1/admin/auth/login", json=payload)
+    assert resp1.status_code == 200
+    token_hash_1 = hashlib.sha256(resp1.json()["access_token"].encode()).hexdigest()
+
+    async with TestingSessionLocal() as session:
+        rows = (
+            await session.execute(select(AdminSession).where(AdminSession.admin_user_id == admin_id))
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].token_hash == token_hash_1
+        assert rows[0].revoked_at is None
+
+    # Second login — must revoke the first session row and create a new one.
+    resp2 = await client.post("/api/v1/admin/auth/login", json=payload)
+    assert resp2.status_code == 200
+    token_hash_2 = hashlib.sha256(resp2.json()["access_token"].encode()).hexdigest()
+    assert token_hash_2 != token_hash_1
+
+    async with TestingSessionLocal() as session:
+        rows = (
+            await session.execute(
+                select(AdminSession).where(AdminSession.admin_user_id == admin_id).order_by(AdminSession.id)
+            )
+        ).scalars().all()
+        assert len(rows) == 2
+        first, second = rows
+        assert first.token_hash == token_hash_1
+        assert first.revoked_at is not None
+        assert second.token_hash == token_hash_2
+        assert second.revoked_at is None
 
 async def test_admin_login_invalid_password(client: AsyncClient, db_session):
     async with TestingSessionLocal() as session:

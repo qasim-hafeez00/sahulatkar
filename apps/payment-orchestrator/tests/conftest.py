@@ -89,6 +89,22 @@ def setup_keys():
     settings.VCN_ENCRYPTION_KEY = "test-vcn-key"
     settings.RECONCILIATION_AUDIT_DIR = "./tmp/recon"
 
+
+@pytest.fixture(autouse=True)
+def _allow_test_payment_fallbacks(monkeypatch):
+    """HIGH-01: gateway clients/adapters only fall back to fake-success /
+    test-PAN / skipped-signature-verification behavior when BOTH
+    ENVIRONMENT=="local" AND ALLOW_TEST_PAYMENT_FALLBACKS are true (see
+    src/config.py::Settings.test_payment_fallbacks_enabled) — this suite runs
+    with no real gateway credentials and no network access, so it needs those
+    fallbacks enabled by default, same as it always implicitly relied on
+    ENVIRONMENT defaulting to "local" before that flag existed. Individual
+    tests that specifically exercise fail-closed behavior outside local
+    (e.g. tests/test_config.py's production/staging cases) explicitly
+    override this back to False.
+    """
+    monkeypatch.setattr(settings, "ALLOW_TEST_PAYMENT_FALLBACKS", True)
+
 @pytest.fixture(autouse=True)
 def mock_stripe(monkeypatch):
     """Mock all stripe module calls to prevent real Stripe API calls in tests."""

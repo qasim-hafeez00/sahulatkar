@@ -150,7 +150,7 @@ class LithicAdapter(PaymentAdapter):
                 "expiry_year": str(card["exp_year"]),
             }
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT == "local":
+            if settings.test_payment_fallbacks_enabled:
                 logger.warning("Using local Lithic card stub", extra={"error": str(exc)})
                 return {
                     "issuer_card_id": f"lithic_local_{cardholder_id}",
@@ -193,7 +193,7 @@ class LithicAdapter(PaymentAdapter):
 
         secret = settings.LITHIC_WEBHOOK_SECRET
         if not secret:
-            return settings.ENVIRONMENT == "local"
+            return settings.test_payment_fallbacks_enabled
         expected = hmac.new(secret.encode(), body, hashlib.sha256).hexdigest()
         return hmac.compare_digest(expected, signature)
 

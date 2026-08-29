@@ -210,14 +210,28 @@ async def get_offer(
     plan_months: int | None = Query(default=None),
     down_payment_pct: Decimal = Query(default=Decimal("30.0")),
     db: AsyncSession = Depends(get_db),
+    _: None = Depends(require_service_token),
 ):
     repo = ProductRepository(db)
     product = await repo.find_by_uuid(upo_id)
     if product is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="PRODUCT_NOT_FOUND")
-        
+
     if not product.in_stock or product.stock_status == "out_of_stock":
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="OUT_OF_STOCK")
+
+    # P1-05 enforcement (was previously an honest-but-unenforced status flag,
+    # see PricingService.is_shariah_approved): a Murabaha offer must not be
+    # generated/served while the tiered markup structure lacks a real,
+    # traceable Shariah-board approval reference. Checked here — the single
+    # place every offer (single-plan or multi-plan) is produced — rather than
+    # only surfaced for display, which is what let this gate enforce nothing.
+    pricing_service = PricingService()
+    if not pricing_service.is_shariah_approved:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="SHARIAH_APPROVAL_REQUIRED: Murabaha markup structure has no configured Shariah-board approval reference/date",
+        )
 
     min_dp_val = await db.scalar(text("SELECT param_value FROM system_parameters WHERE param_key = 'min_down_payment_pct'"))
     max_dp_val = await db.scalar(text("SELECT param_value FROM system_parameters WHERE param_key = 'max_down_payment_pct'"))
@@ -227,7 +241,6 @@ async def get_offer(
     if down_payment_pct < min_dp or down_payment_pct > max_dp:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=f"INVALID_DOWN_PAYMENT_PERCENTAGE: Must be between {min_dp} and {max_dp}")
 
-    pricing_service = PricingService()
     if plan_months is None:
         offers = pricing_service.calculate_multiple_offers(
             cost_price=Decimal(str(product.cost_price)),

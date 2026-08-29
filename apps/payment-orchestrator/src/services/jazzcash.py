@@ -83,7 +83,7 @@ class JazzCashClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("JAZZCASH_CHARGE_HTTP_ERROR") from exc
             logger.warning(f"JazzCash charge failed: {exc}, returning local stub success")
             data = {
@@ -155,7 +155,7 @@ class JazzCashClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("JAZZCASH_REFUND_HTTP_ERROR") from exc
             logger.warning(f"JazzCash refund failed: {exc}, returning local stub")
             data = {"pp_ResponseCode": "000", "pp_RefundTxnRefNo": f"jc_ref_{uuid4().hex}"}

@@ -11,6 +11,7 @@ from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.models.product import Product
 from src.services.checkout import CheckoutAgentService
+from src.services.checkout.agent import CheckoutCancelledError
 
 
 async def _seed_order_vcn(db_session):
@@ -135,3 +136,102 @@ async def test_mark_failed_escalates_hitl(db_session, redis_mock):
 
     hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.order_id == execution.order_id))
     assert hitl is not None
+
+
+@pytest.mark.asyncio
+async def test_process_job_stops_on_mid_flight_cancellation_during_step(db_session, redis_mock):
+    """HIGH-03: a cancel_job() call (or an order.cancelled event) can flip a
+    PurchaseExecution's status to 'cancelled' from a different DB
+    session/request while process_job is still mid-Playwright-run. The
+    per-step check inside emit_step (form_filler's step-callback) must
+    notice this on the very next step and raise CheckoutCancelledError, and
+    the row must never be clobbered back to 'succeeded'."""
+    order, vcn = await _seed_order_vcn(db_session)
+    execution = PurchaseExecution(
+        order_id=order.id,
+        vcn_id=vcn.id,
+        status="queued",
+        step_reached="queued",
+        queued_at=datetime.now(timezone.utc),
+    )
+    db_session.add(execution)
+    await db_session.commit()
+
+    service = CheckoutAgentService(db_session, redis_mock)
+    service._fetch_vcn_credentials = AsyncMock(return_value={
+        "pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027",
+    })
+
+    raised: dict = {}
+
+    async def fake_run_checkout(**kwargs):
+        # Simulate the external cancellation landing on this execution's row
+        # mid-flight (a different DB session/request in production; same
+        # session here since db_session is what CheckoutAgentService was
+        # constructed with).
+        execution.status = "cancelled"
+        execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await db_session.commit()
+
+        # process_job wired emit_step in as form_filler's step callback
+        # before calling run_checkout -- invoke it the way the real
+        # CheckoutFormFiller would on its next Playwright step.
+        try:
+            await service.form_filler._step_callback("payment_injection")
+        except CheckoutCancelledError as e:
+            raised["error"] = e
+            raise
+        # Should never be reached -- the interrupt above must fire first.
+        return {"merchant_order_id": "SK-1", "merchant_order_url": "https://m.com/order"}
+
+    service.form_filler.run_checkout = fake_run_checkout
+
+    await service.process_job({"execution_id": str(execution.uuid)})
+
+    assert isinstance(raised.get("error"), CheckoutCancelledError)
+
+    await db_session.refresh(execution)
+    assert execution.status != "succeeded"
+    assert execution.merchant_order_id is None
+
+
+@pytest.mark.asyncio
+async def test_process_job_stops_on_cancellation_right_before_succeeded_commit(db_session, redis_mock):
+    """HIGH-03 (final race-window check): a cancellation that lands after
+    the last step check (order_confirmed) but before process_job writes
+    'succeeded' must still be caught -- process_job re-checks the persisted
+    status once more right before that commit."""
+    order, vcn = await _seed_order_vcn(db_session)
+    execution = PurchaseExecution(
+        order_id=order.id,
+        vcn_id=vcn.id,
+        status="queued",
+        step_reached="queued",
+        queued_at=datetime.now(timezone.utc),
+    )
+    db_session.add(execution)
+    await db_session.commit()
+
+    service = CheckoutAgentService(db_session, redis_mock)
+    service._fetch_vcn_credentials = AsyncMock(return_value={
+        "pan": "4242424242424242", "cvv": "123", "expiry_month": "12", "expiry_year": "2027",
+    })
+
+    async def fake_run_checkout(**kwargs):
+        # From the form filler's point of view, the checkout ran to a
+        # completely normal, successful finish (no step ever saw
+        # 'cancelled') -- but the cancellation lands in the gap between
+        # run_checkout returning and process_job's own commit of
+        # status='succeeded'.
+        execution.status = "cancelled"
+        execution.completed_at = datetime.now(timezone.utc).replace(tzinfo=None)
+        await db_session.commit()
+        return {"merchant_order_id": "SK-1", "merchant_order_url": "https://m.com/order"}
+
+    service.form_filler.run_checkout = fake_run_checkout
+
+    await service.process_job({"execution_id": str(execution.uuid)})
+
+    await db_session.refresh(execution)
+    assert execution.status != "succeeded"
+    assert execution.merchant_order_id is None

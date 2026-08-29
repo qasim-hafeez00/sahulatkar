@@ -12,6 +12,7 @@ from sk_shared.models.contracts import WakalahAgreement
 from sk_shared.models.order import Order
 from sk_shared.models.payment import Installment, Loan
 from sk_shared.models.product import Merchant, Product
+from sk_shared.redis_client import RedisClient
 from sk_shared.security import create_access_token, hash_otp
 from src.config import settings
 from tests.conftest import TestingSessionLocal
@@ -143,6 +144,72 @@ async def test_contracts_happy_path(client, test_user, redis_mock, monkeypatch):
             assert float(inst.late_fee_amount or 0) == 0.0
             assert bool(inst.late_fee_waived) is False
             assert int(inst.retry_count or 0) == 0
+
+
+async def test_loan_created_event_published_only_after_commit(client, test_user, redis_mock, monkeypatch):
+    """HIGH-1 regression: EVENT_LOAN_CREATED must be published to Redis only
+    after the enclosing DB transaction (loan + installments) has committed.
+
+    Under the old code, ContractSignerService.sign_murabaha() called
+    redis.publish() *before* returning to the route, i.e. before the route's
+    db.commit(). If Redis blew up at that point, the exception propagated
+    out of the request before db.commit() ever ran, so the sign request
+    failed (500) and the Loan/Installment rows were never durably persisted
+    -- even though from the customer's perspective nothing should depend on
+    Redis being up.
+
+    This test forces redis.publish() to raise and asserts the sign request
+    still succeeds AND the loan is durably committed, proving publish now
+    happens strictly after (and independent of) the commit.
+    """
+    user, token = test_user
+    order = await _seed_order(user.id)
+
+    r_wk_gen = await client.post(
+        "/api/v1/contracts/wakalah/generate",
+        headers=_auth(token),
+        json={"order_id": order.id},
+    )
+    wk_contract_id = r_wk_gen.json()["contract_id"]
+    await redis_mock.set(f"{RedisNS.CONTRACT_OTP}:wakalah:{wk_contract_id}:{user.id}", hash_otp("123456"), 180)
+    r_wk_sign = await client.post(
+        "/api/v1/contracts/wakalah/sign",
+        headers=_auth(token),
+        json={"contract_id": wk_contract_id, "otp_code": "123456"},
+    )
+    assert r_wk_sign.status_code == 200
+
+    r_mb_gen = await client.post(
+        "/api/v1/contracts/murabaha/generate",
+        headers=_auth(token),
+        json={"order_id": order.id, "installment_count": 4},
+    )
+    mb_contract_id = r_mb_gen.json()["contract_id"]
+    await redis_mock.set(f"{RedisNS.CONTRACT_OTP}:murabaha:{mb_contract_id}:{user.id}", hash_otp("654321"), 180)
+
+    async def _boom(self, channel, message):
+        raise RuntimeError("redis unavailable")
+
+    monkeypatch.setattr(RedisClient, "publish", _boom)
+
+    r_mb_sign = await client.post(
+        "/api/v1/contracts/murabaha/sign",
+        headers=_auth(token),
+        json={"contract_id": mb_contract_id, "otp_code": "654321", "confirmation_checkbox": True},
+    )
+    # The sign request must succeed even though the event publish blew up --
+    # publish is best-effort and strictly after commit, not part of the
+    # customer-facing transaction outcome.
+    assert r_mb_sign.status_code == 200
+    assert r_mb_sign.json()["order_status"] == OrderState.CONTRACTS_SIGNED
+
+    async with TestingSessionLocal() as session:
+        loan = await session.scalar(select(Loan).where(Loan.order_id == order.id, Loan.user_id == user.id))
+        assert loan is not None, "loan must be durably committed regardless of Redis publish outcome"
+        installments = (
+            await session.execute(select(Installment).where(Installment.loan_id == loan.id))
+        ).scalars().all()
+        assert len(installments) == 4
 
 
 async def test_murabaha_generate_requires_wakalah_signed(client, test_user):
@@ -292,6 +359,88 @@ async def test_admin_contract_pdf_returns_download_url(client, test_user, test_a
     data = r_pdf.json()
     assert "download_url" in data
     assert data["download_url"]
+
+
+async def test_murabaha_generate_sets_shariah_board_approved_true_for_approved_version(
+    test_user, db_session, redis_mock
+):
+    """HIGH regression: validated_by_shariah_board must be True only when an
+    admin has actually recorded a ShariahBoardApproval row for the exact
+    template_version this contract is generated against — not hardcoded."""
+    from src.services.contract_generator import ContractGeneratorService
+    from src.schemas.contracts import MurabahaGenerateRequest
+
+    user, _ = test_user
+    order = await _seed_order(user.id)
+
+    wakalah = WakalahAgreement(
+        order_id=order.id,
+        user_id=user.id,
+        contract_number="SAK-WAK-APPROVED-TEST",
+        authorized_amount=order.total_amount,
+        contract_pdf_path="local://wakalah.pdf",
+        contract_hash="0" * 64,
+        otp_reference="ref-approved-test",
+        signed_at=datetime.now(timezone.utc),
+        valid_until=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    db_session.add(wakalah)
+
+    from sk_shared.models.contracts import ShariahBoardApproval
+
+    db_session.add(
+        ShariahBoardApproval(
+            template_version=ContractGeneratorService.MURABAHA_TEMPLATE_VERSION,
+            approved_by="shariah-board@sahulatkar.pk",
+            approved_at=datetime.now(timezone.utc),
+        )
+    )
+    await db_session.commit()
+
+    service = ContractGeneratorService(db_session)
+    contract = await service.generate_murabaha(
+        user.id, MurabahaGenerateRequest(order_id=order.id, installment_count=4), redis_mock
+    )
+
+    assert contract.template_version == ContractGeneratorService.MURABAHA_TEMPLATE_VERSION
+    assert contract.validated_by_shariah_board is True
+
+
+async def test_murabaha_generate_sets_shariah_board_approved_false_for_unapproved_version(
+    test_user, db_session, redis_mock
+):
+    """HIGH regression: no ShariahBoardApproval row exists for the template
+    version in use -- validated_by_shariah_board must land False, not a
+    silent True, and the generator must not raise (compliance-integrity
+    gap, not a hard block on order flow)."""
+    from src.services.contract_generator import ContractGeneratorService
+    from src.schemas.contracts import MurabahaGenerateRequest
+
+    user, _ = test_user
+    order = await _seed_order(user.id)
+
+    wakalah = WakalahAgreement(
+        order_id=order.id,
+        user_id=user.id,
+        contract_number="SAK-WAK-UNAPPROVED-TEST",
+        authorized_amount=order.total_amount,
+        contract_pdf_path="local://wakalah.pdf",
+        contract_hash="0" * 64,
+        otp_reference="ref-unapproved-test",
+        signed_at=datetime.now(timezone.utc),
+        valid_until=datetime.now(timezone.utc) + timedelta(days=1),
+    )
+    db_session.add(wakalah)
+    # No ShariahBoardApproval row seeded for any template_version.
+    await db_session.commit()
+
+    service = ContractGeneratorService(db_session)
+    contract = await service.generate_murabaha(
+        user.id, MurabahaGenerateRequest(order_id=order.id, installment_count=4), redis_mock
+    )
+
+    assert contract.template_version == ContractGeneratorService.MURABAHA_TEMPLATE_VERSION
+    assert contract.validated_by_shariah_board is False
 
 
 async def test_admin_contract_pdf_rejects_admin_without_read_order_permission(client, test_user, redis_mock):

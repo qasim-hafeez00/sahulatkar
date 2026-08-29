@@ -16,7 +16,8 @@ Architecture note:
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from dataclasses import asdict
+from datetime import datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
@@ -32,6 +33,7 @@ from src.adapters.factory import GatewayAdapterFactory
 from src.config import settings
 from src.core.dependencies import get_current_user, get_db, get_redis, rate_limit, require_internal_token
 from src.core.metrics import DOWN_PAYMENT_TOTAL, GATEWAY_FAILURE_TOTAL, INSTALLMENT_PAYMENT_TOTAL
+from src.models.outbox import OutboxEvent
 from src.models.refund_workflow import RefundStatus, RefundWorkflow
 from src.orchestration.payment_orchestrator import PaymentOrchestrator
 from src.orchestration.refund_orchestrator import RefundOrchestrator
@@ -55,6 +57,47 @@ _CALLBACK_BASE = "https://payment-orchestrator.sahulatkar.pk"
 
 # Gateways that use async redirect flows (webhook confirms payment)
 _ASYNC_GATEWAYS = {"safepay", "raast"}
+
+# ── PO-CRIT-01: Installment collection concurrency guard ─────────────────────
+# pay_installment (user-initiated), auto_collect_installment (billing sweep),
+# and internal_trigger_installment (legacy billing trigger) can all attempt to
+# collect the *same* installment concurrently — a double-tap on a flaky
+# connection racing itself, or a manual pay racing the billing sweep. Each
+# gateway adapter mints a fresh random gateway_txn_id per call (see
+# src/services/jazzcash.py), so there is no unique constraint anywhere that
+# would catch two concurrent charges colliding — both can pass the
+# "not yet paid" check before either commits and the customer is charged
+# twice. This short-lived Redis lock (keyed on installment_id, not on any
+# client-supplied idempotency key — the three call sites don't share one)
+# closes that window; the SELECT ... FOR UPDATE added at each call site is a
+# second, DB-level layer of the same guard for when Redis itself is
+# unavailable or slow to expire.
+_INSTALLMENT_LOCK_TTL_SECONDS = 30
+
+
+def _installment_lock_key(installment_id: int) -> str:
+    return f"sk:po:lock:installment:{installment_id}"
+
+
+async def _installment_already_settled(db: AsyncSession, installment: Installment) -> bool:
+    """True if this installment must not be charged again.
+
+    installment.status is only ever set to "paid" by Ledger Service, asynchronously,
+    after consuming the payment.installment_paid event (BV-04 boundary rule) — so it
+    can lag behind a charge that already succeeded here. The PaymentTransaction row
+    (written in the same transaction as the charge) is the authoritative signal, so
+    it is always checked in addition to installment.status.
+    """
+    if installment.status == "paid":
+        return True
+    existing_txn = await db.scalar(
+        select(PaymentTransaction).where(
+            PaymentTransaction.installment_id == installment.id,
+            PaymentTransaction.status == "success",
+            PaymentTransaction.deleted_at.is_(None),
+        )
+    )
+    return existing_txn is not None
 
 
 async def _get_order_for_user(db: AsyncSession, order_id: int, user_id: int) -> Order:
@@ -266,7 +309,7 @@ async def pay_installment(
     Emits payment.installment_paid event for Ledger Service.
     Does NOT mutate Installment.status directly (BV-04 boundary rule).
     """
-    from sk_shared.events import build_event_envelope, event_channel
+    from sk_shared.events import build_event_envelope
 
     installment = await db.scalar(
         select(Installment).where(
@@ -284,70 +327,92 @@ async def pay_installment(
             detail="INSTALLMENT_ALREADY_PAID",
         )
 
-    # Check for existing successful transaction (idempotency guard)
-    existing_txn = await db.scalar(
-        select(PaymentTransaction).where(
-            PaymentTransaction.installment_id == installment.id,
-            PaymentTransaction.status == "success",
-            PaymentTransaction.deleted_at.is_(None),
-        )
-    )
-    if existing_txn:
+    # PO-CRIT-01: Redis pre-check — closes the double-tap / pay-vs-auto-collect
+    # race before we ever touch the DB or a gateway. Short TTL so a genuinely
+    # failed attempt doesn't lock out retries for long; released explicitly
+    # below as soon as this attempt is done (success or failure).
+    lock_key = _installment_lock_key(installment.id)
+    if not await redis.set_nx(lock_key, "1", ttl=_INSTALLMENT_LOCK_TTL_SECONDS):
         raise HTTPException(
-            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-            detail="INSTALLMENT_ALREADY_PAID",
+            status_code=status.HTTP_409_CONFLICT,
+            detail="PAYMENT_IN_PROGRESS",
         )
-
-    method = request_payload.method.value
-    routing = GatewayRoutingEngine(redis)
-    selected_gateway = await routing.select_gateway(preferred=method)
-    adapter = GatewayAdapterFactory.get(selected_gateway, settings)
 
     try:
-        result = await adapter.initiate_payment(
-            order_id=installment.loan_id,
-            amount_pkr=Decimal(str(installment.total_amount)),
-            callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+        # PO-CRIT-01: DB-level guard (defense-in-depth alongside the Redis lock
+        # above) — row lock is a no-op on SQLite but on Postgres serializes a
+        # concurrent request for the same installment behind this transaction's
+        # commit, so it re-reads the fresh (post-commit) state below instead of
+        # racing past the "already paid" check.
+        installment = await db.scalar(
+            select(Installment).where(Installment.id == installment.id).with_for_update()
         )
-        gateway_txn_id = result["gateway_txn_id"]
-        await routing.record_success(selected_gateway)
-    except Exception as exc:
-        await routing.record_failure(selected_gateway)
-        GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
-        logger.error("Installment payment failed", extra={"installment_id": installment.id, "error": str(exc)})
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
+        if await _installment_already_settled(db, installment):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail="INSTALLMENT_ALREADY_PAID",
+            )
 
-    now = datetime.now(timezone.utc)
-    txn = PaymentTransaction(
-        loan_id=installment.loan_id,
-        installment_id=installment.id,
-        user_id=current_user.id,
-        amount=Decimal(str(installment.total_amount)),
-        currency=settings.PAYMENT_CURRENCY,
-        gateway=selected_gateway,
-        gateway_txn_id=gateway_txn_id,
-        status="success",
-        reconciled_at=now,
-    )
-    # BV-04: Do NOT mutate installment.status directly.
-    # Emit event — Ledger Service owns installment state transitions.
-    db.add(txn)
-    await db.commit()
-    await db.refresh(txn)
+        method = request_payload.method.value
+        routing = GatewayRoutingEngine(redis)
+        selected_gateway = await routing.select_gateway(preferred=method)
+        adapter = GatewayAdapterFactory.get(selected_gateway, settings)
 
-    EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
-    envelope = build_event_envelope(
-        event=EVENT_PAYMENT_INSTALLMENT_PAID,
-        source_service="payment-orchestrator",
-        payload={
-            "installment_id": installment.id,
-            "loan_id": installment.loan_id,
-            "user_id": current_user.id,
-            "amount_pkr": str(installment.total_amount),
-            "gateway_txn_id": gateway_txn_id,
-        },
-    )
-    await redis.publish(event_channel(EVENT_PAYMENT_INSTALLMENT_PAID), envelope.to_json())
+        try:
+            result = await adapter.initiate_payment(
+                order_id=installment.loan_id,
+                amount_pkr=Decimal(str(installment.total_amount)),
+                callback_url=f"{_CALLBACK_BASE}/api/v1/webhooks/{selected_gateway}",
+            )
+            gateway_txn_id = result["gateway_txn_id"]
+            await routing.record_success(selected_gateway)
+        except Exception as exc:
+            await routing.record_failure(selected_gateway)
+            GATEWAY_FAILURE_TOTAL.labels(gateway=selected_gateway).inc()
+            logger.error("Installment payment failed", extra={"installment_id": installment.id, "error": str(exc)})
+            raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail="GATEWAY_ERROR") from exc
+
+        now = datetime.utcnow()
+        txn = PaymentTransaction(
+            loan_id=installment.loan_id,
+            installment_id=installment.id,
+            user_id=current_user.id,
+            amount=Decimal(str(installment.total_amount)),
+            currency=settings.PAYMENT_CURRENCY,
+            gateway=selected_gateway,
+            gateway_txn_id=gateway_txn_id,
+            status="success",
+            reconciled_at=now,
+        )
+        db.add(txn)
+
+        # PO-CRIT-02: Route the event through the transactional outbox (same
+        # DB commit as the PaymentTransaction insert) instead of publishing
+        # inline — an inline redis.publish() here has no durability: if
+        # Ledger Service is unavailable at this exact instant the event is
+        # dropped with zero trace anywhere, even though the customer's money
+        # already moved. The OutboxPublisher worker delivers it durably
+        # (see src/workers/outbox_publisher.py).
+        EVENT_PAYMENT_INSTALLMENT_PAID = "payment.installment_paid"
+        envelope = build_event_envelope(
+            event=EVENT_PAYMENT_INSTALLMENT_PAID,
+            source_service="payment-orchestrator",
+            payload={
+                "installment_id": installment.id,
+                "loan_id": installment.loan_id,
+                "user_id": current_user.id,
+                "amount_pkr": str(installment.total_amount),
+                "gateway_txn_id": gateway_txn_id,
+            },
+        )
+        db.add(OutboxEvent(event_name=EVENT_PAYMENT_INSTALLMENT_PAID, payload=asdict(envelope), status="pending"))
+
+        # BV-04: Do NOT mutate installment.status directly.
+        # Emit event — Ledger Service owns installment state transitions.
+        await db.commit()
+        await db.refresh(txn)
+    finally:
+        await redis.delete(lock_key)
 
     INSTALLMENT_PAYMENT_TOTAL.labels(gateway=selected_gateway, status="success").inc()
 
@@ -477,7 +542,7 @@ async def internal_trigger_installment(
     if installment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="INSTALLMENT_NOT_FOUND")
 
-    if installment.status == "paid":
+    if await _installment_already_settled(db, installment):
         return {"status": "already_paid", "installment_id": installment.id}
 
     # INC-03 fix: Validate amount is positive and matches installment record
@@ -527,7 +592,7 @@ async def internal_trigger_installment(
         if retry_count < settings.MAX_INSTALLMENT_RETRIES:
             from datetime import timedelta
             delay_hours = settings.INSTALLMENT_RETRY_DELAY_HOURS[retry_count] if retry_count < len(settings.INSTALLMENT_RETRY_DELAY_HOURS) else 24
-            installment.next_retry_at = datetime.now(timezone.utc) + timedelta(hours=delay_hours)
+            installment.next_retry_at = datetime.utcnow() + timedelta(hours=delay_hours)
             logger.info(
                 "Installment retry scheduled",
                 extra={"installment_id": installment.id, "retry_count": retry_count, "next_retry": installment.next_retry_at},
@@ -557,7 +622,7 @@ async def internal_trigger_installment(
 
     await routing.record_success(selected_gateway)
 
-    now = datetime.now(timezone.utc)
+    now = datetime.utcnow()
     txn = PaymentTransaction(
         loan_id=installment.loan_id,
         installment_id=installment.id,
@@ -748,7 +813,7 @@ async def auto_collect_installment(
     if installment is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="INSTALLMENT_NOT_FOUND")
 
-    if installment.status == "paid":
+    if await _installment_already_settled(db, installment):
         return {"status": "already_paid", "installment_id": installment_id}
 
     if Decimal(str(installment.total_amount)) <= Decimal("0"):
@@ -788,8 +853,8 @@ async def auto_collect_installment(
         logger.error("Auto-collect installment failed", extra={"installment_id": installment_id, "error": str(exc)})
         return {"status": "failed", "error": "GATEWAY_DECLINED", "installment_id": installment_id}
 
-    from datetime import datetime, timezone
-    now = datetime.now(timezone.utc)
+    from datetime import datetime
+    now = datetime.utcnow()
     txn = PaymentTransaction(
         loan_id=installment.loan_id,
         installment_id=installment.id,

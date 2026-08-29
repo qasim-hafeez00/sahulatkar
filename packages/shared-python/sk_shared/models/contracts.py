@@ -102,6 +102,30 @@ class MurabahaContract(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     )
 
 
+class ShariahBoardApproval(Base, TimestampMixin):
+    """Backing record for MurabahaContract.validated_by_shariah_board.
+
+    HIGH fix: validated_by_shariah_board used to be hardcoded True on every
+    generated contract with no approval record anywhere in the codebase --
+    a compliance-integrity gap (the field claimed a real board sign-off that
+    never happened). This is the minimal structurally-honest fix: an admin
+    records here which contract template_version the Shariah board has
+    actually approved (see api/v1/admin_compliance.py's
+    POST /admin/compliance/shariah-board-approvals), and
+    ContractGeneratorService.generate_murabaha checks "is the
+    template_version I'm about to stamp on this contract in the approved
+    set?" before setting the flag -- True only for an approved version,
+    False (with a logged warning) for anything unapproved/unknown.
+    """
+    __tablename__ = "shariah_board_approvals"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    template_version: Mapped[str] = mapped_column(String(10), unique=True, nullable=False)
+    approved_by: Mapped[str] = mapped_column(String(200), nullable=False)
+    approved_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    notes: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
 class ContractDigitalSignature(Base, UUIDMixin, TimestampMixin):
     __tablename__ = "contract_digital_signatures"
 

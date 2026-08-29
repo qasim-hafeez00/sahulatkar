@@ -80,7 +80,7 @@ class SafepayClient:
                 data = response.json()
                 tracker_token = data["data"]["token"]
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("SAFEPAY_CHECKOUT_HTTP_ERROR") from exc
             logger.warning(f"SafePay checkout call failed: {exc}, falling back to local generated URL")
             tracker_token = f"track_local_{uuid4().hex}"
@@ -129,7 +129,7 @@ class SafepayClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("SAFEPAY_AUTHORIZE_HTTP_ERROR") from exc
             logger.warning(f"SafePay authorize failed: {exc}, returning local stub")
             data = {"status": "authorized"}
@@ -157,7 +157,7 @@ class SafepayClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("SAFEPAY_CAPTURE_HTTP_ERROR") from exc
             logger.warning(f"SafePay capture failed: {exc}, returning local stub")
             data = {"status": "captured"}
@@ -184,7 +184,7 @@ class SafepayClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("SAFEPAY_VOID_HTTP_ERROR") from exc
             logger.warning(f"SafePay void failed: {exc}, returning local stub")
             data = {"status": "voided"}
@@ -215,7 +215,7 @@ class SafepayClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("SAFEPAY_REFUND_HTTP_ERROR") from exc
             logger.warning(f"SafePay refund failed: {exc}, returning local stub")
             data = {"refund_id": f"sp_rfnd_{uuid4().hex}", "status": "success"}

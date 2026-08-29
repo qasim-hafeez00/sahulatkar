@@ -64,3 +64,4 @@ class FlagCode(str, Enum):
     SCORE_BELOW_THRESHOLD = "score_below_threshold"
     LIMIT_BELOW_ORDER_AMOUNT = "limit_below_order_amount"
     COLD_START_DATA_SPARSE = "cold_start_data_sparse"
+    REPAYMENT_HISTORY_VERIFIED = "repayment_history_verified"

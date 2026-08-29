@@ -113,6 +113,26 @@ class Settings(BaseSettings):
     MAX_ACTIVE_ORDERS_PER_USER: int = 5
     PROFIT_RATES: Dict[str, float] = {"3": 2.5, "4": 4.0, "6": 7.0, "12": 15.0}
 
+    # HIGH-4: cross-service HTTP calls (InternalServiceClient) — retry-with-backoff
+    # tuning. A flat 10s-timeout-no-retry call to a briefly-restarting neighbor
+    # service (product-service, notification-service) previously failed outright
+    # on the first blip.
+    INTERNAL_HTTP_TIMEOUT_SECONDS: float = 10.0
+    INTERNAL_HTTP_MAX_RETRIES: int = 3
+    INTERNAL_HTTP_RETRY_BACKOFF_BASE_SECONDS: float = 0.5
+
+    # HIGH-4: proactive sweep for orders stuck in an intermediate state (e.g.
+    # "url_received" past the extraction timeout) — previously only healed when
+    # a user happened to poll GET /orders/{id}/offer.
+    ORDER_STUCK_SWEEP_INTERVAL_SECONDS: int = 120
+    ORDER_STUCK_EXTRACTION_TIMEOUT_SECONDS: int = 600
+
+    # HIGH-3: HITL sla_deadline escalation sweep interval, and how often the
+    # same still-breached item is re-alerted (avoids re-logging a CRITICAL
+    # every sweep cycle for an item nobody has actioned yet).
+    HITL_SLA_SWEEP_INTERVAL_SECONDS: int = 300
+    HITL_SLA_ALERT_DEDUP_SECONDS: int = 3600
+
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
 

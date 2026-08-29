@@ -15,7 +15,11 @@ from src.services.checkout import CheckoutAgentService
 
 @pytest.mark.asyncio
 async def test_extract_completed_and_offer_and_search(client, db_session, monkeypatch, user_header):
+    from src.config import settings
     from src.services.extraction_waterfall import ExtractionResult, ExtractionWaterfallService
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_REFERENCE", "SB-RES-2026-014")
+    monkeypatch.setattr(settings, "SHARIAH_MARKUP_APPROVAL_DATE", "2026-08-01")
+
     async def fake_extract(*args, **kwargs):
         return ExtractionResult(status="completed", method="json_ld", confidence=Decimal("0.85"), title="Test Product", price=Decimal("100"), image_url=None)
     monkeypatch.setattr(ExtractionWaterfallService, "extract", fake_extract)
@@ -32,7 +36,11 @@ async def test_extract_completed_and_offer_and_search(client, db_session, monkey
 
     product_uuid = data["upo"]["product_id"]
 
-    offer = await client.get(f"/api/v1/products/{product_uuid}/offer", params={"plan_months": 3, "down_payment_pct": 30})
+    offer = await client.get(
+        f"/api/v1/products/{product_uuid}/offer",
+        params={"plan_months": 3, "down_payment_pct": 30},
+        headers=user_header,
+    )
     assert offer.status_code == 200
     offer_data = offer.json()
     assert offer_data["financing_offer"]["profit_rate_pct"] == "2.5"

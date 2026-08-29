@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from typing import Literal
 
+import httpx
+
 from src.config import settings
 from src.extractors.html_scraper import HtmlScraper
 from src.extractors.rye_client import RyeClient
@@ -285,13 +287,21 @@ class ExtractionWaterfallService:
             EXTRACTION_LATENCY.labels(tier="tier3", domain=domain, status=res.status).observe(time.perf_counter() - start_time)
             return res
         except Exception as e:
+            # HIGH-05: surface a 429 (rate limit) from the underlying LLM
+            # provider (OpenAI/Groq, called via httpx in playwright_agent.py)
+            # as a distinguishable error_code so the retry backoff in
+            # scraping_worker.py can apply a longer initial delay than a
+            # generic transient failure.
+            error_code = "EXTRACTION_ERROR"
+            if isinstance(e, httpx.HTTPStatusError) and e.response is not None and e.response.status_code == 429:
+                error_code = "RATE_LIMITED"
             res = ExtractionResult(
                 status="failed",
                 method="playwright_llm",
                 confidence=Decimal("0.000"),
                 title="",
                 price=Decimal("0.00"),
-                error_code="EXTRACTION_ERROR",
+                error_code=error_code,
                 error_message=str(e),
             )
             EXTRACTION_LATENCY.labels(tier="tier3", domain=domain, status=res.status).observe(time.perf_counter() - start_time)

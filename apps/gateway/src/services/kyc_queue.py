@@ -35,7 +35,7 @@ class KycQueueService:
             raise ValueError(f"Queue entry {queue_id} not found.")
 
         entry.assigned_admin_id = admin_id
-        entry.claimed_at = datetime.now(timezone.utc)
+        entry.claimed_at = datetime.utcnow()
         await self.db.commit()
         await self.db.refresh(entry)
         return entry

@@ -198,6 +198,99 @@ async def test_main_normal_run_applies_late_fee_and_releases_lock(db_session, mo
 
 
 @pytest.mark.asyncio
+async def test_execute_sweep_continues_after_one_installment_fails(db_session, monkeypatch, seed_ledger_accounts):
+    """Defense-in-depth regression test: an unhandled exception while applying
+    a late fee to ONE installment (this bug, or any future one) must not abort
+    the whole batch. Before the fix, billing_sweep.execute_sweep() had no
+    try/except around the per-installment processing call, so a crash on one
+    installment aborted the entire sweep -- every installment ordered AFTER
+    the one that crashed never got its late fee applied that day.
+
+    Two installments go overdue in the same run; LateFeeService.apply_late_fee_to_installment
+    is monkeypatched to raise for the first one only. The second installment
+    (ordered after it by due_date/id, same as find_newly_overdue's ordering)
+    must still be processed successfully, and the failure must be visibly
+    tracked via the sweep's existing "failed" counter rather than swallowed.
+    """
+    from src.services.late_fee_service import LateFeeService
+
+    redis_client = RedisClient(fakeredis.aioredis.FakeRedis())
+
+    loan = _make_loan("L-BATCH", 801)
+    db_session.add(loan)
+    await db_session.flush()
+
+    old_due = date.today() - timedelta(days=5)
+    failing_inst = Installment(
+        loan_id=loan.id,
+        user_id=loan.user_id,
+        installment_number=1,
+        principal_portion=2500,
+        profit_portion=100,
+        total_amount=2600,
+        due_date=old_due,
+        status="pending",
+        retry_count=0,
+    )
+    healthy_inst = Installment(
+        loan_id=loan.id,
+        user_id=loan.user_id,
+        installment_number=2,
+        principal_portion=2500,
+        profit_portion=100,
+        total_amount=2600,
+        due_date=old_due,
+        status="pending",
+        retry_count=0,
+    )
+    db_session.add_all([failing_inst, healthy_inst])
+    await db_session.commit()
+
+    # Capture plain ids up front: same MissingGreenlet trap the production
+    # fix guards against applies here too -- once the sweep rolls back after
+    # the injected failure, `failing_inst`/`healthy_inst` (loaded in the same
+    # session) are expired, so touching `.id` on them again would itself
+    # raise MissingGreenlet.
+    failing_id = failing_inst.id
+    healthy_id = healthy_inst.id
+
+    real_apply = LateFeeService.apply_late_fee_to_installment
+
+    async def _flaky_apply(self, installment_id, amount):
+        if installment_id == failing_id:
+            raise RuntimeError("simulated late-fee failure")
+        return await real_apply(self, installment_id, amount)
+
+    monkeypatch.setattr(LateFeeService, "apply_late_fee_to_installment", _flaky_apply)
+
+    service = BillingSweepService(db_session, redis_client)
+    stats = await service.execute_sweep()
+
+    # The crash on the first installment must be tracked, not swallowed...
+    assert stats["failed"] == 1
+    # ...and the second installment must still have been processed despite it.
+    assert stats["late_fees_applied"] == 1
+
+    healthy_allocation = (
+        await db_session.execute(
+            select(LateFeeCharityAllocation).where(LateFeeCharityAllocation.installment_id == healthy_id)
+        )
+    ).scalar_one()
+    assert Decimal(str(healthy_allocation.late_fee_amount)) == Decimal("150.00")
+
+    failing_allocations = (
+        await db_session.execute(
+            select(LateFeeCharityAllocation).where(LateFeeCharityAllocation.installment_id == failing_id)
+        )
+    ).scalars().all()
+    assert failing_allocations == []
+
+    # The distributed lock must still be released even though one
+    # installment failed mid-sweep, so the next scheduled run isn't blocked.
+    assert await redis_client.get(BillingSweepService.LOCK_KEY) is None
+
+
+@pytest.mark.asyncio
 async def test_main_skips_run_when_lock_already_held(db_session, monkeypatch, seed_ledger_accounts):
     """Simulates a concurrent sweep already holding the distributed lock;
     this run must be a no-op (no late fees applied) rather than racing it."""

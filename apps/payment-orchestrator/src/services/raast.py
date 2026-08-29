@@ -113,7 +113,7 @@ class RaastClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("RAAST_IBFT_HTTP_ERROR") from exc
             logger.warning(f"Raast IBFT call failed: {exc}, returning local stub success")
             data = {"status": "initiated"}
@@ -150,7 +150,7 @@ class RaastClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("RAAST_STATUS_HTTP_ERROR") from exc
             logger.warning(f"Raast status check failed: {exc}, returning local stub")
             data = {"status": "success", "reference_no": f"SBP-REF-{gateway_txn_id[:8].upper()}"}
@@ -188,7 +188,7 @@ class RaastClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("RAAST_REFUND_HTTP_ERROR") from exc
             logger.warning(f"Raast refund failed: {exc}, returning local stub")
             data = {"refund_id": f"raast_ref_{uuid4().hex}", "status": "success"}
@@ -228,7 +228,7 @@ class RaastClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("RAAST_MANDATE_SETUP_HTTP_ERROR") from exc
             logger.warning(f"Raast mandate setup failed: {exc}, returning local stub")
             data = {
@@ -271,7 +271,7 @@ class RaastClient:
                 resp.raise_for_status()
                 data = resp.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("RAAST_MANDATE_CHARGE_HTTP_ERROR") from exc
             logger.warning(f"Raast mandate charge failed: {exc}, returning local stub")
             data = {"gateway_txn_id": f"raast_mnd_{uuid4().hex}", "status": "success"}

@@ -100,6 +100,41 @@ async def test_too_many_active_orders_blocked(client: AsyncClient, test_user, db
     assert "TOO_MANY_ACTIVE_ORDERS" in r.json()["detail"]
 
 
+async def test_max_active_orders_honors_admin_system_parameter(client: AsyncClient, test_user, test_admin, db_session):
+    """GAP-F regression: max_active_orders used to be hardcoded to 5 in
+    OrderService.initiate regardless of the admin-configurable SystemParameter
+    of the same name (see src/services/system_parameters.py). Changing it via
+    the admin panel must actually change the cap a real order-initiation call
+    enforces, not just round-trip through the CRUD endpoint."""
+    from sk_shared.models.auth import User
+    from sqlalchemy import update
+
+    user, token = test_user
+    _, admin_token = test_admin
+    await db_session.execute(
+        update(User).where(User.id == user.id).values(status="active", credit_limit=100000, available_credit=100000)
+    )
+    await db_session.commit()
+
+    put_resp = await client.put(
+        "/api/v1/admin/system/parameters",
+        json={"parameters": {"max_active_orders": 1}},
+        headers=_auth(admin_token),
+    )
+    assert put_resp.status_code == 200
+
+    db_session.add(Order(user_id=user.id, status="url_received", total_amount=1000, product_description="seed-1"))
+    await db_session.commit()
+
+    r = await client.post(
+        "/api/v1/orders/initiate",
+        json={"product_url": "https://example.com/products/allowed-item"},
+        headers=_auth(token),
+    )
+    assert r.status_code == 403
+    assert "TOO_MANY_ACTIVE_ORDERS" in r.json()["detail"]
+
+
 async def test_get_order_tracking_returns_shipment(client: AsyncClient, test_user, db_session):
     from sk_shared.models.delivery import Shipment, TrackingEvent
     from sk_shared.models.auth import User

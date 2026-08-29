@@ -1,11 +1,13 @@
 from decimal import Decimal
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 from sqlalchemy import select
 
 from sk_shared.models.audit import AuditTrail
+from sk_shared.models.hitl import HitlQueue
 from sk_shared.models.product import Merchant, Product, ScrapingJob
+from src.config import settings
 
 
 @pytest.mark.asyncio
@@ -152,6 +154,55 @@ async def test_admin_execution_retry_noop_for_running(client, db_session, make_e
     body = res.json()
     assert body["status"] == "running"
     assert body["execution_id"] == str(execution.uuid)
+
+
+@pytest.mark.asyncio
+async def test_admin_execution_retry_reaps_then_requeues_stuck_running(
+    client, db_session, make_execution, redis_mock, service_header, monkeypatch
+):
+    """HIGH-02 fix: a 'running' execution that has been stuck long enough to
+    be considered dead (its owning worker crashed/was killed mid-job, per
+    ExecutionReaperService.is_stuck) must now be reaped and immediately
+    requeued by this endpoint -- not just handed back the old "still
+    running, come back later" response forever."""
+    monkeypatch.setattr(settings, "CHECKOUT_STUCK_RUNNING_TIMEOUT_SECONDS", 300)
+
+    execution = await make_execution(
+        db_session,
+        order_id=321,
+        vcn_id=99,
+        status="running",
+        step_reached="payment_injection",
+        started_at=datetime.now(timezone.utc) - timedelta(seconds=6000),
+    )
+    await db_session.commit()
+
+    res = await client.post(f"/api/v1/admin/executions/{execution.uuid}/retry", headers=service_header)
+    assert res.status_code == 200
+    body = res.json()
+    assert body["status"] == "queued"
+    assert body["execution_id"] == str(execution.uuid)
+
+    await db_session.refresh(execution)
+    # requeue_execution() resets a reaped row back to 'queued' for the next
+    # checkout-worker pickup -- it must not be left at the reaper's
+    # intermediate 'failed'/'hitl_escalated' terminal state.
+    assert execution.status == "queued"
+    assert execution.started_at is None
+    assert execution.failure_type is None
+
+    queued = await redis_mock.redis.lindex("sk:queue:checkout", 0)
+    assert queued is not None
+
+    # The reap step itself must still have run (and, with HITL escalation on
+    # by default, logged a HitlQueue entry) before the requeue overwrote the
+    # status -- proving this took the reap-then-requeue path rather than
+    # some other code path that skips the reaper entirely.
+    if settings.FEATURE_HITL_ESCALATION:
+        hitl = await db_session.scalar(
+            select(HitlQueue).where(HitlQueue.execution_id == execution.id)
+        )
+        assert hitl is not None
 
 
 @pytest.mark.asyncio

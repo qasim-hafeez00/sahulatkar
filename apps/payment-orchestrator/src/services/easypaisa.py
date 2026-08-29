@@ -56,7 +56,7 @@ class EasypaisaClient:
                 response.raise_for_status()
                 data = response.json()
         except httpx.HTTPError as exc:
-            if settings.ENVIRONMENT != "local":
+            if not settings.test_payment_fallbacks_enabled:
                 raise RuntimeError("EASYPAISA_CHARGE_HTTP_ERROR") from exc
             logger.warning(f"EasyPaisa charge failed: {exc}, returning local stub success")
             data = {

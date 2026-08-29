@@ -80,7 +80,7 @@ async def handle_payment_collection_triggered(payload: Dict[str, Any]):
     try:
         async with httpx.AsyncClient(timeout=15.0) as client:
             resp = await client.post(
-                f"{settings.SELF_BASE_URL}/api/v1/internal/installments/{installment_id}/auto-collect",
+                f"{settings.SELF_BASE_URL}/api/v1/payments/internal/installments/{installment_id}/auto-collect",
                 headers={"X-Internal-Token": settings.INTERNAL_API_TOKEN},
             )
         if resp.status_code >= 400:

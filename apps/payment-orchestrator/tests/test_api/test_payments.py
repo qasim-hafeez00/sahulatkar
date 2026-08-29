@@ -8,7 +8,7 @@ pytestmark = pytest.mark.asyncio
 
 from tests.conftest import TestingSessionLocal
 from sk_shared.models.auth import User
-from sk_shared.models.payment import Installment
+from sk_shared.models.payment import Installment, PaymentTransaction
 from sqlalchemy import select
 
 
@@ -244,6 +244,64 @@ async def test_pay_installment_rejects_already_paid(client, test_user, seed_orde
     )
     assert resp.status_code == 422
     assert resp.json()["detail"] == "INSTALLMENT_ALREADY_PAID"
+
+
+async def test_concurrent_pay_installment_only_one_charges(client, test_user, seed_order_with_loan):
+    """PO-CRIT-01 regression: two simultaneous pay-installment requests for
+    the same installment (a double-tap on a flaky connection, or a manual
+    pay racing the billing sweep) must not both charge. The Redis SET-NX
+    lock (backed by the SELECT...FOR UPDATE guard) must let exactly one
+    request through; the other is rejected as already in progress / already
+    settled -- never a second successful charge.
+
+    Mirrors the established concurrency-test pattern for this monorepo, see
+    apps/gateway/tests/test_api/test_orders.py::test_concurrent_order_accept_credit_race
+    (asyncio.gather against the shared test client / db_session).
+    """
+    import asyncio
+
+    user, token = test_user
+    order, loan = await seed_order_with_loan(user.id)
+
+    async with TestingSessionLocal() as session:
+        inst = await session.scalar(
+            select(Installment).where(
+                Installment.loan_id == loan.id,
+                Installment.installment_number == 1,
+            )
+        )
+
+    async def pay_once():
+        return await client.post(
+            "/api/v1/payments/pay-installment",
+            headers={"Authorization": f"Bearer {token}"},
+            json={"installment_id": inst.id, "method": "jazzcash"},
+        )
+
+    r1, r2 = await asyncio.gather(pay_once(), pay_once())
+    codes = sorted([r1.status_code, r2.status_code])
+    assert codes[0] == 200, (
+        r1.status_code,
+        r1.json() if r1.headers.get("content-type", "").startswith("application/json") else r1.text,
+        r2.status_code,
+        r2.json() if r2.headers.get("content-type", "").startswith("application/json") else r2.text,
+    )
+    # Losing request: PAYMENT_IN_PROGRESS (409, Redis lock lost the race) or
+    # an already-settled rejection (422, DB-level guard caught it instead).
+    assert codes[1] in {409, 422}
+
+    # Above all: exactly one successful charge was ever recorded for this
+    # installment, no matter which guard caught the loser.
+    async with TestingSessionLocal() as session:
+        successful = (
+            await session.execute(
+                select(PaymentTransaction).where(
+                    PaymentTransaction.installment_id == inst.id,
+                    PaymentTransaction.status == "success",
+                )
+            )
+        ).scalars().all()
+        assert len(successful) == 1
 
 
 # ── Internal Trigger ─────────────────────────────────────────────────────────

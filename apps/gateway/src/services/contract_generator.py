@@ -9,7 +9,7 @@ from sqlalchemy.orm import joinedload
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import OrderState
-from sk_shared.models.contracts import MurabahaContract, WakalahAgreement
+from sk_shared.models.contracts import MurabahaContract, ShariahBoardApproval, WakalahAgreement
 from sk_shared.models.order import Order
 from sk_shared.models.product import Product
 from sk_shared.storage import get_storage_client
@@ -17,13 +17,47 @@ from src.config import settings
 from src.core.kms import KMSProvider
 from src.core.logging import logger
 from src.schemas.contracts import MurabahaGenerateRequest, WakalahGenerateRequest
+from src.services.system_parameters import get_effective_system_parameters
 from .contract_signer import ContractSignerService
 
 
 class ContractGeneratorService:
+    # HIGH fix: this is the template_version every newly-generated Murabaha
+    # contract is stamped with (MurabahaContract.template_version below).
+    # validated_by_shariah_board is only ever set True when THIS version has
+    # a matching, admin-recorded ShariahBoardApproval row -- see
+    # _is_shariah_board_approved(). Bump this whenever the contract clause
+    # text in _build_pdf/generate_murabaha materially changes, and have the
+    # Shariah board re-approve the new version via
+    # POST /admin/compliance/shariah-board-approvals before it goes live.
+    MURABAHA_TEMPLATE_VERSION = "1.0"
+
     def __init__(self, db: AsyncSession):
         self.db = db
         self.storage = get_storage_client(settings)
+
+    async def _is_shariah_board_approved(self, template_version: str) -> bool:
+        """HIGH fix: validated_by_shariah_board used to be hardcoded True on
+        every contract regardless of whether any human ever reviewed the
+        template -- a compliance-integrity gap with no backing record
+        anywhere in the codebase. Now it reflects a real approval: True only
+        when an admin has recorded a ShariahBoardApproval row for exactly
+        this template_version (see admin_compliance.py's
+        POST /admin/compliance/shariah-board-approvals). Any unapproved or
+        unknown version logs a warning and gets False, not a silent True.
+        """
+        approval = await self.db.scalar(
+            select(ShariahBoardApproval).where(ShariahBoardApproval.template_version == template_version)
+        )
+        if approval is None:
+            logger.warning(
+                "SHARIAH_BOARD_APPROVAL_MISSING template_version=%s -- contract will be generated with "
+                "validated_by_shariah_board=False; an admin must record an approval for this template "
+                "version via POST /admin/compliance/shariah-board-approvals",
+                template_version,
+            )
+            return False
+        return True
 
     def _build_pdf(self, title: str, lines: list[str], clauses: list[str] = None) -> bytes:
         import io
@@ -209,7 +243,10 @@ class ContractGeneratorService:
             product_description=product.name if product else "Product",
             merchant_name=product.merchant.name if product and product.merchant else "Merchant",
             product_url=product.url if product else None,
-            valid_until=datetime.now(timezone.utc) + timedelta(hours=24)
+            # GAP-F fix: was hardcoded to 24 hours regardless of the admin-configured
+            # wakalah_validity_days SystemParameter.
+            valid_until=datetime.now(timezone.utc)
+            + timedelta(days=(await get_effective_system_parameters(self.db, redis)).get("wakalah_validity_days", 7)),
         )
         self.db.add(contract)
         await self.db.commit()
@@ -257,7 +294,17 @@ class ContractGeneratorService:
         ) if order.product_id else None
         cost_price = float(product.cost_price if product else order.total_amount)
 
-        profit_map = {3: 2.5, 4: 4.0, 6: 7.0, 12: 15.0}
+        # GAP-F fix: was a hardcoded profit_map regardless of the admin-configured
+        # profit_rate_3m/4m/6m/12m SystemParameters -- kept in sync with
+        # OrderService.get_offer, which reads the same keys, so the offer a
+        # customer sees matches what this contract actually charges.
+        params = await get_effective_system_parameters(self.db, redis)
+        profit_map = {
+            3: float(params.get("profit_rate_3m", 2.5)),
+            4: float(params.get("profit_rate_4m", 4.0)),
+            6: float(params.get("profit_rate_6m", 7.0)),
+            12: float(params.get("profit_rate_12m", 15.0)),
+        }
         profit_rate_pct = float(profit_map.get(req.installment_count, 4.0))
         profit_amount = round(cost_price * (profit_rate_pct / 100), 2)
         total_sale_price = round(cost_price + profit_amount, 2)
@@ -283,6 +330,9 @@ class ContractGeneratorService:
         pdf_hash = hashlib.sha256(pdf).hexdigest()
         pdf_path = await self._persist_pdf(contract_number, pdf)
 
+        # HIGH fix: was unconditionally True -- see _is_shariah_board_approved.
+        shariah_board_approved = await self._is_shariah_board_approved(self.MURABAHA_TEMPLATE_VERSION)
+
         down_payment = float(order.down_payment_amount or 0)
         repayable_amount = round(total_sale_price - down_payment, 2)
         installment_amount = round(repayable_amount / req.installment_count, 2)
@@ -305,9 +355,12 @@ class ContractGeneratorService:
             contract_pdf_path=pdf_path,
             contract_hash=pdf_hash,
             otp_reference=str(uuid.uuid4()),
-            template_version="1.0",
-            validated_by_shariah_board=True,
-            valid_until=datetime.now(timezone.utc) + timedelta(days=settings.MURABAHA_VALIDITY_DAYS),
+            template_version=self.MURABAHA_TEMPLATE_VERSION,
+            validated_by_shariah_board=shariah_board_approved,
+            # GAP-F fix: was reading settings.MURABAHA_VALIDITY_DAYS (an env var) not
+            # the admin-configured murabaha_validity_days SystemParameter -- an admin
+            # change via the panel had zero effect on this value.
+            valid_until=datetime.now(timezone.utc) + timedelta(days=params.get("murabaha_validity_days", settings.MURABAHA_VALIDITY_DAYS)),
         )
         self.db.add(contract)
         await self.db.commit()

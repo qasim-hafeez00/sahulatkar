@@ -93,6 +93,25 @@ class RulePolicy(BaseModel):
         "A": 8000.0, "B": 5000.0, "C": 3000.0, "D": 2000.0,
     })
 
+    # Cold-start graduation via real repayment history (Phase 6 bugfix): data_sparse's
+    # device-trust/IP-trust/bank-data exit condition depends on a JazzCash/Easypaisa wallet
+    # integration and a device-fingerprinting/IP-intelligence vendor that don't exist in
+    # production (see wallet.py / identity.py / fraud.py) — so that exit can structurally never
+    # fire for a real applicant, and every repeat customer gets capped forever. A customer with
+    # a genuine track record of fully-repaid, on-time BNPL loans is real signal the platform
+    # already has (LimitEngine.has_repayment_track_record queries it directly) and can graduate
+    # on independently of the missing device/wallet signals.
+    #
+    # 3 is deliberately more than a single completed loan (could be a fluke, or a merchant
+    # testing their own account with a small purchase) or even two, while still being reachable
+    # within a normal customer relationship given SahulatKar's short (weeks-to-months)
+    # installment plans. Configurable like every other threshold here so risk/admin can tighten
+    # or loosen it without a code deploy — but the "zero tolerance" half of the rule (ANY
+    # missed/late installment anywhere in the user's history disqualifies them, regardless of
+    # this count) is NOT configurable here; it's intentionally hardcoded in
+    # has_repayment_track_record so a policy misconfiguration can never relax it.
+    graduation_min_repaid_loans: int = 3
+
     # WOE-style points scorecard (Phase 3): each 0-100 input signal is binned, and the bin's
     # points are summed — not multiplied through a continuous weight — so the contribution of
     # a signal can be tuned per-band (e.g. "reward strong identity trust disproportionately")

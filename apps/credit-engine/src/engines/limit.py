@@ -4,11 +4,13 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.credit_reason_codes import FlagCode
+from sk_shared.models.auth import User
 from sk_shared.models.credit import CreditApplication
+from sk_shared.models.payment import Installment, Loan
 from src.policy.rule_policy import RulePolicy
 
 
@@ -77,6 +79,69 @@ class LimitEngine:
             return limit
         return min(limit, cap)
 
+    async def has_repayment_track_record(self, db: AsyncSession, user_id: str) -> bool:
+        """Graduates a proven customer out of the cold-start cap using real, already-available
+        repayment history (Loan/Installment, owned by payment-orchestrator but written to the
+        same physical database credit-engine reads elsewhere too — see
+        AffordabilityEngine._latest_bank_statement / pipeline._get_user_int_id for the same
+        uuid->users.id resolution pattern), independent of the device/IP/bank-statement signal
+        `data_sparse` depends on. That signal is permanently unavailable in production (no
+        wallet/device-fingerprinting/IP-intelligence vendor is integrated — see wallet.py /
+        identity.py / fraud.py), so without this, its "graduate out of cold-start" exit could
+        never fire for a real applicant, and every repeat customer would be capped forever.
+
+        Rule: at least `policy.graduation_min_repaid_loans` fully-repaid (`Loan.status ==
+        "fully_paid"`) prior loans, with ZERO evidence anywhere in the user's loan history of a
+        missed or late installment. See RulePolicy.graduation_min_repaid_loans for why that
+        count defaults to 3.
+
+        Deliberately conservative in both directions — this is underwriting logic for a
+        regulated lender, so it must only ever relax the cap for a genuinely proven customer:
+          - Only `fully_paid` loans count toward the threshold. `active`/`partially_paid` loans
+            aren't finished yet; `defaulted`/`written_off`/`disputed` are exactly the outcomes
+            the cold-start cap exists to protect against.
+          - ANY negative signal disqualifies the user entirely, not just the loan it occurred
+            on: a nonzero `Loan.late_fee_total` on ANY of the user's loans (fully paid or not),
+            or any `Installment` ever left in `overdue`/`defaulted` status, or carrying a
+            nonzero `late_fee_amount` (checked independently of `late_fee_total` in case a
+            future write path updates one without the other) — any of these means this returns
+            False regardless of how many clean loans exist elsewhere in the history.
+        """
+        try:
+            user_uuid = UUID(user_id)
+        except ValueError:
+            return False
+        user_int_id = (await db.execute(select(User.id).where(User.uuid == user_uuid))).scalar_one_or_none()
+        if user_int_id is None:
+            return False
+
+        any_late_fee_stmt = select(func.count()).select_from(Loan).where(
+            Loan.user_id == user_int_id,
+            Loan.deleted_at.is_(None),
+            Loan.late_fee_total > 0,
+        )
+        if (await db.execute(any_late_fee_stmt)).scalar_one() > 0:
+            return False
+
+        any_bad_installment_stmt = select(func.count()).select_from(Installment).where(
+            Installment.user_id == user_int_id,
+            Installment.deleted_at.is_(None),
+            or_(
+                Installment.status.in_(("overdue", "defaulted")),
+                Installment.late_fee_amount > 0,
+            ),
+        )
+        if (await db.execute(any_bad_installment_stmt)).scalar_one() > 0:
+            return False
+
+        fully_paid_count_stmt = select(func.count()).select_from(Loan).where(
+            Loan.user_id == user_int_id,
+            Loan.deleted_at.is_(None),
+            Loan.status == "fully_paid",
+        )
+        fully_paid_count = (await db.execute(fully_paid_count_stmt)).scalar_one()
+        return fully_paid_count >= self.policy.graduation_min_repaid_loans
+
     def clamp_to_maximum(self, limit: float) -> float:
         return min(limit, self.maximum_limit)
 
@@ -87,6 +152,17 @@ class LimitEngine:
         requested_amount: float,
     ) -> PortfolioResult:
         user_uuid = UUID(user_id)
+
+        # CE-HIGH-01: DB-level layer of the TOCTOU guard, alongside (not instead of) the
+        # per-user Redis lock routes.py's /credit/apply now holds across this check and the
+        # CreditApplication insert that follows it (see _portfolio_lock_key there). Locking
+        # the user's own row means any concurrent transaction that reaches this same check
+        # for this user — including a future caller that doesn't go through that route — is
+        # serialized behind whichever one commits its CreditApplication first, on Postgres.
+        # A no-op on SQLite (as with the identical with_for_update() use in
+        # payment-orchestrator's payments.py), so it does nothing in this test suite; the
+        # Redis lock is what actually closes the race there.
+        await db.execute(select(User.id).where(User.uuid == user_uuid).with_for_update())
 
         current_limit_stmt = select(func.coalesce(func.max(CreditApplication.approved_limit), Decimal("0"))).where(
             CreditApplication.user_id == user_uuid,

@@ -35,6 +35,7 @@ event-listener = "src.workers.event_listener:main"
 vcn-verifier = "src.workers.vcn_verification_worker:main"
 dlq-monitor = "src.workers.dlq_worker:main"
 price-staleness-worker = "src.workers.price_staleness_worker:main"
+execution-reaper-worker = "src.workers.execution_reaper_worker:main"
 
 [project.optional-dependencies]
 test = [

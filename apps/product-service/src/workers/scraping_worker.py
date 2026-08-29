@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 import signal
 import socket
 from datetime import datetime, timedelta, timezone
@@ -92,6 +93,45 @@ class ScrapingWorker:
                 except Exception as e:
                     await self._send_to_dlq(payload, str(e))
 
+    @staticmethod
+    def _is_rate_limited_result(result: object) -> bool:
+        """True if a failed ExtractionResult indicates an upstream 429.
+
+        ExtractionWaterfallService.run_tier3 tags a 429 from the LLM
+        provider (OpenAI/Groq) with error_code="RATE_LIMITED", but
+        ExtractionWaterfallService.extract() (the full waterfall) always
+        collapses the *final* result to error_code="EXTRACTION_FAILED" when
+        every tier fails, folding each tier's actual reason into the
+        error_message string instead (see its `failures` list). So we check
+        both: error_code directly (covers a bare run_tier3() failure) and
+        error_message (covers the waterfall's aggregated failure, which is
+        what scraping_worker.py actually receives from `.extract()`).
+        """
+        error_code = getattr(result, "error_code", None) or ""
+        error_message = getattr(result, "error_message", None) or ""
+        return "RATE_LIMITED" in error_code or "RATE_LIMITED" in error_message
+
+    @staticmethod
+    def _retry_backoff_seconds(failed_attempt_number: int, rate_limited: bool) -> float:
+        """Exponential backoff (with jitter) before re-queuing a failed
+        extraction attempt.
+
+        HIGH-05: base * 2^(attempt-1), capped at
+        EXTRACTION_RETRY_BACKOFF_MAX_SECONDS, plus up to 25% jitter so many
+        simultaneously-failing jobs don't all wake up and hammer the same
+        upstream at the exact same instant. A 429 (rate limit) from the LLM
+        provider gets a longer initial delay than a generic transient error,
+        since a rate-limited upstream needs more time to recover than e.g. a
+        one-off network blip.
+        """
+        base = settings.EXTRACTION_RETRY_BACKOFF_BASE_SECONDS
+        if rate_limited:
+            base *= 4
+        exponent = max(failed_attempt_number - 1, 0)
+        backoff = min(base * (2 ** exponent), settings.EXTRACTION_RETRY_BACKOFF_MAX_SECONDS)
+        jitter = random.uniform(0, backoff * 0.25)
+        return backoff + jitter
+
     async def _send_to_dlq(self, payload: dict, error: str) -> None:
         dlq_entry = {
             **payload,
@@ -146,10 +186,22 @@ class ScrapingWorker:
 
             max_attempts = scraping_job.max_attempts or settings.EXTRACTION_MAX_RETRIES
             if scraping_job.attempt_number < max_attempts:
+                # HIGH-05 fix: capture the attempt number *before* incrementing
+                # so the first retry backs off at the base delay (2^0), the
+                # second at 2x, etc. — the old code re-queued instantly with
+                # zero delay, burning through EXTRACTION_MAX_RETRIES in a
+                # fraction of a second instead of giving a transient failure
+                # (or a rate-limited upstream) any time to recover.
+                failed_attempt_number = scraping_job.attempt_number
                 scraping_job.attempt_number += 1
                 scraping_job.status = "retrying"
                 await db.commit()
-                # GAP-01: Re-queue at the front (FIFO) or back? 
+
+                rate_limited = self._is_rate_limited_result(result)
+                delay = self._retry_backoff_seconds(failed_attempt_number, rate_limited)
+                await asyncio.sleep(delay)
+
+                # GAP-01: Re-queue at the front (FIFO) or back?
                 # FIFO means lpush to left. Correct.
                 retry_payload = dict(payload)
                 retry_payload["job_id"] = str(job_uuid)

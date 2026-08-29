@@ -41,13 +41,35 @@ logger = logging.getLogger(__name__)
 router = APIRouter(tags=["webhooks"])
 
 
-async def _dedupe_webhook(redis: RedisClient, body: bytes, signature: str) -> bool:
+async def _dedupe_webhook(
+    redis: RedisClient,
+    gateway: str,
+    stable_id: str | None,
+    body: bytes,
+    signature: str,
+) -> bool:
     """
     Prevent duplicate processing of retried webhook deliveries.
-    Key is SHA-256 of (body + signature). TTL = 24h.
+
+    PO-CRIT-04: Keyed primarily on a stable identifier pulled out of the
+    gateway's own payload (gateway_txn_id / refund_reference /
+    mandate_reference / Stripe event id — whichever that gateway's event
+    carries), not on SHA-256(body + signature). A legitimate retry of the
+    *same* logical event from the gateway is not guaranteed to be
+    byte-identical to the original delivery (re-signed timestamp, reordered
+    fields, added metadata, etc.), so hashing the raw body silently fails to
+    recognize it as a repeat and lets it double-process. Falls back to the
+    body+signature hash only when this specific gateway's payload carries no
+    such identifier (e.g. malformed/legacy payloads) — namespaced per
+    gateway either way so two gateways' ids can never collide. TTL = 24h.
+
     Returns True if the webhook should be processed, False if duplicate.
     """
-    dedup_key = f"sk:webhook:dedup:{hashlib.sha256(body + signature.encode('utf-8')).hexdigest()}"
+    if stable_id:
+        dedup_key = f"sk:webhook:dedup:{gateway}:{stable_id}"
+    else:
+        body_hash = hashlib.sha256(body + signature.encode("utf-8")).hexdigest()
+        dedup_key = f"sk:webhook:dedup:{gateway}:hash:{body_hash}"
     if await redis.get(dedup_key):
         return False
     await redis.set(dedup_key, "1", ttl=RedisTTL.WEBHOOK_DEDUP)
@@ -68,11 +90,14 @@ async def safepay_webhook(
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="safepay", outcome="invalid_sig").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    if not await _dedupe_webhook(redis, body, signature):
+    # PO-CRIT-04: parse before dedup so we can key on the gateway's own
+    # stable transaction id instead of a raw body+signature hash.
+    event = client.parse_event(body)
+
+    if not await _dedupe_webhook(redis, "safepay", event.get("gateway_txn_id") or None, body, signature):
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="safepay", outcome="duplicate").inc()
         return WebhookAck(status="duplicate")
 
-    event = client.parse_event(body)
     event_status = event.get("status", "")
 
     if event_status not in {"PAID", "paid", "success"}:
@@ -121,11 +146,12 @@ async def jazzcash_webhook(
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="jazzcash", outcome="invalid_sig").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    if not await _dedupe_webhook(redis, body, signature):
+    event = client.parse_event(body)
+
+    if not await _dedupe_webhook(redis, "jazzcash", event.get("gateway_txn_id") or None, body, signature):
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="jazzcash", outcome="duplicate").inc()
         return WebhookAck(status="duplicate")
 
-    event = client.parse_event(body)
     if event.get("status") != "success":
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="jazzcash", outcome="ignored").inc()
         return WebhookAck(status="ignored")
@@ -173,11 +199,12 @@ async def raast_webhook(
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast", outcome="invalid_sig").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    if not await _dedupe_webhook(redis, body, signature):
+    event = client.parse_webhook(body)
+
+    if not await _dedupe_webhook(redis, "raast", event.get("gateway_txn_id") or None, body, signature):
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast", outcome="duplicate").inc()
         return WebhookAck(status="duplicate")
 
-    event = client.parse_webhook(body)
     if event.get("status") != "success":
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast", outcome="ignored").inc()
         return WebhookAck(status="ignored")
@@ -225,13 +252,14 @@ async def raast_mandate_webhook(
         WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="invalid_sig").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    if not await _dedupe_webhook(redis, body, signature):
-        WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="duplicate").inc()
-        return WebhookAck(status="duplicate")
-
     import json
     data = json.loads(body.decode("utf-8"))
     mandate_ref = data.get("mandate_reference")
+
+    if not await _dedupe_webhook(redis, "raast_mandate", mandate_ref, body, signature):
+        WEBHOOK_RECEIVED_TOTAL.labels(gateway="raast_mandate", outcome="duplicate").inc()
+        return WebhookAck(status="duplicate")
+
     mandate_status = "active" if data.get("status") == "success" else "failed"
 
     if not mandate_ref:
@@ -276,12 +304,13 @@ async def _process_refund_completion_webhook(
         WEBHOOK_RECEIVED_TOTAL.labels(gateway=metric_gateway, outcome="invalid_sig").inc()
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    if not await _dedupe_webhook(redis, body, signature):
+    data = json.loads(body.decode("utf-8"))
+    refund_reference = data.get("refund_reference")
+
+    if not await _dedupe_webhook(redis, metric_gateway, refund_reference, body, signature):
         WEBHOOK_RECEIVED_TOTAL.labels(gateway=metric_gateway, outcome="duplicate").inc()
         return WebhookAck(status="duplicate")
 
-    data = json.loads(body.decode("utf-8"))
-    refund_reference = data.get("refund_reference")
     gateway_refund_id = data.get("gateway_refund_id", "")
     event_status = data.get("status")
 
@@ -369,7 +398,7 @@ async def stripe_webhook(
     endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
 
     if not endpoint_secret:
-        if settings.ENVIRONMENT != "local":
+        if not settings.test_payment_fallbacks_enabled:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="STRIPE_WEBHOOK_NOT_CONFIGURED")
         logger.warning("STRIPE_WEBHOOK_SECRET not configured, skipping verification")
         # In dev, we might skip signature verification if secret is missing
@@ -385,11 +414,14 @@ async def stripe_webhook(
         except stripe.error.SignatureVerificationError:
             raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="INVALID_SIGNATURE")
 
-    # Deduplication
-    if sig_header and not await _dedupe_webhook(redis, payload, sig_header):
+    # Deduplication — keyed on Stripe's own event id (`evt_...`), which is
+    # already the canonical idempotency key Stripe recommends for this
+    # exact purpose, rather than a hash of the raw delivery.
+    stripe_event_id = event.get("id") if hasattr(event, "get") else None
+    if sig_header and not await _dedupe_webhook(redis, "stripe", stripe_event_id, payload, sig_header):
         return WebhookAck(status="duplicate")
 
-    orchestrator = VcnOrchestrator(db)
+    orchestrator = VcnOrchestrator(db, redis)
     # Stripe events have type and data.object
     await orchestrator.handle_stripe_event(event["type"], event["data"]["object"])
     

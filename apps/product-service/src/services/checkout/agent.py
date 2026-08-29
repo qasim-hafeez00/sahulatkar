@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import socket
 from datetime import datetime, timezone
 import time
@@ -27,6 +28,22 @@ from sk_shared.models.order import Order
 from sk_shared.models.payment import VirtualCard
 from sk_shared.models.product import Product
 from sk_shared.redis_client import RedisClient
+
+logger = logging.getLogger(__name__)
+
+
+class CheckoutCancelledError(RuntimeError):
+    """Raised when a PurchaseExecution is found cancelled mid-flight.
+
+    HIGH-03: a `cancel_job` call (from the /job/{id}/cancel admin endpoint)
+    or an `order.cancelled` event (event_listener.py's
+    `_handle_order_cancelled`) marks the execution row 'cancelled' from a
+    *different* DB session while `process_job` may still be mid-Playwright-
+    run in the checkout worker. This exception is how `process_job` unwinds
+    once it notices that happened, instead of finishing the purchase and
+    overwriting 'cancelled' back to 'succeeded'.
+    """
+
 
 class CheckoutAgentService:
     """Orchestrator for autonomous checkout operations.
@@ -156,6 +173,20 @@ class CheckoutAgentService:
                 execution.step_reached = step
                 await self.db.commit()
 
+                # HIGH-03 fix: a cancel_job()/order.cancelled event lands in a
+                # *different* DB session (a separate admin/gateway request or
+                # the event_listener worker), so it won't be visible on this
+                # `execution` object without re-querying — expire_on_commit
+                # is False and nothing here would otherwise ever see it. Poll
+                # the persisted status between every Playwright step so a
+                # cancellation actually halts the in-flight purchase instead
+                # of letting it run to completion and clobber 'cancelled'.
+                current_status = await self.db.scalar(
+                    select(PurchaseExecution.status).where(PurchaseExecution.id == execution.id)
+                )
+                if current_status == "cancelled":
+                    raise CheckoutCancelledError(step)
+
             self.form_filler.set_step_callback(emit_step)
 
             # Card data is never carried in the queue payload — fetch it
@@ -174,6 +205,18 @@ class CheckoutAgentService:
                 attempt_number=execution.attempt_number,
                 execution_uuid=str(execution.uuid),
             )
+
+            # HIGH-03 fix (final race-window check): emit_step's per-step
+            # check above closes most of the window, but a cancellation could
+            # still land after the last step check (order_confirmed) and
+            # before this commit. Re-check right before writing 'succeeded'
+            # so a cancelled order's row is never clobbered back to a
+            # non-cancelled terminal state.
+            current_status = await self.db.scalar(
+                select(PurchaseExecution.status).where(PurchaseExecution.id == execution.id)
+            )
+            if current_status == "cancelled":
+                raise CheckoutCancelledError("order_confirmed")
 
             # Update status upon visual confirmation
             execution.status = "succeeded"

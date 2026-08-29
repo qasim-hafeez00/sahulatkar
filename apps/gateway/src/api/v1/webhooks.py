@@ -6,11 +6,15 @@ import json
 from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Request, status
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import QueueName
+from sk_shared.models.webhook import ProcessedWebhookEvent
 from sk_shared.redis_client import RedisClient
 from src.config import settings
-from src.core.dependencies import get_redis
+from src.core.dependencies import get_db, get_redis
 from src.core.logging import logger
 
 router = APIRouter(prefix="/webhooks", tags=["webhooks"])
@@ -46,19 +50,81 @@ def _enforce_payload_size(raw_body: bytes) -> None:
         )
 
 
-async def _enqueue_webhook(redis: RedisClient, payload: dict, idempotency_key: str | None = None) -> None:
-    if hasattr(redis, "redis"):
-        if idempotency_key:
-            cache_key = f"sk:webhook:processed:{idempotency_key}"
-            if await redis.redis.get(cache_key):
-                logger.info("Webhook duplicate skipped: %s", idempotency_key)
+async def _enqueue_webhook(
+    redis: RedisClient,
+    payload: dict,
+    idempotency_key: str | None = None,
+    *,
+    gateway: str = "unknown",
+    db: AsyncSession | None = None,
+) -> None:
+    """MEDIUM fix: dedup used to be a 24h Redis SETNX marker only, with no
+    fallback -- a retried webhook arriving after the Redis key expired/was
+    evicted, or while Redis itself is unavailable, would be silently
+    re-enqueued and reprocessed with nothing to catch it. `processed_webhook_events`
+    is a second, durable layer: checked whenever Redis doesn't have the key
+    (whether because it genuinely isn't there, or because Redis errored),
+    and written to alongside the Redis marker so the next retry has both
+    layers to check.
+    """
+    if idempotency_key:
+        cache_key = f"sk:webhook:processed:{idempotency_key}"
+
+        redis_hit = False
+        if hasattr(redis, "redis"):
+            try:
+                redis_hit = bool(await redis.redis.get(cache_key))
+            except Exception as exc:
+                logger.warning("WEBHOOK_DEDUP_REDIS_UNAVAILABLE key=%s error=%s -- falling back to DB", idempotency_key, exc)
+
+        if redis_hit:
+            logger.info("Webhook duplicate skipped (redis): %s", idempotency_key)
+            return
+
+        if db is not None:
+            existing = await db.scalar(
+                select(ProcessedWebhookEvent).where(ProcessedWebhookEvent.idempotency_key == idempotency_key)
+            )
+            if existing is not None:
+                logger.info("Webhook duplicate skipped (db fallback): %s", idempotency_key)
+                # Redis marker was missing/expired but the DB row wasn't -- repair the
+                # fast-path cache so the next retry doesn't need the DB round-trip.
+                if hasattr(redis, "redis"):
+                    try:
+                        await redis.redis.set(cache_key, "1", ex=86400)
+                    except Exception:
+                        pass
                 return
-            await redis.redis.set(cache_key, "1", ex=86400)
+
+        if hasattr(redis, "redis"):
+            try:
+                await redis.redis.set(cache_key, "1", ex=86400)
+            except Exception as exc:
+                logger.warning("WEBHOOK_DEDUP_REDIS_SET_FAILED key=%s error=%s", idempotency_key, exc)
+
+        if db is not None:
+            db.add(ProcessedWebhookEvent(
+                idempotency_key=idempotency_key,
+                gateway=gateway,
+                processed_at=datetime.now(timezone.utc),
+            ))
+            try:
+                await db.commit()
+            except IntegrityError:
+                # Lost a race against a concurrent duplicate -- the other request's
+                # row already recorded this key; nothing more to do.
+                await db.rollback()
+
+    if hasattr(redis, "redis"):
         await redis.redis.lpush(QueueName.PAYMENT_WEBHOOK, json.dumps(payload)) # GAP-09
 
 
 @router.post("/payment/jazzcash")
-async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
+async def jazzcash_webhook(
+    request: Request,
+    redis: RedisClient = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     _enforce_json_content_type(request)
     raw_body = await request.body()
     _enforce_payload_size(raw_body)
@@ -78,12 +144,18 @@ async def jazzcash_webhook(request: Request, redis: RedisClient = Depends(get_re
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         },
         idempotency_key,
+        gateway="jazzcash",
+        db=db,
     )
     return {"received": True, "gateway": "jazzcash"}
 
 
 @router.post("/payment/safepay")
-async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
+async def safepay_webhook(
+    request: Request,
+    redis: RedisClient = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     _enforce_json_content_type(request)
     raw_body = await request.body()
     _enforce_payload_size(raw_body)
@@ -101,6 +173,8 @@ async def safepay_webhook(request: Request, redis: RedisClient = Depends(get_red
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         },
         idempotency_key,
+        gateway="safepay",
+        db=db,
     )
     return {"received": True, "gateway": "safepay"}
 
@@ -134,7 +208,11 @@ _STRIPE_ROUTABLE_EVENTS = {
 
 
 @router.post("/payment/stripe")
-async def stripe_webhook(request: Request, redis: RedisClient = Depends(get_redis)) -> dict:
+async def stripe_webhook(
+    request: Request,
+    redis: RedisClient = Depends(get_redis),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
     _enforce_json_content_type(request)
     raw_body = await request.body()
     _enforce_payload_size(raw_body)
@@ -163,5 +241,7 @@ async def stripe_webhook(request: Request, redis: RedisClient = Depends(get_redi
             "triggered_at": datetime.now(timezone.utc).isoformat(),
         },
         idempotency_key,
+        gateway="stripe",
+        db=db,
     )
     return {"received": True, "gateway": "stripe", "routed": True}

@@ -176,11 +176,14 @@ class VcnKeyProvider:
         }
         secret = version_map.get(version)
 
-        if not secret and version == self.LEGACY_VERSION and settings.ENVIRONMENT == "local":
+        if not secret and version == self.LEGACY_VERSION and settings.test_payment_fallbacks_enabled:
             # Local-dev fallback so nothing requires real secrets to run locally/in tests.
+            # HIGH-01: gated on the explicit ALLOW_TEST_PAYMENT_FALLBACKS flag (not just
+            # ENVIRONMENT=="local") so a misconfigured deploy that leaves ENVIRONMENT unset
+            # doesn't silently encrypt real PAN/CVV data under a well-known dev key.
             secret = "local-dev-vcn-key"
 
-        if not secret and settings.ENVIRONMENT != "local":
+        if not secret and not settings.test_payment_fallbacks_enabled:
             raise RuntimeError(
                 f"VCN encryption key for version '{version}' is required outside the "
                 "local environment (set VCN_ENCRYPTION_KEY / VCN_ENCRYPTION_KEY_V2 / "

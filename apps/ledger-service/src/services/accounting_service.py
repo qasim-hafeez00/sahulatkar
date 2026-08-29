@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 from decimal import Decimal, ROUND_HALF_UP
 from typing import Iterable
 from uuid import uuid4
@@ -156,15 +156,22 @@ class AccountingService:
                 PostingLine(ACCOUNT_CODES["charity_payable"], credit_amount=self._money(amount)),
             ],
         )
-        allocation = LateFeeCharityAllocation(
-            installment_id=installment.id,
-            loan_id=installment.loan_id,
-            late_fee_amount=self._money(amount),
-            charity_org_id=charity_org.id,
-            allocated_at=datetime.now(timezone.utc),
-        )
-        self.db.add(allocation)
+        # BV-CRIT: The charity allocation must be decided by the SAME
+        # idempotency check as the JournalEntry above (result.created), not
+        # independently. Previously this insert ran unconditionally even when
+        # `_create_balanced_entry` found the JournalEntry already existed
+        # (result.created == False), which raised an IntegrityError against
+        # LateFeeCharityAllocation.installment_id's UniqueConstraint the
+        # second time a late fee was attempted for the same installment.
         if result.created:
+            allocation = LateFeeCharityAllocation(
+                installment_id=installment.id,
+                loan_id=installment.loan_id,
+                late_fee_amount=self._money(amount),
+                charity_org_id=charity_org.id,
+                allocated_at=datetime.utcnow(),
+            )
+            self.db.add(allocation)
             await self.db.commit()
             await self.db.refresh(result.journal_entry)
         return result
@@ -328,6 +335,8 @@ class AccountingService:
                 PostingLine(counter_account_code, debit_amount=adjustment_amount),
             ]
 
+        self._reject_manual_credit_to_late_fee_collections(lines)
+
         result = await self._create_balanced_entry(
             entry_type="manual_adjustment",
             source_type="ledger.manual_adjustment",
@@ -360,10 +369,12 @@ class AccountingService:
             for line in lines
         ]
         
-        # For manual entries, we use a random source_id to avoid collision, 
+        self._reject_manual_credit_to_late_fee_collections(posting_lines)
+
+        # For manual entries, we use a random source_id to avoid collision,
         # but reference can be provided for idempotency.
         source_id = reference or f"MAN-{uuid4().hex[:12].upper()}"
-        
+
         result = await self._create_balanced_entry(
             entry_type="manual",
             source_type="ledger.manual_entry",
@@ -1141,3 +1152,35 @@ class AccountingService:
 
     def _money(self, value: Decimal | float | int) -> Decimal:
         return Decimal(str(value)).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+
+    def _reject_manual_credit_to_late_fee_collections(self, lines: Iterable[PostingLine]) -> None:
+        """
+        Shariah-compliance guardrail (LS-HIGH-03): account 4003
+        (late_fee_collections) is documented as a "legacy reporting bucket,
+        should remain zero in platform P&L" (migration 011) -- late fees must
+        always route to charity_payable (2100), never to platform revenue.
+
+        The automated late-fee path (record_late_fee) is structurally safe:
+        it hardcodes ACCOUNT_CODES["charity_payable"] and never references
+        4003 at all. Manual admin journal entries (record_manual_entry via
+        POST /entries/manual, and record_manual_adjustment) take arbitrary
+        account codes from caller/user input, so nothing previously stopped
+        an admin -- accidentally or otherwise -- from crediting 4003 directly,
+        which would misroute late-fee-like revenue away from charity and into
+        a reporting bucket that (per its own documentation) is never supposed
+        to carry a balance.
+
+        This blocks only CREDITS to 4003. The one legitimate touch to this
+        account is the annual period-close entry (PeriodService.close_period)
+        that zeroes out its balance by DEBITING it -- that must keep working,
+        which is exactly why this only inspects credit_amount.
+        """
+        for line in lines:
+            if line.account_code == ACCOUNT_CODES["late_fee_collections"] and line.credit_amount > 0:
+                raise ValueError(
+                    "MANUAL_CREDIT_TO_LATE_FEE_COLLECTIONS_BLOCKED: Account "
+                    f"{ACCOUNT_CODES['late_fee_collections']} (late_fee_collections) cannot be "
+                    "credited via a manual journal entry. Late fees must be routed to "
+                    "charity_payable via the automated late-fee posting path "
+                    "(AccountingService.record_late_fee), never posted as platform revenue."
+                )

@@ -1,8 +1,8 @@
 # Gateway Microservice — Complete Engineering Reference & Production Audit
 
 **Service path:** `apps/gateway/`  
-**Audit date:** 2026-04-27  
-**Status:** ✅ Production-Ready — Zero Open Gaps  
+**Audit date:** 2026-04-27, corrected and re-verified 2026-08-28  
+**Status:** ⚠️ Functionally complete, was NOT zero-gaps as previously claimed — see [§11](#11-bug--gap-resolution-log). A rigorous 2026-08 cross-service audit (`docs/PRODUCTION_GAPS_REPORT_2026-08.md`) found real CRITICAL/HIGH bugs in Gateway specifically. All Gateway-specific CRITICAL findings and the Gateway-specific HIGH findings listed in that report have since been verified fixed by direct reading of the current code (not just trusting the report) — see §11 for the itemized disposition. Zero cross-service/E2E test coverage was the deeper finding; a first real E2E test now exists (see end of §1).  
 
 ---
 
@@ -36,6 +36,8 @@ The **Gateway** is the single HTTP entry point for all external and inter-servic
 - **Delivery tracking** — async Redis pub/sub listener that applies shipment and delivery events to order records
 
 No other microservice exposes external HTTP endpoints. All downstream services receive work via Redis queues or direct HTTP calls signed with `INTERNAL_SERVICE_TOKEN`.
+
+**For a new frontend team:** a real cross-service end-to-end test now exists at `tests/e2e/test_order_lifecycle.py` (with `tests/e2e/conftest.py`), exercising the full order lifecycle through this Gateway — order creation → extraction → offer → Wakalah/Murabaha signing → down payment → VCN issuance → delivery — against real (not mocked) sibling services. Local full-stack development and testing is done via `docker compose` (see `infra/docker/docker-compose.yml`, which brings up all 6 services + Postgres + Redis + PgBouncer). Running that E2E suite against a live `docker compose up` stack is the most reliable way for a new frontend's AI coding agent to see exact request/response shapes for every step of the order flow, rather than relying solely on this document.
 
 ---
 
@@ -172,7 +174,7 @@ Microservice → POST /api/v1/internal/{endpoint}
 |---|---|
 | `src/main.py` | FastAPI app factory. Runs `validate_critical_settings()` at startup (aborts on misconfiguration in production). Starts Redis connection pool, `delivery_event_listener` (pub/sub), `listener_watchdog` (auto-restart on crash), and `InternalServiceClient` HTTP pool. Registers all middleware and the main router. Exposes `GET /health` (DB + Redis + listener). |
 | `src/config.py` | `pydantic-settings` `BaseSettings`. All config from environment variables with `.env` fallback. Contains `validate_critical_settings()` which checks KMS key, internal token, webhook secrets, S3 bucket, SECP license, and JWT private key when `ENVIRONMENT=production`. |
-| `src/api/routes.py` | Single `APIRouter` that imports and mounts all 26 sub-routers under `/api/v1/`. Also exposes `GET /api/v1/health-check`. |
+| `src/api/routes.py` | Single `APIRouter` that imports and mounts all 36 sub-router objects (35 files under `src/api/v1/` — `admin_compliance.py` defines two: `router` and a separate `audit_router`) under `/api/v1/`. Also exposes `GET /api/v1/health-check`. |
 
 ### 5.2 Core Infrastructure
 
@@ -198,6 +200,9 @@ Microservice → POST /api/v1/internal/{endpoint}
 | `contracts.py` | `/contracts` | `POST /wakalah/generate`, `POST /wakalah/sign`, `POST /murabaha/generate`, `POST /murabaha/sign`, `GET /{order_id}` (status), `GET /{type}/{id}/download`, `GET /{type}/{id}/verify` |
 | `credit.py` | `/credit` | `GET /status`, `GET /history` |
 | `profile.py` | `/profile` | `GET /notifications`, `PUT /notifications`, `GET /referrals` |
+| `cart.py` | `/cart` | `POST /items` (add product URL, kicks off extraction+offer like `orders.py`), `GET` (list), `DELETE /items/{id}`, `POST /checkout` (converts cart into orders under one installment plan) — backed by `services/cart_service.py` |
+| `support.py` | `/support` | `POST /tickets`, `GET /tickets`, `GET /tickets/{id}`, `POST /tickets/{id}/messages` — customer-facing support ticket CRUD over raw-SQL `support_tickets`/`ticket_messages` tables; a reply on a resolved/waiting ticket reopens it |
+| `notifications.py` | `/notifications` | `GET` (paginated, `unread_only` filter), `POST /{id}/read`, `POST /read-all` — customer in-app notification inbox (separate from `admin_notifications.py`'s admin-side template/broadcast console) |
 | `webhooks.py` | `/webhooks` | `POST /payment/jazzcash`, `POST /payment/safepay`, `POST /payment/stripe` |
 | `internal.py` | `/internal` | `POST /orders/{id}/product-extracted`, `POST /orders/{id}/extraction-failed`, `POST /payments/{id}/confirm`, `POST /users/{id}/credit-result`, `POST /credit/update-result`, `POST /orders/{id}/shipment-registered`, `POST /shipment/register`, `POST /orders/{id}/checkout-status` |
 
@@ -210,13 +215,21 @@ Microservice → POST /api/v1/internal/{endpoint}
 | `admin_analytics.py` | `/admin/analytics` | `GET /revenue`, `GET /user-growth`, `GET /product-performance` (`read_analytics`) |
 | `admin_kyc.py` | `/admin/kyc` | `GET /queue`, `GET /queue/{id}`, `POST /queue/{id}/claim`, `POST /queue/{id}/approve`, `POST /queue/{id}/reject` (`manage_kyc_queue`) |
 | `admin_hitl.py` | `/admin/hitl` | `GET /queue`, `GET /queue/{id}`, `POST /queue/{id}/claim`, `POST /queue/{id}/resolve`, `POST /queue/{id}/escalate` |
-| `admin_orders.py` | `/admin/orders` | `GET /` (paginated, filtered list), `GET /{id}`, `PUT /{id}/status` (`manage_orders`) |
+| `admin_orders.py` | `/admin/orders` | Much larger than originally documented. `GET ""` (paginated/filtered list, `read_order`), `GET /summary`, `GET /{id}`, `PUT /{id}/status` (validated against `OrderState`, `manage_orders`), `GET /{id}/installments`, `GET /{id}/payments` (`manage_payments`), `GET /{id}/timeline`, `GET /{id}/vcn`, `POST /{id}/retry-vcn` (HIGH-2 fix — re-queues a stuck `pending_vcn` order's VCN issuance job; previously only a read-only view existed), `POST /{id}/refund`, `POST /{id}/restructure`, `POST ""` (manual order creation, `manage_orders`), `GET /{id}/communications`. List/detail queries were fixed to stop swallowing real SQL errors as empty results/404s (see §11 CRITICAL-11 disposition) |
 | `admin_payments.py` | `/admin/payments` | `GET /transactions`, `GET /transactions/{id}`, `POST /refund/{order_id}` (`manage_payments`) |
 | `admin_installments.py` | `/admin/installments` | `GET /`, `GET /{id}`, `POST /{id}/waive-fee`, `POST /{id}/mark-paid` (`manage_payments`) |
 | `admin_users.py` | `/admin/users` | `GET /` (search by ID/phone), `GET /{id}`, `PUT /{id}/status`, `POST /{id}/blacklist`, `PUT /{id}/credit-limit`, `DELETE /{id}` (`manage_users`) |
 | `admin_risk.py` | `/admin/risk` | `GET /blacklist`, `POST /blacklist`, `DELETE /blacklist/{id}` (`manage_risk`) |
-| `admin_system.py` | `/admin/system` | `GET /parameters`, `POST /parameters` (`manage_system`) |
-| `admin_compliance.py` | `/admin/compliance` | `GET /audit-trail`, `GET /shariah-audit` (`read_compliance`) + separate `audit_router` for `GET /audit` |
+| `admin_approvals.py` | `/admin/approval-requests` | Generic manager-approval workflow shared by credit-limit-increase and loan-restructuring flows. `GET ""`, `GET /{id}`, `POST /{id}/decision` (approve/reject; rejects self-approval; `approved` + `credit_limit_increase` auto-applies the new limit) — all `manage_users` |
+| `admin_finance.py` | `/admin/finance` | `GET /pnl` (monthly GMV/profit/cost series), `GET /credit-loss` (defaulted/written-off exposure + provision estimate, reads `credit_loss_provision_rate_pct` from `admin_system`), `GET /tax-summary` (GST liability, reads `gst_rate_pct`), `POST /tax-summary/generate` (`manage_financials`, snapshots an FBR GST-return filing row) — all `read_financials` unless noted |
+| `admin_notifications.py` | `/admin/notifications` | Admin-side notification console (distinct from customer-facing `notifications.py`). `GET ""`, `GET /summary`, `GET /templates`, `POST /templates`, `PUT /templates/{id}` (`manage_system`), `POST /broadcast` (segmented push to `all_active`/`pending_kyc`/specific user IDs, max 5000 recipients, `manage_system`) — reads default `read_reports` |
+| `admin_documents.py` | `/admin/documents` | Admin-side complement to the KYC queue for raw `user_documents` rows. `GET ""`, `GET /{id}`, `POST /{id}/decision` (verified/rejected), `GET /summary/counts` — all `manage_kyc_queue` |
+| `admin_logs.py` | `/admin/logs` | Standalone operational log viewer (not compliance-scoped, unlike `admin_compliance.py`). `GET /errors`, `GET /background-jobs`, `GET /scheduled-tasks`, `GET /summary` — all `read_reports` |
+| `admin_reports.py` | `/admin/reports` | Wraps the `regulatory_reports` table populated by `admin_finance.py`'s tax-filing endpoint. `GET ""` (filterable by `report_type`), `GET /summary` — `read_reports` |
+| `admin_developer.py` | `/admin/developer` | Partner/merchant API integration management. `GET /api-keys`, `POST /api-keys` (returns the raw key once, `manage_system`), `DELETE /api-keys/{id}`, `GET /webhooks`, `GET /integration-logs`, `GET /summary` — all `manage_system` |
+| `admin_marketing.py` | `/admin/marketing` | `GET /campaigns`, `POST /campaigns` (`manage_system`), `GET /promo-codes`, `POST /promo-codes` (`manage_system`), `GET /referrals/summary`, `GET /ab-tests` — reads default `read_marketing` |
+| `admin_system.py` | `/admin/system` | `GET /parameters`, `PUT /parameters` (bulk), `PUT /parameters/{key}` (single), `GET /integrations`, `PUT /integrations/{id}`, `GET /health` — all `manage_system`. Parameters are Redis-cached (version-bumped invalidation) and are now genuinely read by business logic — `OrderService.initiate()` reads `max_active_orders`, `ContractGeneratorService` reads `wakalah_validity_days`/`murabaha_validity_days`/`profit_rate_{3,4,6,12}m`, `admin_finance.py` reads `credit_loss_provision_rate_pct`/`gst_rate_pct` — via `src/services/system_parameters.py:get_effective_system_parameters()`. See §11 CRITICAL-12 disposition — this used to be a facade with zero effect on live contracts. |
+| `admin_compliance.py` | `/admin/compliance` | `GET /audit-trail`, `GET /shariah-audit`, `GET /shariah-board-approvals`, `POST /shariah-board-approvals` (`manage_compliance` — records a real, admin-attested Shariah board sign-off per contract `template_version`; backs `MurabahaContract.validated_by_shariah_board`, see §11 HIGH disposition) — `read_compliance` unless noted, plus separate `audit_router` for `GET /admin/audit-trail` |
 | `admin_admins.py` | `/admin/admins` | `GET /` (list admins), `GET /{id}`, `DELETE /{id}` (`manage_admins`) |
 | `admin_partners.py` | `/admin/partners` | `GET /`, `GET /{id}` (`read_partners`) |
 | `admin_support.py` | `/admin/support` | `GET /tickets`, `GET /tickets/{id}`, `POST /tickets/{id}/resolve` (`read_support`) |
@@ -251,16 +264,7 @@ Microservice → POST /api/v1/internal/{endpoint}
 
 ### 5.7 Tests (`tests/`)
 
-| File | What it covers |
-|---|---|
-| `conftest.py` | In-memory SQLite with `cache=shared`, FakeRedis, `TestingSessionLocal`, `test_user` fixture (creates active user + access token), `test_admin` fixture, `client` fixture (httpx `AsyncClient` with `app`). |
-| `test_api/test_auth.py` | Core auth endpoints — registration, OTP verify, login, refresh |
-| `test_api/test_auth_full.py` | OTP resend flow; login 5-strike lockout enforcement |
-| `test_api/test_admin_kyc_full.py` | Admin KYC queue claim → approve/reject; RBAC enforcement |
-| `test_api/test_audit_trail.py` | Audit trail written on admin actions; DLQ write on failure |
-| `test_api/test_credit_status.py` | `GET /credit/status` and `GET /credit/history` |
-| `test_hard_gate.py` | VCN issuance state gate: blocked at `CONTRACTS_PENDING`, blocked at `CONTRACTS_SIGNED` (returns `DOWN_PAYMENT_NOT_CONFIRMED`), allowed at `DOWN_PAYMENT_RECEIVED` |
-| `test_services/test_delivery_events.py` | Delivery event pub/sub handlers — status update and delivery confirmation |
+The suite has grown to 34 test files (up from the 7 originally listed here) — see [§12 Test Coverage](#12-test-coverage) for the current, complete file list, what each covers, and real pass/fail numbers from actually running the suite, rather than duplicating a now-stale subset here.
 
 ---
 
@@ -325,6 +329,20 @@ GET    /api/v1/credit/history               — Credit limit change history (pag
 GET    /api/v1/profile/notifications        — Get notification preferences
 PUT    /api/v1/profile/notifications        — Update notification preferences
 GET    /api/v1/profile/referrals            — Referral code + count
+
+POST   /api/v1/cart/items                   — Add product URL to cart (kicks off extraction, like /orders/initiate)
+GET    /api/v1/cart                         — List current cart + items
+DELETE /api/v1/cart/items/{id}              — Remove cart item
+POST   /api/v1/cart/checkout                — Convert cart into orders under one installment plan
+
+POST   /api/v1/notifications/{id}/read      — Mark one in-app notification read
+POST   /api/v1/notifications/read-all       — Mark all read
+GET    /api/v1/notifications                — List in-app notifications (unread_only filter, paginated)
+
+POST   /api/v1/support/tickets              — Create support ticket (optionally linked to order/loan)
+GET    /api/v1/support/tickets              — List own tickets (category filter, paginated)
+GET    /api/v1/support/tickets/{id}         — Ticket detail + message thread
+POST   /api/v1/support/tickets/{id}/messages — Reply on a ticket (reopens if resolved/waiting)
 ```
 
 ### 6.2 Admin Endpoints
@@ -357,9 +375,19 @@ POST   /api/v1/admin/hitl/queue/{id}/claim  — Claim entry
 POST   /api/v1/admin/hitl/queue/{id}/resolve — Resolve entry
 POST   /api/v1/admin/hitl/queue/{id}/escalate — Escalate entry
 
-GET    /api/v1/admin/orders                 — Paginated, filtered order list
-GET    /api/v1/admin/orders/{id}            — Order detail
-PUT    /api/v1/admin/orders/{id}/status     — Force status transition (manage_orders)
+GET    /api/v1/admin/orders                 — Paginated, filtered order list (read_order)
+GET    /api/v1/admin/orders/summary         — Status breakdown + GMV/avg-order-value KPIs
+GET    /api/v1/admin/orders/{id}            — Order detail (incl. loan financial summary)
+PUT    /api/v1/admin/orders/{id}/status     — Force status transition, validated against OrderState (manage_orders)
+GET    /api/v1/admin/orders/{id}/installments — Installment schedule for the order's loan (manage_orders)
+GET    /api/v1/admin/orders/{id}/payments   — Payment transaction history for the order (manage_payments)
+GET    /api/v1/admin/orders/{id}/timeline   — Full order_status_history (read_order)
+GET    /api/v1/admin/orders/{id}/vcn        — Virtual card issuance status (manage_orders)
+POST   /api/v1/admin/orders/{id}/retry-vcn  — Re-queue VCN issuance for an order stuck at pending_vcn (manage_orders)
+POST   /api/v1/admin/orders/{id}/refund     — Queue a refund for a refundable order (manage_payments)
+POST   /api/v1/admin/orders/{id}/restructure — Queue a loan installment-count restructure (manage_orders)
+POST   /api/v1/admin/orders                 — Manually create an order for a user (manage_orders)
+GET    /api/v1/admin/orders/{id}/communications — Notifications sent to the customer about this order (read_order)
 
 GET    /api/v1/admin/payments/transactions  — Payment transaction list
 GET    /api/v1/admin/payments/transactions/{id} — Transaction detail
@@ -381,12 +409,18 @@ GET    /api/v1/admin/risk/blacklist         — Risk blacklist entries
 POST   /api/v1/admin/risk/blacklist         — Add blacklist entry (manage_risk)
 DELETE /api/v1/admin/risk/blacklist/{id}    — Remove blacklist entry
 
-GET    /api/v1/admin/system/parameters      — System parameters
-POST   /api/v1/admin/system/parameters      — Create/update parameter (manage_system)
+GET    /api/v1/admin/system/parameters      — System parameters (Redis-cached; genuinely consumed by order/contract/finance logic — see §5.4)
+PUT    /api/v1/admin/system/parameters      — Bulk update parameters (manage_system)
+PUT    /api/v1/admin/system/parameters/{key} — Update a single parameter (manage_system)
+GET    /api/v1/admin/system/integrations    — Third-party integration status (JazzCash, Shufti, NADRA, S3, ...)
+PUT    /api/v1/admin/system/integrations/{id} — Update integration status/config (manage_system)
+GET    /api/v1/admin/system/health          — DB/Redis health + queue depth + failed-job count
 
 GET    /api/v1/admin/compliance/audit-trail — Audit trail search (read_compliance)
 GET    /api/v1/admin/compliance/shariah-audit — Shariah compliance audit log
-GET    /api/v1/admin/audit                  — Alias for audit trail
+GET    /api/v1/admin/compliance/shariah-board-approvals — List recorded Shariah board template approvals
+POST   /api/v1/admin/compliance/shariah-board-approvals — Record a Shariah board approval for a contract template_version (manage_compliance) — backs MurabahaContract.validated_by_shariah_board, see §11
+GET    /api/v1/admin/audit-trail            — Global audit trail (separate audit_router, read_audit)
 
 GET    /api/v1/admin/admins                 — List admin accounts (manage_admins)
 GET    /api/v1/admin/admins/{id}            — Admin detail
@@ -398,6 +432,49 @@ GET    /api/v1/admin/contracts/admin/{type}/{id}/pdf — Contract PDF download (
 
 GET    /api/v1/admin/partners               — Partner list
 GET    /api/v1/admin/support/tickets        — Support tickets
+
+GET    /api/v1/admin/approval-requests      — Pending/decided manager approval requests (credit-limit increases, restructures)
+GET    /api/v1/admin/approval-requests/{id} — Approval request detail
+POST   /api/v1/admin/approval-requests/{id}/decision — Approve/reject (self-approval blocked); approving credit_limit_increase applies it
+
+GET    /api/v1/admin/finance/pnl            — Monthly GMV / platform profit / product cost series
+GET    /api/v1/admin/finance/credit-loss    — Defaulted/written-off exposure + provision estimate
+GET    /api/v1/admin/finance/tax-summary    — GST liability estimate for a period
+POST   /api/v1/admin/finance/tax-summary/generate — Snapshot a tax summary as a regulatory filing record
+
+GET    /api/v1/admin/notifications          — Admin view of all customer notifications
+GET    /api/v1/admin/notifications/summary  — Notification status/dispatch-channel breakdown
+GET    /api/v1/admin/notifications/templates — List notification templates
+POST   /api/v1/admin/notifications/templates — Create template (manage_system)
+PUT    /api/v1/admin/notifications/templates/{id} — Update template, bumps version (manage_system)
+POST   /api/v1/admin/notifications/broadcast — Send a segmented broadcast (max 5,000 recipients, manage_system)
+
+GET    /api/v1/admin/documents              — List uploaded user documents (KYC-adjacent)
+GET    /api/v1/admin/documents/{id}         — Document detail
+POST   /api/v1/admin/documents/{id}/decision — Verify/reject a document
+GET    /api/v1/admin/documents/summary/counts — Document counts by status
+
+GET    /api/v1/admin/logs/errors            — Error log search (service/severity filters)
+GET    /api/v1/admin/logs/background-jobs   — Background job status
+GET    /api/v1/admin/logs/scheduled-tasks   — Scheduled task (cron) status
+GET    /api/v1/admin/logs/summary           — 24h error + job-status summary
+
+GET    /api/v1/admin/reports                — Generated regulatory reports (filterable by report_type)
+GET    /api/v1/admin/reports/summary        — Report counts by type + last-generated timestamp
+
+GET    /api/v1/admin/developer/api-keys     — List partner/merchant API keys
+POST   /api/v1/admin/developer/api-keys     — Issue a new API key (raw key shown once, manage_system)
+DELETE /api/v1/admin/developer/api-keys/{id} — Revoke an API key
+GET    /api/v1/admin/developer/webhooks     — List registered partner webhooks
+GET    /api/v1/admin/developer/integration-logs — Outbound integration call log
+GET    /api/v1/admin/developer/summary      — Active keys/webhooks + 24h integration success rate
+
+GET    /api/v1/admin/marketing/campaigns    — List marketing campaigns
+POST   /api/v1/admin/marketing/campaigns    — Create campaign (manage_system)
+GET    /api/v1/admin/marketing/promo-codes  — List promo codes
+POST   /api/v1/admin/marketing/promo-codes  — Create promo code (manage_system)
+GET    /api/v1/admin/marketing/referrals/summary — Referral program status + rewards paid
+GET    /api/v1/admin/marketing/ab-tests     — A/B test experiment list
 ```
 
 ### 6.3 Webhook Endpoints
@@ -597,65 +674,71 @@ All user-facing records use `deleted_at` soft-delete. `OrderStatusHistory` provi
 
 ## 11. Bug & Gap Resolution Log
 
-All items confirmed resolved and verified in current code:
+**Historical note:** an earlier generation of bugs, gaps, and missing features (tracked as `BUG-*`, `GAP-*`, `SEC-*`, `MISS-*`, `TASK-*`, `GW-BL-*` IDs — around 40 items covering things like missing password reset, missing webhooks, admin IP allowlisting, order cancellation credit-restore, etc.) was resolved well before this revision and is no longer itemized here; all of it was re-confirmed present in the current codebase during this pass. What follows is the disposition that actually matters for a team integrating a new frontend today: the Gateway-specific findings from the 2026-08 cross-service audit (`docs/PRODUCTION_GAPS_REPORT_2026-08.md`), each independently re-verified against the current source (not just trusted from that report's own claims).
 
-| ID | Description | Fix location |
-|---|---|---|
-| BUG-01 | Down payment initiation incorrectly advanced order status | `api/v1/payments.py` — status only changed by internal callback |
-| BUG-02 | Internal callback didn't update order to `DOWN_PAYMENT_RECEIVED` | `api/v1/internal.py:201-211` |
-| BUG-06 | Murabaha expiration check off-by-one (24h window) | `services/contract_generator.py` |
-| BUG-08 | Delivery listener died permanently on DB error | `main.py` — try/except + watchdog |
-| BUG-09 | Cancelled orders didn't soft-delete associated Loans/Installments | `api/v1/orders.py:cancel_order` |
-| GAP-01 | Credit Engine callback missing | `api/v1/internal.py:credit_result_callback` |
-| GAP-02 | Shipment registration callback missing | `api/v1/internal.py:shipment_registered_callback` |
-| GAP-03 | Checkout status callback missing | `api/v1/internal.py:checkout_status_callback` |
-| GAP-05 | Order initiate didn't return proper status | `api/v1/orders.py` — returns `{"status": "processing"}` |
-| GAP-09 | Webhooks not enqueued to Redis | `api/v1/webhooks.py:_enqueue_webhook` |
-| GAP-10 | Payment metadata (`transaction_type`, `provider`) not populated | `api/v1/internal.py:payment_confirmed_callback` |
-| GAP-13 | Credit status returned stale data | `api/v1/credit.py` — fresh DB fetch |
-| SEC-02 | Admin IP allowlist not enforced | `core/middleware.py:SecurityHeadersMiddleware` |
-| SEC-03 | Internal endpoints accepted any Content-Type | `api/v1/internal.py:_require_internal` |
-| SEC-04 | Webhook endpoints accepted any Content-Type | `api/v1/webhooks.py:_enforce_json_content_type` |
-| SEC-07 | Admin state-change requests not origin-checked | `core/middleware.py:SecurityHeadersMiddleware` |
-| MISS-01 | Password reset flow missing | `api/v1/auth.py`, `services/auth.py` |
-| MISS-02 | Admin force-password-change flow missing | `services/auth.py`, `api/v1/admin_auth.py` |
-| MISS-03 | Stripe webhook missing | `api/v1/webhooks.py` |
-| MISS-05 | Customer contract PDF download missing | `api/v1/contracts.py:download_contract_pdf` |
-| MISS-06 | User session management missing | `api/v1/auth.py` |
-| MISS-08 | Device token registration missing | `api/v1/auth.py` |
-| MISS-09 | Notification preferences missing | `api/v1/profile.py` |
-| MISS-12 | Order receipt PDF missing | `api/v1/orders.py:get_order_receipt` |
-| MISS-15 | Referral stats missing | `api/v1/profile.py` |
-| MISS-16 | Admin self-service password change missing | `api/v1/admin_auth.py:admin_change_password` |
-| MISS-18 | GDPR/PECA account deletion missing | `api/v1/auth.py:delete_account` |
-| TASK-7 | Credit Engine integration | `api/v1/internal.py` |
-| TASK-8 | Shipment tracking integration | `api/v1/internal.py`, `services/delivery_events.py` |
-| TASK-9 | Checkout status integration | `api/v1/internal.py` |
-| TASK-10 | Installment amount validation (±1 PKR tolerance) | `api/v1/payments.py` |
-| TASK-12 | Order cancellation with credit restore | `api/v1/orders.py` |
-| TASK-13 | Clear stale KYC data on resubmit | `api/v1/kyc.py` |
-| TASK-16 | TOTP lockout (5 attempts, 15-min ban) | `services/auth.py`, `api/v1/admin_auth.py` |
-| TASK-17 | Rate limiter bypassed internal endpoints | `core/rate_limit.py` |
-| TASK-23 | Credit history endpoint | `api/v1/credit.py` |
-| TASK-24 | VCN status endpoint | `api/v1/payments.py` |
-| GW-BL-01 | Credit not checked before reservation at extraction | `api/v1/internal.py:product_extracted_callback` |
-| GW-BL-03 | Murabaha allowed without signed Wakalah | `api/v1/contracts.py:generate_murabaha` |
-| GW-BL-04 | `CONTRACTS_SIGNED` orders not cancellable | `api/v1/orders.py:cancel_order` |
-| **THIS AUDIT** | Missing `logger` import in `kyc.py` (NameError on Shufti/NADRA failure) | `services/kyc.py` — **FIXED** |
+### CRITICAL findings scoped to Gateway — verified FIXED
+
+| Finding | Verified disposition |
+|---|---|
+| Admin login JWT collision: RS256 signing is deterministic and `exp` is second-granularity, so two admin logins for the same admin in the same second produced a byte-identical token → identical `token_hash` → `UNIQUE constraint failed: admin_sessions.token_hash` | **FIXED.** `apps/gateway/src/services/auth.py::admin_login` now includes a random `"jti": uuid.uuid4().hex` claim in every admin JWT payload, guaranteeing token/hash uniqueness even for same-second logins. |
+| `orders.product_snapshot` existed in real Postgres (migration 016, hardened by 052) but was never declared on the SQLAlchemy `Order` model — ORM/migration drift that silently broke any ORM-driven schema (including the test suite) | **FIXED.** `packages/shared-python/sk_shared/models/order.py` now declares `product_snapshot: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)`. |
+| Admin Orders panel (`admin_orders.py`) wrapped queries in bare `try/except Exception` and returned empty/404 on any real SQL error, hiding genuine failures from admins investigating fraud/disputes | **FIXED.** The list/detail queries no longer swallow exceptions; product-name resolution was moved out of a Postgres-only `->>` JSONB operator (which broke on the sqlite test engine and drove the original silent-catch) into a portable Python helper (`_snapshot_name`). |
+| System Parameters admin panel (`admin_system.py`) was a complete facade — full CRUD/audit/caching but read back only by its own `GET`, with real values hardcoded in `contract_generator.py`/`order_service.py` | **FIXED.** `src/services/system_parameters.py::get_effective_system_parameters()` is now called from `OrderService.initiate()` (`max_active_orders`), `ContractGeneratorService` (`wakalah_validity_days`, `murabaha_validity_days`, `profit_rate_3m/4m/6m/12m`), and `admin_finance.py` (`credit_loss_provision_rate_pct`, `gst_rate_pct`). An admin changing these values now genuinely changes live contract/order behavior. |
+
+*(The remaining 8 CRITICALs in the 2026-08 report — double-charge/idempotency and event-durability issues in Payment Orchestrator, the billing-sweep crash and Credit Engine dead-scoring-layer issues in Ledger Service/Credit Engine, and the SSRF/cardholder-data issues in Product Service — are outside Gateway's code and are not re-verified in this document; see that report for their service-specific disposition.)*
+
+### HIGH findings scoped to Gateway — verified FIXED
+
+| Finding | Verified disposition |
+|---|---|
+| `loan.created` event published to Redis before the enclosing DB transaction committed — a fast consumer (Ledger Service) could query for a loan that didn't exist yet | **FIXED.** `ContractSignerService.sign_murabaha()` no longer publishes directly; it returns a `(channel, message)` tuple to the caller. `api/v1/contracts.py::sign_murabaha` publishes it only after `db.commit()` succeeds (best-effort — a publish failure there is logged but does not fail the already-committed request). |
+| No admin recovery path for an order stuck at `pending_vcn` after a failed VCN issuance — only a read-only view existed | **FIXED.** `admin_orders.py` now has `POST /{order_id}/retry-vcn`, which re-queues a fresh VCN issuance job (same shape as `POST /payments/vcn/issue` pushes) and only accepts orders currently at `pending_vcn`. |
+| `validated_by_shariah_board=True` hardcoded on every Murabaha contract with no backing approval record | **FIXED.** New `ShariahBoardApproval` model (`packages/shared-python/sk_shared/models/contracts.py`) with admin CRUD at `POST/GET /admin/compliance/shariah-board-approvals`. `ContractGeneratorService` now sets `validated_by_shariah_board` to `True` only when a `ShariahBoardApproval` row exists for the exact `template_version` in use — otherwise `False`, not a hardcoded truth. |
+
+*(HITL `sla_deadline` never escalating, the flat 10s cross-service HTTP timeout with no retry, prohibited-category re-checking, and duplicated product-extraction logic were also listed as HIGH/MEDIUM in the 2026-08 report and scoped partly to Gateway — these were not individually re-verified in this pass and should be treated as open unless separately confirmed.)*
+
+Regression tests for the fixes above exist in `apps/gateway/tests/test_api/test_admin_auth.py` (single-session enforcement exercising the real `admin_sessions` table), `test_admin_orders.py`, `test_api/test_admin_system.py` (`test_max_active_orders_honors_admin_system_parameter` proves an admin-changed `SystemParameter` actually changes `OrderService.initiate` behavior), and `test_api/test_contracts.py` (Shariah board approval gating both directions).
 
 ---
 
 ## 12. Test Coverage
 
-| Test | What is validated |
+Re-verified against `apps/gateway/tests/` as of 2026-08-28 — the suite has grown substantially since the original April audit (34 test files, up from 7 originally documented). Running `cd apps/gateway && ../../.venv/Scripts/python.exe -m pytest -q` gives **238 passed, 5 failed** (223s runtime). All 5 failures are pre-existing and unrelated to the CRITICAL/HIGH fixes verified in §11 (confirmed by the 2026-08 report's `git stash` A/B comparison and re-confirmed here by inspection):
+
+- `test_api/test_missing_coverage.py::test_installment_amounts_exclude_down_payment` — test-suite bug (`not` applied to a SQLAlchemy column filters out all rows, not a product bug)
+- `test_api/test_payments_flow.py::test_down_payment_succeeds_with_correct_amount`, `::test_installment_payment_succeeds`, `::test_duplicate_down_payment_rejected` — tied to a Payment Orchestrator `_dev_simulate_fulfillment` environment-string-comparison HIGH finding, not a Gateway CRITICAL
+- `test_services/test_contract_generator.py::test_generate_wakalah_fetches_customer_profile` — a KMS/`CustomerProfile.cnic` type-coercion issue unrelated to any of the 3 Gateway-scoped CRITICAL fixes
+
+| Test file | What is validated |
 |---|---|
-| `test_auth.py` | Registration, OTP verification, login, token refresh |
-| `test_auth_full.py` | OTP resend (rotates token), 5-strike login lockout |
-| `test_admin_kyc_full.py` | KYC queue claim, approve (sets user active), reject with reason; RBAC blocks wrong role |
-| `test_audit_trail.py` | Audit record created on admin action; DLQ written when DB write fails |
-| `test_credit_status.py` | Credit status includes correct limit/available/risk_band; history pagination |
-| `test_hard_gate.py` | VCN gate: `CONTRACTS_PENDING` → 403 `VCN_GATE_NOT_PASSED`; `CONTRACTS_SIGNED` → 403 `DOWN_PAYMENT_NOT_CONFIRMED`; `DOWN_PAYMENT_RECEIVED` → 200 |
-| `test_delivery_events.py` | Delivery status change updates Shipment + creates TrackingEvent; delivery confirmed transitions order to DELIVERED |
+| `test_api/test_auth.py`, `test_auth_full.py` | Registration, OTP verify/resend, login, refresh, 5-strike lockout |
+| `test_api/test_admin_auth.py` | Admin login incl. MFA/TOTP, force-password-change, **single-session enforcement against the real `admin_sessions` table** (regression test for the CRITICAL jti-collision fix) |
+| `test_api/test_admin_kyc_full.py`, `test_kyc.py` | KYC upload/submit/queue claim/approve/reject; RBAC enforcement |
+| `test_api/test_audit_trail.py` | Audit record on admin action; DLQ write on failure |
+| `test_api/test_credit_status.py` | Credit status/history correctness + pagination |
+| `test_hard_gate.py` | VCN gate state checks (`CONTRACTS_PENDING`/`CONTRACTS_SIGNED`/`DOWN_PAYMENT_RECEIVED`) |
+| `test_services/test_delivery_events.py` | Delivery pub/sub handlers |
+| `test_api/test_admin_dashboard.py`, `test_admin_analytics.py` | Dashboard KPIs, revenue/growth/product analytics |
+| `test_api/test_admin_risk.py` | Blacklist CRUD |
+| `test_api/test_admin_contracts.py`, `test_contracts.py` | Contract generation/signing incl. **Shariah board approval gating both directions** (regression test for the HIGH validated_by_shariah_board fix) |
+| `test_api/test_hitl.py` | HITL queue claim/resolve/escalate |
+| `test_api/test_admin_payments.py` | Admin payment transaction views |
+| `test_api/test_rbac_enforcement.py` | Cross-cutting permission checks |
+| `test_api/test_payments_flow.py` | End-to-end down-payment/installment/VCN flow (3 pre-existing failures, see above) |
+| `test_api/test_admin_users_mgmt.py` | Admin user suspend/blacklist/credit-limit |
+| `test_api/test_admin_system.py` | System parameter CRUD + cache invalidation, **`test_max_active_orders_honors_admin_system_parameter`** (regression test for the CRITICAL system-parameters-facade fix) |
+| `test_api/test_rate_limiting.py` | Sliding-window rate limiter |
+| `test_api/test_missing_coverage.py` | Assorted edge cases (1 pre-existing failure, see above) |
+| `test_api/test_orders.py`, `test_admin_orders.py` | Order lifecycle incl. prohibited-category blocking; admin order list/detail/status-override/refund/restructure/retry-vcn |
+| `test_api/test_webhooks.py` | Webhook signature/idempotency/size-limit checks |
+| `test_api/test_internal.py` | Internal service callbacks |
+| `test_api/test_admin_compliance.py` | Audit trail search, Shariah audit log |
+| `test_services/test_contract_generator.py` | Wakalah/Murabaha PDF generation (1 pre-existing failure, see above) |
+| `test_services/test_kyc_service_unit.py`, `test_kyc_service_additional.py` | KYC service unit coverage |
+| `test_services/test_order_recovery_sweep.py`, `test_hitl_sla_sweep.py` | Background sweep jobs |
+| `test_services/test_http_client_correlation.py` | `InternalServiceClient` correlation-ID propagation |
+
+**Not yet covered by dedicated test files:** the Phase-4 admin modules added since the April audit — `admin_approvals.py`, `admin_developer.py`, `admin_documents.py`, `admin_finance.py`, `admin_logs.py`, `admin_marketing.py`, `admin_notifications.py`, `admin_reports.py` — and the newer customer-facing `cart.py`, `support.py`, `notifications.py` have no dedicated test files under `apps/gateway/tests/` as of this pass. Treat their behavior as unverified until tests are added; read the source directly (all listed in §5.3/§5.4) rather than assuming test coverage exists.
 
 **Test infrastructure:** In-memory SQLite (`:memory:?cache=shared`), FakeRedis, per-test DB setup, `test_user` creates an `active`-status user with a valid access token, `test_admin` creates a `super_admin` with `all_actions`.
 
@@ -704,4 +787,4 @@ The service **aborts startup** if `ENVIRONMENT=production` and any of the follow
 
 ---
 
-*This document reflects the complete, verified state of `apps/gateway` as of 2026-04-27. Every file, endpoint, flow, security control, and resolved issue listed here was verified by direct source code reading.*
+*This document was originally written 2026-04-27 and corrected/re-verified 2026-08-28 against the current `apps/gateway` source, including the file registry, API catalog, and the Gateway-specific CRITICAL/HIGH findings from `docs/PRODUCTION_GAPS_REPORT_2026-08.md` (§11). Sections 2-4, 6-10, and 13 were spot-checked but not exhaustively re-derived; treat the §5 file registry, §6 endpoint catalog, §11 disposition, and §12 test results as the most current parts of this document.*

@@ -3,13 +3,13 @@ import hashlib
 import logging
 from datetime import datetime, timezone, timedelta
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy import select, text
+from sqlalchemy import select, update
 from fastapi import HTTPException, status
 import pyotp
 
 from sk_shared.security import generate_otp, hash_otp, create_access_token, verify_password, decode_access_token, get_password_hash
 from sk_shared.redis_client import RedisClient
-from sk_shared.models.auth import User, UserSession, AdminUser
+from sk_shared.models.auth import User, UserSession, AdminUser, AdminSession
 from src.schemas.auth import (
     RegisterInitiateRequest, RegisterInitiateResponse, VerifyOtpRequest,
     AuthResponse, LoginRequest, AdminLoginRequest, AdminAuthResponse,
@@ -244,8 +244,20 @@ class AuthService:
 
         permissions = RBACService.get_role_permissions(role_name)
         
+        # jti: RS256 signing is deterministic (same payload+key -> same signature), and
+        # "exp" is second-granularity, so two logins for the same admin within the same
+        # second used to produce a byte-identical JWT -> identical token_hash -> a real
+        # UNIQUE-constraint failure on admin_sessions.token_hash (reproduced by the
+        # single-session-enforcement test firing two logins back-to-back). A random jti
+        # per login guarantees the token, and therefore token_hash, is always unique.
         acc_token = create_access_token(
-            {"admin_id": admin.id, "role": role_name, "permissions": permissions, "token_type": "admin"},
+            {
+                "admin_id": admin.id,
+                "role": role_name,
+                "permissions": permissions,
+                "token_type": "admin",
+                "jti": uuid.uuid4().hex,
+            },
             settings.JWT_PRIVATE_KEY,
             timedelta(seconds=settings.ADMIN_SESSION_TTL)
         )
@@ -268,25 +280,22 @@ class AuthService:
 
         # Mirror the single-session-per-admin policy into Postgres (admin_sessions)
         # so Module 12's session management UI has real, queryable rows — Redis
-        # alone has no way to list/audit sessions across admins.
+        # alone has no way to list/audit sessions across admins. Uses the
+        # AdminSession ORM model (sk_shared.models.auth) rather than raw SQL so
+        # it's exercised the same way in tests (sqlite) as in production
+        # (Postgres) — see db/migrations/versions/023_admin_team_remaining.py
+        # for the underlying table this maps to.
         await db.execute(
-            text(
-                "UPDATE admin_sessions SET revoked_at = NOW() WHERE admin_user_id = :admin_id AND revoked_at IS NULL"
-            ),
-            {"admin_id": admin.id},
+            update(AdminSession)
+            .where(AdminSession.admin_user_id == admin.id, AdminSession.revoked_at.is_(None))
+            .values(revoked_at=_utcnow())
         )
-        await db.execute(
-            text(
-                """
-                INSERT INTO admin_sessions (admin_user_id, token_hash, expires_at)
-                VALUES (:admin_id, :token_hash, :expires_at)
-                """
-            ),
-            {
-                "admin_id": admin.id,
-                "token_hash": token_hash,
-                "expires_at": datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(seconds=settings.ADMIN_SESSION_TTL),
-            },
+        db.add(
+            AdminSession(
+                admin_user_id=admin.id,
+                token_hash=token_hash,
+                expires_at=_utcnow() + timedelta(seconds=settings.ADMIN_SESSION_TTL),
+            )
         )
         await db.commit()
 

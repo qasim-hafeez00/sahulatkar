@@ -393,7 +393,7 @@ class NotificationService:
     ) -> tuple[list[Notification], int, int]:
         query = select(Notification).where(Notification.user_id == user_id)
         if unread_only:
-            query = query.where(not Notification.is_read)
+            query = query.where(Notification.is_read.is_(False))
         if category:
             query = query.where(Notification.category == category)
         
@@ -406,7 +406,7 @@ class NotificationService:
         unread = await self.db.scalar(
             select(func.count(Notification.id)).where(
                 Notification.user_id == user_id,
-                not Notification.is_read
+                Notification.is_read.is_(False)
             )
         )
         
@@ -437,7 +437,7 @@ class NotificationService:
         from sqlalchemy import update
         stmt = update(Notification).where(
             Notification.user_id == user_id,
-            not Notification.is_read
+            Notification.is_read.is_(False)
         ).values(
             is_read=True,
             read_at=datetime.now(timezone.utc)

@@ -150,6 +150,12 @@ async def apply_product_extracted_envelope(session: AsyncSession, envelope: dict
     shape and for looking the Product up by UUID (what the event payload
     actually carries; product_extracted_callback's request schema expects
     an integer id, which nothing ever sends it either).
+
+    MEDIUM fix (duplicated "product extracted" logic): that business logic
+    now lives in one shared function (order_service.apply_product_extraction_result),
+    also called by api/v1/internal.py's product_extracted_callback for the
+    HTTP path — this envelope handler is now just the Redis-event-shape
+    adapter around it.
     """
     payload = envelope.get("payload", {})
     order_id = payload.get("order_id")
@@ -160,68 +166,26 @@ async def apply_product_extracted_envelope(session: AsyncSession, envelope: dict
     order = await session.scalar(select(Order).where(Order.id == order_id, Order.deleted_at.is_(None)))
     if not order:
         return False
-    if order.status not in {OrderState.URL_RECEIVED, "url_received", "processing"}:
-        return False
 
     product = await session.scalar(select(Product).where(Product.uuid == product_uuid))
     if not product:
         logger.error("Product %s not found while processing order %s", product_uuid, order_id)
         return False
 
-    old_status = order.status
-    down_payment_pct = 25.0
-    sale_price = float(product.sale_price or 0)
+    from src.services.order_service import apply_product_extraction_result
 
-    order.product_id = product.id
-    order.total_amount = sale_price
-    order.down_payment_amount = round(sale_price * down_payment_pct / 100.0, 2)
-    order.status = OrderState.OFFER_PRESENTED
+    outcome = await apply_product_extraction_result(session, order, product)
 
-    from sk_shared.models.auth import User as UserModel
-    from sk_shared.models.credit import CreditLimitHistory
+    if outcome == "already_processed":
+        return False
+    if outcome == "insufficient_credit":
+        logger.warning("Order %s extraction_failed: insufficient credit", order_id)
+        return True
+    if outcome == "prohibited":
+        logger.warning("Order %s extraction_failed: prohibited category post-extraction", order_id)
+        return True
 
-    user = await session.scalar(
-        select(UserModel).where(UserModel.id == order.user_id, UserModel.deleted_at.is_(None)).with_for_update()
-    )
-    if user and user.available_credit is not None:
-        prev_available = float(user.available_credit)
-        if prev_available < sale_price:
-            order.status = "extraction_failed"
-            session.add(OrderStatusHistory(
-                order_id=order.id, from_status=old_status, to_status="extraction_failed",
-                reason="INSUFFICIENT_CREDIT",
-            ))
-            await session.commit()
-            logger.warning("Order %s extraction_failed: insufficient credit", order_id)
-            return True
-
-        user.available_credit = round(prev_available - sale_price, 2)
-        history_kwargs = {"user_id": user.id}
-        for attr in ["previous_limit", "old_limit", "new_limit"]:
-            if hasattr(CreditLimitHistory, attr):
-                history_kwargs[attr] = float(user.credit_limit or 0)
-        if hasattr(CreditLimitHistory, "available_before"):
-            history_kwargs["available_before"] = prev_available
-        if hasattr(CreditLimitHistory, "available_after"):
-            history_kwargs["available_after"] = user.available_credit
-        if hasattr(CreditLimitHistory, "reason"):
-            history_kwargs["reason"] = f"order_extraction_reserved:{order_id}"
-        if hasattr(CreditLimitHistory, "reason_code"):
-            history_kwargs["reason_code"] = "order_extraction_reserved"
-        if hasattr(CreditLimitHistory, "changed_by"):
-            history_kwargs["changed_by"] = "system"
-        if hasattr(CreditLimitHistory, "changed_by_type"):
-            history_kwargs["changed_by_type"] = "system"
-        if hasattr(CreditLimitHistory, "changed_by_id"):
-            history_kwargs["changed_by_id"] = "product_service"
-        session.add(CreditLimitHistory(**history_kwargs))
-
-    session.add(OrderStatusHistory(
-        order_id=order.id, from_status=old_status, to_status=OrderState.OFFER_PRESENTED,
-        reason="product_extraction_complete",
-    ))
-    await session.commit()
-    logger.info(f"Order {order_id} transitioned from {old_status} to {order.status} (product_id={product.id})")
+    logger.info(f"Order {order_id} transitioned to {order.status} (product_id={product.id})")
     return True
 
 

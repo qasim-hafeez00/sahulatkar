@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request, status
+from fastapi import APIRouter, BackgroundTasks, Depends, Header, HTTPException, Query, Request, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.constants import RedisNS, RedisTTL
@@ -32,6 +32,29 @@ router = APIRouter()
 def _require_self(req_user_id: str, current_user: User) -> None:
     if req_user_id != str(current_user.uuid):
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="FORBIDDEN")
+
+
+# ── CE-HIGH-01: portfolio-concentration TOCTOU guard ──────────────────────────────
+# LimitEngine.check_portfolio_concentration (run inside evaluate_credit) reads the
+# user's current approved exposure, and create_credit_application (below) persists a
+# new approved CreditApplication row afterwards. With no lock spanning the two, two
+# concurrent /credit/apply calls for the same user can both read the same
+# pre-application exposure, both pass the concentration check, and both get approved
+# — jointly exceeding the platform's max exposure for that user even though each
+# request individually looked fine. This short-lived Redis lock (keyed on user_id,
+# claimed atomically via SETNX) mirrors the installment-collection guard in
+# payment-orchestrator's apps/payment-orchestrator/src/api/v1/payments.py
+# (_installment_lock_key / _INSTALLMENT_LOCK_TTL_SECONDS): a second request for the
+# same user arriving while the first is still mid-flight fails fast with 409 instead
+# of racing it. LimitEngine.check_portfolio_concentration also takes a
+# SELECT ... FOR UPDATE on the user's row as a second, DB-level layer of the same
+# guard (a no-op on SQLite, real on Postgres) for any future caller that reaches it
+# without going through this route.
+_PORTFOLIO_LOCK_TTL_SECONDS = 30
+
+
+def _portfolio_lock_key(user_id: str) -> str:
+    return f"sk:credit:lock:portfolio:{user_id}"
 
 
 @router.get("/credit/check", response_model=CreditCheckResponse)
@@ -90,6 +113,7 @@ async def evaluate_credit(
 async def apply_credit(
     req: CreditApplyRequest,
     request: Request,
+    background_tasks: BackgroundTasks,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
     redis_client: RedisClient = Depends(get_redis),
@@ -116,21 +140,36 @@ async def apply_credit(
                 detail="A request with this Idempotency-Key is already being processed",
             )
 
-    pipeline = CreditPipelineService(db_session=db, redis_client=redis_client)
-    decision = await pipeline.evaluate_credit(
-        user_id=req.user_id,
-        order_amount=req.order_amount,
-        product_category=req.product_category,
-        is_first_order=req.is_first_order,
-        device_fingerprint_hash=req.device_fingerprint_hash,
-        ip_address=request.client.host if request.client else None,
-    )
-    application = await pipeline.create_credit_application(
-        user_id=req.user_id,
-        requested_limit=req.requested_limit,
-        application_type=req.application_type,
-        decision=decision,
-    )
+    # CE-HIGH-01: serialize concurrent applications for this user across the
+    # check-then-write window (evaluate_credit's portfolio-concentration check through
+    # create_credit_application's commit) — see _portfolio_lock_key above.
+    portfolio_lock_key = _portfolio_lock_key(req.user_id)
+    if not await redis_client.set_nx(portfolio_lock_key, "1", ttl=_PORTFOLIO_LOCK_TTL_SECONDS):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="An application for this user is already being processed",
+        )
+
+    try:
+        pipeline = CreditPipelineService(db_session=db, redis_client=redis_client)
+        decision = await pipeline.evaluate_credit(
+            user_id=req.user_id,
+            order_amount=req.order_amount,
+            product_category=req.product_category,
+            is_first_order=req.is_first_order,
+            device_fingerprint_hash=req.device_fingerprint_hash,
+            ip_address=request.client.host if request.client else None,
+        )
+        application = await pipeline.create_credit_application(
+            user_id=req.user_id,
+            requested_limit=req.requested_limit,
+            application_type=req.application_type,
+            decision=decision,
+            background_tasks=background_tasks,
+        )
+    finally:
+        await redis_client.delete(portfolio_lock_key)
+
     response = {
         "application_id": str(application.uuid),
         "status": application.status,

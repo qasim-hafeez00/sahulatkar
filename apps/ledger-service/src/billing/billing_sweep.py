@@ -142,39 +142,79 @@ class BillingSweepService:
             overdue_ids = [inst.id for inst in overdue_candidates]
             aggregate_stats["newly_overdue"] = await overdue_processor.mark_overdue_batch(overdue_ids, as_of=run_date)
 
+            # LS-CRIT-XX: Snapshot the plain field values we need below *before*
+            # entering the per-installment loop. If one installment's processing
+            # fails and we roll back the session (see except-block below), SQLAlchemy
+            # expires every ORM object already loaded in the session -- including
+            # the *other* installments in this list -- so any later synchronous
+            # attribute access on them (e.g. overdue_inst.due_date) raises
+            # MissingGreenlet. Working off a plain snapshot instead means the rest
+            # of this method never touches a (possibly-expired) ORM attribute.
+            overdue_snapshot = {
+                inst.id: {
+                    "loan_id": inst.loan_id,
+                    "user_id": inst.user_id,
+                    "total_amount": inst.total_amount,
+                    "due_date": inst.due_date,
+                }
+                for inst in overdue_candidates
+            }
+
             if aggregate_stats["newly_overdue"] > 0:
-                for overdue_inst in overdue_candidates:
+                for overdue_id, snapshot in overdue_snapshot.items():
                     # BV-01 fallback: We compute days_overdue in-memory since we no longer write it to DB
-                    days_overdue = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0
-                    late_fee = await overdue_processor.compute_late_fee_amount(overdue_inst, days_overdue)
-                    if late_fee > 0 and not dry_run:
-                        result = await late_fee_service.apply_late_fee_to_installment(overdue_inst.id, late_fee)
-                        if result["status"] == "applied":
-                            aggregate_stats["late_fees_applied"] += 1
+                    due_date = snapshot["due_date"]
+                    days_overdue = (run_date - due_date).days if due_date < run_date else 0
+                    try:
+                        # Re-fetch fresh (rather than reusing the ORM object from
+                        # find_newly_overdue) so a prior iteration's rollback can't
+                        # leave this installment in an expired state.
+                        installment = await self.db.get(Installment, overdue_id)
+                        late_fee = await overdue_processor.compute_late_fee_amount(installment, days_overdue)
+                        if late_fee > 0 and not dry_run:
+                            result = await late_fee_service.apply_late_fee_to_installment(overdue_id, late_fee)
+                            if result["status"] == "applied":
+                                aggregate_stats["late_fees_applied"] += 1
+                    except Exception:
+                        # Defense in depth: one installment's failure (this bug, or
+                        # any future one) must not abort the whole batch -- log it
+                        # as a per-item failure (reusing the existing aggregate_stats
+                        # "failed" counter) and keep processing the rest of the batch.
+                        aggregate_stats["failed"] += 1
+                        logger.exception(
+                            "Billing sweep: failed to apply late fee for installment; "
+                            "continuing with remaining batch",
+                            extra={"installment_id": overdue_id, "as_of": run_date.isoformat()},
+                        )
+                        # A failed flush/commit leaves the session's transaction
+                        # unusable until rolled back -- without this, every
+                        # subsequent DB call in the sweep would raise.
+                        await self.db.rollback()
 
                 if self.publisher and not dry_run:
                     # LS-CRIT-04: Trigger auto-collection by Payment Orchestrator for each overdue installment.
-                    for overdue_inst in overdue_candidates:
-                        days_overdue_inst = (run_date - overdue_inst.due_date).days if overdue_inst.due_date < run_date else 0
+                    for overdue_id, snapshot in overdue_snapshot.items():
+                        due_date = snapshot["due_date"]
+                        days_overdue_inst = (run_date - due_date).days if due_date < run_date else 0
                         await self.publisher.publish_payment_collection_triggered(
-                            installment_id=overdue_inst.id,
-                            loan_id=overdue_inst.loan_id,
-                            user_id=overdue_inst.user_id,
-                            amount=float(overdue_inst.total_amount),
-                            due_date=overdue_inst.due_date.isoformat(),
+                            installment_id=overdue_id,
+                            loan_id=snapshot["loan_id"],
+                            user_id=snapshot["user_id"],
+                            amount=float(snapshot["total_amount"]),
+                            due_date=due_date.isoformat(),
                         )
                         # NS-BL-05: Per-installment event so Notification Service can alert the customer.
                         await self.publisher.publish_billing_installment_overdue(
-                            installment_id=overdue_inst.id,
-                            order_id=overdue_inst.loan_id,
-                            user_id=overdue_inst.user_id,
-                            amount=float(overdue_inst.total_amount),
+                            installment_id=overdue_id,
+                            order_id=snapshot["loan_id"],
+                            user_id=snapshot["user_id"],
+                            amount=float(snapshot["total_amount"]),
                             days_overdue=days_overdue_inst,
                         )
 
                     # Batch event for analytics/reconciliation consumers.
                     await self.publisher.publish_installments_overdue(
-                        installment_ids=[inst.id for inst in overdue_candidates],
+                        installment_ids=list(overdue_snapshot.keys()),
                         as_of=run_date.isoformat(),
                     )
 

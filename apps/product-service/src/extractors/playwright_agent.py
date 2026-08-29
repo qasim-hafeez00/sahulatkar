@@ -8,14 +8,16 @@ from decimal import Decimal
 
 from src.config import settings
 from src.middleware.metrics import EXTRACTION_PROXY_USED
+from src.services.url_normalizer import UrlNormalizerService
 from playwright_stealth import Stealth
 
 logger = logging.getLogger(__name__)
 
 class PlaywrightExtractionAgent:
-    def __init__(self):
+    def __init__(self, url_normalizer: UrlNormalizerService | None = None):
         self.groq_api_key = settings.GROQ_API_KEY
         self.openai_api_key = settings.OPENAI_API_KEY
+        self._url_normalizer = url_normalizer or UrlNormalizerService()
 
     async def extract(self, url: str, scrape_config: dict | None = None) -> dict:
         """
@@ -62,7 +64,30 @@ class PlaywrightExtractionAgent:
                     await route.continue_()
 
                 await page.route("**/*", _route)
-                
+
+                # Fetch-time SSRF re-validation (DNS-rebinding TOCTOU fix):
+                # `url` was already validated by UrlNormalizerService.normalize()
+                # at submission time, but this worker may run long after that
+                # (retries/DLQ backoff), so DNS for an attacker-controlled
+                # domain could have been rebound to a private/loopback/
+                # link-local/reserved IP (e.g. 169.254.169.254) since then.
+                # Re-resolve right now and refuse to navigate if it's unsafe.
+                #
+                # Residual risk: unlike `HtmlScraper` (httpx), Playwright gives
+                # us no low-level socket control to pin `page.goto` to the
+                # exact IP we just validated - Chromium does its own DNS
+                # resolution internally when it actually connects. This check
+                # only narrows the TOCTOU window (to the time between this
+                # call and Chromium's own connect) rather than closing it
+                # completely; a DNS response that flips between this check and
+                # Chromium's own lookup, moments later, could still slip
+                # through. This is a known, accepted limitation, not a full fix.
+                try:
+                    await self._url_normalizer.ensure_fetch_target_is_safe(url)
+                except ValueError as exc:
+                    logger.error(f"Fetch-time SSRF check failed for {url}: {exc}")
+                    raise
+
                 await page.goto(url, wait_until="domcontentloaded", timeout=settings.EXTRACTION_TIMEOUT_SECONDS * 1000)
                 platform = self._detect_platform(url)
                 await self._platform_wait(page, platform, scrape_config)

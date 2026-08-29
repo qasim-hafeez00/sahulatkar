@@ -57,3 +57,30 @@ async def test_reconciliation_endpoint(client: AsyncClient, test_admin):
     data = response.json()
     assert "total_transactions" in data
     assert "reconciled_transactions" in data
+
+
+async def test_admin_can_record_and_list_shariah_board_approval(client: AsyncClient, test_admin):
+    """HIGH regression: an admin must be able to record a real Shariah board
+    approval for a contract template_version -- the backing record that
+    ContractGeneratorService.generate_murabaha checks before setting
+    validated_by_shariah_board True."""
+    _, admin_token = test_admin
+
+    create_resp = await client.post(
+        "/api/v1/admin/compliance/shariah-board-approvals",
+        headers=_auth(admin_token),
+        json={
+            "template_version": "1.0",
+            "approved_by": "Shariah Board Chair",
+            "notes": "Approved after Q3 2026 review",
+        },
+    )
+    assert create_resp.status_code == 201
+    body = create_resp.json()
+    assert body["template_version"] == "1.0"
+    assert body["approved_by"] == "Shariah Board Chair"
+
+    list_resp = await client.get("/api/v1/admin/compliance/shariah-board-approvals", headers=_auth(admin_token))
+    assert list_resp.status_code == 200
+    items = list_resp.json()["items"]
+    assert any(item["template_version"] == "1.0" for item in items)

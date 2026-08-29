@@ -1,5 +1,8 @@
+import json
+
 import pytest
 from httpx import AsyncClient
+from sk_shared.constants import QueueName
 from sk_shared.models.order import Order
 from sk_shared.models.order import OrderStatusHistory
 from sk_shared.models.payment import Loan, PaymentTransaction
@@ -177,6 +180,72 @@ async def test_get_admin_order_payments(client: AsyncClient, db_session, test_ad
     items = response.json()["items"]
     assert len(items) == 1
     assert items[0]["gateway_txn_id"] == "TXN-001"
+
+
+async def test_admin_retry_vcn_from_pending_vcn_queues_job(client: AsyncClient, db_session, test_admin, test_user, redis_mock):
+    """HIGH-2 regression: an order stuck at 'pending_vcn' (e.g. VcnIssueWorker
+    exhausted its retries and DLQ'd the job) must have a real admin recovery
+    action, not just the read-only GET .../vcn view. This asserts the retry
+    endpoint queues a fresh VCN issuance job and writes an audit trail."""
+    admin, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="pending_vcn", total_amount=4200)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    response = await client.post(
+        f"/api/v1/admin/orders/{order.id}/retry-vcn",
+        json={"reason": "VCN issuance DLQ'd after max retries, retrying manually"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["order_id"] == order.id
+    assert data["queued"] is True
+
+    # A fresh job was actually pushed onto the same queue payment-orchestrator's
+    # VcnIssueWorker consumes.
+    queued = await redis_mock.redis.lrange(QueueName.VCN_ISSUE, 0, -1)
+    assert len(queued) == 1
+    job = json.loads(queued[0])
+    assert job["order_id"] == order.id
+    assert job["admin_retry"] is True
+    assert job["admin_retry_by"] == admin.id
+
+
+async def test_admin_retry_vcn_rejects_order_not_stuck(client: AsyncClient, db_session, test_admin, test_user, redis_mock):
+    """The retry action must only be usable from 'pending_vcn' -- never from
+    an order that already has a card issued or otherwise progressed, to
+    avoid double-issuing a VCN."""
+    admin, admin_token = test_admin
+    user, _ = test_user
+
+    order = Order(user_id=user.id, status="vcn_issued", total_amount=4200)
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    response = await client.post(
+        f"/api/v1/admin/orders/{order.id}/retry-vcn",
+        json={"reason": "should not be allowed"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 409
+
+    queued = await redis_mock.redis.lrange(QueueName.VCN_ISSUE, 0, -1)
+    assert queued == []
+
+
+async def test_admin_retry_vcn_404_for_unknown_order(client: AsyncClient, test_admin):
+    _, admin_token = test_admin
+    response = await client.post(
+        "/api/v1/admin/orders/999999/retry-vcn",
+        json={"reason": "order does not exist"},
+        headers=_auth(admin_token),
+    )
+    assert response.status_code == 404
 
 
 async def test_admin_refund_order_queued(client: AsyncClient, db_session, test_admin, test_user):

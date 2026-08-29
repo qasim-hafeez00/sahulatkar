@@ -17,6 +17,23 @@ class Settings(BaseSettings):
     LOG_LEVEL: str = "INFO"
     SERVICE_NAME: str = "payment-orchestrator"
 
+    # HIGH-01 fix: every gateway client/adapter in this service used to branch
+    # on `ENVIRONMENT != "local"` alone to decide whether it was safe to fake
+    # a successful payment, fall back to a hardcoded Stripe test PAN, or skip
+    # webhook signature verification. Since ENVIRONMENT defaults to "local",
+    # a deploy that simply forgot to set ENVIRONMENT got ALL of that
+    # permissive behavior silently, in production, with no error anywhere —
+    # JazzCash/Raast/SafePay failures returned fake success, Stripe issued a
+    # well-known test card number, and unsigned/unverifiable webhooks were
+    # accepted. This flag decouples "am I running locally" from "am I allowed
+    # to use insecure test fallbacks": both ENVIRONMENT=="local" AND this
+    # flag (default False) must be true before any fallback fires, so an
+    # unset/misconfigured ENVIRONMENT now fails CLOSED (real gateway calls,
+    # real signature verification) instead of failing open. Only ever set to
+    # true in local dev / CI test configuration — validate_critical_settings()
+    # below refuses to boot if it's ever true outside ENVIRONMENT=="local".
+    ALLOW_TEST_PAYMENT_FALLBACKS: bool = False
+
     # ── Database / Redis ─────────────────────────────────────────────────────
     DATABASE_URL: str = "postgresql+asyncpg://sk_app:password@localhost:5432/sahulatkar"
     REDIS_URL: str = "redis://localhost:6379/3"
@@ -179,6 +196,16 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
+    @property
+    def test_payment_fallbacks_enabled(self) -> bool:
+        """True only when explicitly opted into insecure local/test fallback
+        behavior (fake gateway success, hardcoded test PAN, skipped webhook
+        signature checks). See ALLOW_TEST_PAYMENT_FALLBACKS docstring above —
+        requires ENVIRONMENT=="local" AND the explicit flag, so a misconfigured
+        or unset ENVIRONMENT never enables this on its own.
+        """
+        return self.ENVIRONMENT == "local" and self.ALLOW_TEST_PAYMENT_FALLBACKS
+
 
 # AWS Secrets Manager migration (docs/SECRETS_MANAGER_MIGRATION.md):
 # payment-orchestrator holds a live credential per payment gateway plus the
@@ -255,6 +282,17 @@ def validate_critical_settings() -> None:
     local" check (see packages/shared-python/sk_shared/boot_validation.py).
     """
     from sk_shared.boot_validation import raise_if_placeholder_credentials
+
+    # HIGH-01 fix: ALLOW_TEST_PAYMENT_FALLBACKS must never be true outside
+    # ENVIRONMENT=="local" — refuse to boot rather than silently letting a
+    # misconfigured deploy carry an insecure test flag into staging/production.
+    if settings.ALLOW_TEST_PAYMENT_FALLBACKS and settings.ENVIRONMENT != "local":
+        raise RuntimeError(
+            "PAYMENT_ORCHESTRATOR_CONFIG_VALIDATION_FAILED: "
+            "ALLOW_TEST_PAYMENT_FALLBACKS=true is only permitted when "
+            f"ENVIRONMENT=local (got ENVIRONMENT={settings.ENVIRONMENT!r}). "
+            "Unset ALLOW_TEST_PAYMENT_FALLBACKS before deploying outside local."
+        )
 
     raise_if_placeholder_credentials(
         [

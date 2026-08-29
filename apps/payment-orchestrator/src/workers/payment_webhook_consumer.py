@@ -184,7 +184,7 @@ class PaymentWebhookConsumer:
             logger.warning("Stripe webhook job missing event type — dropping")
             return
 
-        orchestrator = VcnOrchestrator(db)
+        orchestrator = VcnOrchestrator(db, self._redis)
         await orchestrator.handle_stripe_event(event_type, data_object)
         await db.commit()
 

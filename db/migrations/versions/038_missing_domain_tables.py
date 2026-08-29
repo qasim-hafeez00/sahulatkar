@@ -247,7 +247,16 @@ def upgrade() -> None:
             template_name        VARCHAR(100) NOT NULL,
             wakalah_template_s3  VARCHAR(512) NOT NULL,
             murabaha_template_s3 VARCHAR(512) NOT NULL,
-            shariah_approval_id  BIGINT       REFERENCES shariah_board_approvals(id),
+            -- BUG FIX (found running `alembic upgrade head` for the E2E test suite):
+            -- points at 019_shariah_remaining's table, renamed to
+            -- legacy_shariah_board_approvals there to free up the
+            -- "shariah_board_approvals" name for 087's unrelated,
+            -- actually-used table of the same name -- see the comment in
+            -- 019_shariah_remaining.py. This table (murabaha_contract_templates)
+            -- itself has no ORM model or any other reference anywhere in apps/,
+            -- so this is purely restoring the historical migration chain's
+            -- internal consistency, not a behavior change for any live feature.
+            shariah_approval_id  BIGINT       REFERENCES legacy_shariah_board_approvals(id),
             is_active            BOOLEAN      NOT NULL DEFAULT FALSE,
             effective_from       DATE         NOT NULL,
             effective_until      DATE,

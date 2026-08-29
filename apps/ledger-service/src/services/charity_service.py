@@ -38,7 +38,7 @@ class CharityService:
     async def get_pending_disbursements(self, min_age_days: int | None = None) -> list[LateFeeCharityAllocation]:
         # LS-BL-04: Use config-driven min_age_days instead of hardcoded value
         effective_min_age = min_age_days if min_age_days is not None else settings.charity_disbursement_min_age_days
-        cutoff = datetime.now(timezone.utc) - timedelta(days=effective_min_age)
+        cutoff = datetime.utcnow() - timedelta(days=effective_min_age)
         stmt = (
             select(LateFeeCharityAllocation)
             .where(LateFeeCharityAllocation.deleted_at.is_(None))
@@ -74,7 +74,7 @@ class CharityService:
         source_id = self._stable_source_id(payment_reference)
         await accounting.record_charity_disbursement(source_id=source_id, amount=total_amount, reference=payment_reference)
 
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         for allocation in allocations:
             allocation.disbursed_at = now
             allocation.receipt_s3 = receipt_s3
@@ -248,7 +248,7 @@ class CharityService:
         )
 
         # Mark allocations as disbursed
-        now = datetime.now(timezone.utc)
+        now = datetime.utcnow()
         for allocation in pending:
             allocation.disbursed_at = now
             if receipt_s3:

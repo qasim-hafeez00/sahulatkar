@@ -29,6 +29,22 @@ def _iso(value):
     return value.isoformat() if hasattr(value, "isoformat") else value
 
 
+def _snapshot_name(product_snapshot) -> str | None:
+    """Best-effort product name from orders.product_snapshot (JSON/JSONB), tolerant
+    of it arriving as a dict (Postgres) or a JSON string (sqlite test engine)."""
+    if not product_snapshot:
+        return None
+    snapshot = product_snapshot
+    if isinstance(snapshot, str):
+        try:
+            snapshot = json.loads(snapshot)
+        except (ValueError, TypeError):
+            return None
+    if isinstance(snapshot, dict):
+        return snapshot.get("name")
+    return None
+
+
 @router.get("")
 async def list_admin_orders(
     page: int = Query(default=1, ge=1),
@@ -65,14 +81,21 @@ async def list_admin_orders(
     sort_col = sort_column_map.get(sort_by, "created_at")
     sort_order = "DESC" if sort_dir == "desc" else "ASC"
     
+    # NOTE: product_name is derived in Python from orders.product_snapshot rather than
+    # via a Postgres-only `->>` JSONB operator in raw SQL. That operator broke on
+    # sqlite (this suite's test engine, see conftest.py) with a syntax error, which a
+    # bare except below used to swallow into a silent "0 orders found" — masking real
+    # errors from admins investigating fraud/disputes. Fetching the raw column and
+    # parsing it here is portable across both engines and admin-panel queries must
+    # never hide genuine failures behind an empty result.
     query = text(
         f"""
         SELECT
             orders.id, orders.order_number, orders.status,
             orders.total_amount, orders.down_payment_amount,
-            orders.created_at,
+            orders.created_at, orders.product_snapshot,
             users.phone as user_phone,
-            COALESCE(products.name, orders.product_snapshot->>'name') as product_name
+            products.name as product_name
         FROM orders
         LEFT JOIN users ON orders.user_id = users.id
         LEFT JOIN products ON orders.product_id = products.id
@@ -81,7 +104,7 @@ async def list_admin_orders(
         LIMIT :limit OFFSET :offset
         """
     )
-    
+
     count_query = text(
         f"""
         SELECT COUNT(*)
@@ -90,21 +113,17 @@ async def list_admin_orders(
         WHERE {where_clause}
         """
     )
-    
-    try:
-        rows = (await db.execute(query, params)).mappings().all()
-        total = int((await db.execute(count_query, params)).scalar_one())
-    except Exception:
-        rows = []
-        total = 0
-    
+
+    rows = (await db.execute(query, params)).mappings().all()
+    total = int((await db.execute(count_query, params)).scalar_one())
+
     return {
         "orders": [
             {
                 "id": row["id"],
                 "order_number": row["order_number"] or f"ORD-{row['id']}",
                 "user_phone": row["user_phone"] or "Unknown",
-                "product_name": row["product_name"] or "N/A",
+                "product_name": row["product_name"] or _snapshot_name(row["product_snapshot"]) or "N/A",
                 "status": row["status"],
                 "total_amount": float(row["total_amount"]),
                 "down_payment": float(row["down_payment_amount"] or 0),
@@ -167,9 +186,9 @@ async def get_admin_order_detail(
         SELECT
             orders.id, orders.order_number, orders.status,
             orders.total_amount, orders.down_payment_amount,
-            orders.created_at, orders.user_id,
+            orders.created_at, orders.user_id, orders.product_snapshot,
             users.phone as user_phone,
-            COALESCE(products.name, orders.product_snapshot->>'name') as product_name,
+            products.name as product_name,
             products.sale_price,
             loans.loan_number, loans.principal_amount, loans.profit_amount,
             loans.total_repayable, loans.total_outstanding, loans.installment_count
@@ -181,10 +200,7 @@ async def get_admin_order_detail(
         """
     )
 
-    try:
-        row = (await db.execute(query, {"order_id": order_id})).mappings().one_or_none()
-    except Exception:
-        row = None
+    row = (await db.execute(query, {"order_id": order_id})).mappings().one_or_none()
 
     if row is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
@@ -198,7 +214,7 @@ async def get_admin_order_detail(
             "phone": row["user_phone"],
         },
         "product": {
-            "name": row["product_name"],
+            "name": row["product_name"] or _snapshot_name(row["product_snapshot"]),
             "price": float(row["sale_price"]) if row["sale_price"] else 0,
         },
         "totals": {
@@ -434,6 +450,77 @@ async def get_order_vcn(
         "issued_at": _iso(row["issued_at"]),
         "used_at": _iso(row["used_at"]),
     }
+
+
+class AdminRetryVcnRequest(BaseModel):
+    reason: str = Field(..., min_length=5, max_length=500)
+
+
+@router.post("/{order_id}/retry-vcn")
+async def admin_retry_vcn_issuance(
+    order_id: int,
+    payload: AdminRetryVcnRequest,
+    request: Request,
+    current_admin: AdminUser = Depends(RequirePermission("manage_orders")),
+    db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
+) -> dict:
+    """HIGH-2 fix: an order stuck at 'pending_vcn' after a failed VCN
+    issuance (payment-orchestrator's VcnIssueWorker DLQs the job after
+    DLQ_MAX_RETRIES with no automatic path back — see
+    apps/payment-orchestrator/src/workers/vcn_issue_worker.py) previously had
+    only a read-only GET /{order_id}/vcn view — no recovery action existed
+    short of a direct DB edit. This re-queues a fresh VCN issuance job,
+    mirroring the exact job shape POST /payments/vcn/issue itself pushes to
+    QueueName.VCN_ISSUE, and only accepts orders currently at 'pending_vcn'
+    (never an order that has already progressed or been issued a card, to
+    avoid double-issuing)."""
+    order = await db.scalar(select(Order).where(Order.id == order_id, Order.deleted_at.is_(None)))
+    if order is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="ORDER_NOT_FOUND")
+
+    if str(order.status) != "pending_vcn":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=f"ORDER_NOT_STUCK_AT_PENDING_VCN (current status: {order.status})",
+        )
+
+    from sk_shared.models.order import OrderStatusHistory
+
+    vcn_job = json.dumps({
+        "event": "vcn.issue_requested",
+        "order_id": order.id,
+        "user_id": order.user_id,
+        "amount": float(order.total_amount),
+        "triggered_at": datetime.now(timezone.utc).isoformat(),
+        "admin_retry": True,
+        "admin_retry_by": current_admin.id,
+    })
+    if hasattr(redis, "redis"):
+        await redis.redis.lpush(QueueName.VCN_ISSUE, vcn_job)
+
+    # Stays in pending_vcn (that's still an accurate description of the
+    # order's state) but the history row makes the retry attempt visible on
+    # the admin timeline, same pattern as refund/restructure below.
+    db.add(OrderStatusHistory(
+        order_id=order.id,
+        from_status=order.status,
+        to_status="pending_vcn",
+        reason=f"admin_retry_vcn:{payload.reason}",
+    ))
+
+    await record_audit_event(
+        db=db,
+        request=request,
+        admin_user_id=current_admin.id,
+        module="admin_orders",
+        action="retry_vcn_issuance",
+        target_id=order.id,
+        changes={"reason": payload.reason, "order_status": order.status},
+        severity="critical",
+    )
+    await db.commit()
+    return {"order_id": order.id, "status": "vcn_retry_queued", "queued": True}
 
 
 @router.post("/{order_id}/refund")

@@ -78,23 +78,35 @@ class MerchantRepository:
 
     async def recalculate_success_rate(self, merchant_id: int) -> None:
         from sqlalchemy import text
+        # BUG FIX (found live-running the real order flow end-to-end):
+        # `sk_shared` is the Python PACKAGE the shared ORM models live in
+        # (`from sk_shared.models.product import Merchant`, above) — it was
+        # never a Postgres schema. Every table this repo creates (via
+        # Alembic or Base.metadata) lives in the default `public` schema,
+        # so `sk_shared.purchase_executions`/`sk_shared.orders`/
+        # `sk_shared.products`/`sk_shared.merchants` never existed and this
+        # statement always raised `UndefinedTableError` on real Postgres —
+        # silently rolling back the entire enclosing transaction, including
+        # whatever the caller (VcnVerificationWorker marking a checkout
+        # 'succeeded') had just done. The SQLite branch below was already
+        # correctly unprefixed; this just matches it.
         stmt = text("""
             WITH stats AS (
-                SELECT 
+                SELECT
                     COUNT(*) as total,
                     SUM(CASE WHEN e.status = 'succeeded' THEN 1 ELSE 0 END) as successes
-                FROM sk_shared.purchase_executions e
-                JOIN sk_shared.orders o ON o.id = e.order_id
-                JOIN sk_shared.products p ON p.id = o.product_id
+                FROM purchase_executions e
+                JOIN orders o ON o.id = e.order_id
+                JOIN products p ON p.id = o.product_id
                 WHERE p.merchant_id = :merchant_id
             )
-            UPDATE sk_shared.merchants 
-            SET checkout_success_rate = CASE 
-                WHEN stats.total > 0 THEN (CAST(stats.successes AS FLOAT) / stats.total) * 100 
-                ELSE 0 
+            UPDATE merchants
+            SET checkout_success_rate = CASE
+                WHEN stats.total > 0 THEN (CAST(stats.successes AS FLOAT) / stats.total) * 100
+                ELSE 0
             END
             FROM stats
-            WHERE sk_shared.merchants.id = :merchant_id
+            WHERE merchants.id = :merchant_id
         """)
         
         from src.config import settings

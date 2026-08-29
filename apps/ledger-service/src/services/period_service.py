@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime, timezone
+from datetime import date, datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -131,7 +131,7 @@ class PeriodService:
                     )
 
         period.status = PeriodStatus.CLOSED
-        period.closed_at = datetime.now(timezone.utc)
+        period.closed_at = datetime.utcnow()
         period.closed_by = closed_by
 
         await self.db.flush()

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from datetime import date
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import case, func, select
@@ -27,7 +27,26 @@ class ReconciliationService:
         actual_amount: Decimal,
         reference: str | None = None,
         notes: str | None = None,
+        line_items: list[dict[str, object]] | None = None,
     ) -> dict[str, object]:
+        """
+        Args:
+            line_items: Optional per-transaction settlement records reported
+                by the gateway, e.g. [{"gateway_txn_id": "safepay_abc123",
+                "amount": Decimal("120.00")}, ...]. When provided, this runs a
+                genuine transaction-by-transaction reconciliation check as a
+                SUPPLEMENT to the pre-existing aggregate check above: two
+                offsetting per-transaction errors (e.g. one transaction
+                under-reported by 10, another over-reported by 10) net to
+                zero in expected_amount/actual_amount and in matched_amount,
+                so the aggregate check alone cannot see them. Comparing each
+                gateway-reported line against our own PaymentTransaction
+                records line-by-line catches exactly that class of error and
+                forces the overall status to "discrepant" even when the
+                aggregate totals match. When omitted (the default, and the
+                only mode the CLI worker/admin API currently exercise), this
+                is a no-op and behavior is unchanged from before.
+        """
         target_date = date.fromisoformat(settlement_date)
         expected_decimal = Decimal(str(expected_amount))
         actual_decimal = Decimal(str(actual_amount))
@@ -96,10 +115,11 @@ class ReconciliationService:
 
         # BV-02: Redo the loop to keep amounts and create items
         matched_data: list[tuple[int, Decimal]] = []
+        local_txns: list[tuple[int, str | None, Decimal]] = []
         offset = 0
         while True:
             stmt = (
-                select(PaymentTransaction.id, PaymentTransaction.amount)
+                select(PaymentTransaction.id, PaymentTransaction.gateway_txn_id, PaymentTransaction.amount)
                 .where(PaymentTransaction.deleted_at.is_(None))
                 .where(PaymentTransaction.gateway == gateway)
                 .where(func.date(PaymentTransaction.created_at) == target_date)
@@ -110,8 +130,20 @@ class ReconciliationService:
             if not rows:
                 break
             for r in rows:
-                txn_id, txn_amount = int(r[0]), Decimal(str(r[1]))
+                txn_id, gateway_txn_id, txn_amount = int(r[0]), r[1], Decimal(str(r[2]))
                 matched_data.append((txn_id, txn_amount))
+                local_txns.append((txn_id, gateway_txn_id, txn_amount))
+            offset += batch_size
+
+        # LS-MED-04: Line-level (transaction-by-transaction) reconciliation.
+        # Supplements the aggregate expected_amount/actual_amount check above,
+        # which cannot see two offsetting per-transaction errors that net to
+        # zero. When line_items isn't supplied, this reduces to the original
+        # behavior: every local transaction for the gateway/date gets a
+        # "matched" ReconciliationItem mirroring itself.
+        line_level_mismatches: list[str] = []
+        if line_items is None:
+            for txn_id, gateway_txn_id, txn_amount in local_txns:
                 self.db.add(
                     ReconciliationItem(
                         reconciliation_id=reconciliation.id,
@@ -123,7 +155,105 @@ class ReconciliationService:
                         created_at=now,
                     )
                 )
-            offset += batch_size
+        else:
+            local_by_gateway_id = {
+                gateway_txn_id: (txn_id, txn_amount)
+                for txn_id, gateway_txn_id, txn_amount in local_txns
+                if gateway_txn_id is not None
+            }
+            seen_gateway_ids: set[str] = set()
+
+            for item in line_items:
+                item_gateway_id = str(item["gateway_txn_id"])
+                item_amount = Decimal(str(item["amount"]))
+                seen_gateway_ids.add(item_gateway_id)
+                local = local_by_gateway_id.get(item_gateway_id)
+
+                if local is None:
+                    line_level_mismatches.append(item_gateway_id)
+                    self.db.add(
+                        ReconciliationItem(
+                            reconciliation_id=reconciliation.id,
+                            payment_txn_id=None,
+                            gateway_ref=item_gateway_id,
+                            expected_amount=item_amount,
+                            actual_amount=None,
+                            status="discrepant",
+                            discrepancy_note=(
+                                f"Gateway settlement line {item_gateway_id} (amount {item_amount}) "
+                                "has no matching local PaymentTransaction."
+                            ),
+                            created_at=now,
+                        )
+                    )
+                    continue
+
+                local_txn_id, local_amount = local
+                if local_amount != item_amount:
+                    line_level_mismatches.append(item_gateway_id)
+                    self.db.add(
+                        ReconciliationItem(
+                            reconciliation_id=reconciliation.id,
+                            payment_txn_id=local_txn_id,
+                            gateway_ref=item_gateway_id,
+                            expected_amount=item_amount,
+                            actual_amount=local_amount,
+                            status="discrepant",
+                            discrepancy_note=(
+                                f"Line-level amount mismatch for {item_gateway_id}: gateway "
+                                f"reports {item_amount}, local record has {local_amount}."
+                            ),
+                            created_at=now,
+                        )
+                    )
+                else:
+                    self.db.add(
+                        ReconciliationItem(
+                            reconciliation_id=reconciliation.id,
+                            payment_txn_id=local_txn_id,
+                            gateway_ref=item_gateway_id,
+                            expected_amount=item_amount,
+                            actual_amount=local_amount,
+                            status="matched",
+                            created_at=now,
+                        )
+                    )
+
+            # Local transactions the gateway's settlement file never mentioned.
+            for gateway_txn_id, (local_txn_id, local_amount) in local_by_gateway_id.items():
+                if gateway_txn_id in seen_gateway_ids:
+                    continue
+                line_level_mismatches.append(gateway_txn_id)
+                self.db.add(
+                    ReconciliationItem(
+                        reconciliation_id=reconciliation.id,
+                        payment_txn_id=local_txn_id,
+                        gateway_ref=gateway_txn_id,
+                        expected_amount=local_amount,
+                        actual_amount=None,
+                        status="discrepant",
+                        discrepancy_note=(
+                            f"Local transaction {gateway_txn_id} (amount {local_amount}) is not "
+                            "present in the gateway's settlement line items."
+                        ),
+                        created_at=now,
+                    )
+                )
+
+            if line_level_mismatches:
+                # BV: Force the overall reconciliation to "discrepant" even if
+                # the aggregate expected/actual totals matched -- this is the
+                # entire point of the line-level check: it catches offsetting
+                # errors the aggregate comparison structurally cannot see.
+                status = "discrepant"
+                line_note = (
+                    "LINE_LEVEL_MISMATCH: transaction-by-transaction check found "
+                    f"{len(line_level_mismatches)} discrepant line(s) not visible to the "
+                    f"aggregate check: {', '.join(sorted(line_level_mismatches))}"
+                )
+                notes = f"{notes}\n{line_note}" if notes else line_note
+                reconciliation.status = status
+                reconciliation.notes = notes
 
         if discrepancy != Decimal("0"):
             self.db.add(
@@ -284,4 +414,4 @@ class ReconciliationService:
         }
 
     def _utc_now(self) -> datetime:
-        return datetime.now(timezone.utc)
+        return datetime.utcnow()

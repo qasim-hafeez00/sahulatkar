@@ -32,7 +32,7 @@ class StripeCardholderService:
                 return cached.decode("utf-8")
             return str(cached)
 
-        if settings.ENVIRONMENT == "local" and (
+        if settings.test_payment_fallbacks_enabled and (
             not settings.STRIPE_SECRET_KEY or settings.STRIPE_SECRET_KEY.startswith("mock_")
         ):
             local_id = f"ich_local_{user_id}"
@@ -73,7 +73,7 @@ class StripeCardholderService:
             await self._redis.set(cache_key, cardholder_id, ttl=86400 * 30)
             return cardholder_id
         except stripe.error.StripeError as exc:
-            if settings.ENVIRONMENT == "local":
+            if settings.test_payment_fallbacks_enabled:
                 local_id = f"ich_local_{user_id}"
                 await self._redis.set(cache_key, local_id, ttl=86400 * 30)
                 logger.warning(

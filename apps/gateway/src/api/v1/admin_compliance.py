@@ -4,11 +4,14 @@ from datetime import datetime, timedelta, timezone
 
 from fastapi import APIRouter, Depends, Query
 from fastapi import HTTPException, status
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from sk_shared.models.auth import AdminUser
 from sk_shared.models.audit import AuditTrail
+from sk_shared.models.contracts import ShariahBoardApproval
+from src.core.audit import record_audit_event
 from src.core.dependencies import (
     RequirePermission,
     get_current_admin,
@@ -415,4 +418,89 @@ async def data_privacy_panel(
             }
             for r in recent_requests
         ],
+    }
+
+
+# ============================================================================
+# Shariah board contract-template approvals (HIGH fix — see
+# ContractGeneratorService._is_shariah_board_approved). Backs
+# MurabahaContract.validated_by_shariah_board with a real, admin-recorded
+# approval per template_version instead of a hardcoded True.
+# ============================================================================
+
+
+class ShariahBoardApprovalRequest(BaseModel):
+    template_version: str = Field(..., min_length=1, max_length=10)
+    approved_by: str = Field(..., min_length=1, max_length=200)
+    notes: str | None = None
+
+
+@router.get("/shariah-board-approvals")
+async def list_shariah_board_approvals(
+    current_admin: AdminUser = Depends(RequirePermission("read_compliance")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    rows = (
+        await db.execute(select(ShariahBoardApproval).order_by(ShariahBoardApproval.approved_at.desc()))
+    ).scalars().all()
+    return {
+        "items": [
+            {
+                "id": row.id,
+                "template_version": row.template_version,
+                "approved_by": row.approved_by,
+                "approved_at": _iso(row.approved_at),
+                "notes": row.notes,
+            }
+            for row in rows
+        ]
+    }
+
+
+@router.post("/shariah-board-approvals", status_code=status.HTTP_201_CREATED)
+async def record_shariah_board_approval(
+    payload: ShariahBoardApprovalRequest,
+    current_admin: AdminUser = Depends(RequirePermission("manage_compliance")),
+    db: AsyncSession = Depends(get_db),
+) -> dict:
+    """Record that the Shariah board has approved a specific Murabaha
+    contract template_version. Idempotent on template_version: re-submitting
+    the same version updates the existing record (re-approval / correction)
+    rather than erroring, since template_version is unique."""
+    existing = await db.scalar(
+        select(ShariahBoardApproval).where(ShariahBoardApproval.template_version == payload.template_version)
+    )
+    now = datetime.now(timezone.utc)
+    if existing is not None:
+        existing.approved_by = payload.approved_by
+        existing.approved_at = now
+        existing.notes = payload.notes
+        approval = existing
+        action = "shariah_board_approval_updated"
+    else:
+        approval = ShariahBoardApproval(
+            template_version=payload.template_version,
+            approved_by=payload.approved_by,
+            approved_at=now,
+            notes=payload.notes,
+        )
+        db.add(approval)
+        action = "shariah_board_approval_created"
+
+    await record_audit_event(
+        db=db,
+        request=None,
+        admin_user_id=current_admin.id,
+        module="compliance",
+        action=action,
+        target_id=None,
+        changes={"template_version": payload.template_version, "approved_by": payload.approved_by},
+    )
+    await db.commit()
+    await db.refresh(approval)
+    return {
+        "id": approval.id,
+        "template_version": approval.template_version,
+        "approved_by": approval.approved_by,
+        "approved_at": _iso(approval.approved_at),
     }

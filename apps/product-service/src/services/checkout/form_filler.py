@@ -151,6 +151,18 @@ class CheckoutFormFiller:
 
                         # Step 5: Payment Injection
                         await self._emit_step("payment_injection")
+                        # PCI/security fix: from this point on, live PAN/CVV
+                        # may be typed into the page (including the CVV typed
+                        # after the PAN, which would already be visible) —
+                        # disable the self-healing screenshot-to-OpenAI
+                        # fallback for the rest of this checkout session so a
+                        # later selector-not-found (here, at Review Order, or
+                        # at Submit) can never send a live-card-data
+                        # screenshot to a third party. Set before any card
+                        # field is typed, not after, so even a self-heal
+                        # triggered while typing the PAN/CVV themselves is
+                        # covered.
+                        self.self_healing.mark_payment_data_injected()
                         if await self.self_healing.handle_out_of_stock_at_checkout(page):
                             raise RuntimeError("OUT_OF_STOCK")
 

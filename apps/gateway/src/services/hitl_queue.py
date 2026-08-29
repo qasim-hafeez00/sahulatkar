@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime
 
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -32,7 +32,7 @@ class HitlQueueService:
 
         item.assigned_to = admin_id
         item.status = "claimed"
-        item.claimed_at = datetime.now(timezone.utc)
+        item.claimed_at = datetime.utcnow()
         await self.db.commit()
         await self.db.refresh(item)
         return item
@@ -48,7 +48,7 @@ class HitlQueueService:
 
         item.status = "in_progress"
         if item.in_progress_at is None:
-            item.in_progress_at = datetime.now(timezone.utc)
+            item.in_progress_at = datetime.utcnow()
         await self.db.commit()
         await self.db.refresh(item)
         return item
@@ -64,7 +64,7 @@ class HitlQueueService:
 
         item.status = "resolved"
         item.resolution = resolution
-        item.resolved_at = datetime.now(timezone.utc)
+        item.resolved_at = datetime.utcnow()
         await self.db.commit()
         await self.db.refresh(item)
         return item
@@ -80,7 +80,7 @@ class HitlQueueService:
 
         item.assigned_to = admin_id
         item.status = "cancelled"
-        item.resolved_at = datetime.now(timezone.utc)
+        item.resolved_at = datetime.utcnow()
         item.resolution = "cancelled"
         await self.db.commit()
         await self.db.refresh(item)

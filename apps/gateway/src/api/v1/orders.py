@@ -46,8 +46,9 @@ async def get_order_offer(
     order_id: int,
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_db),
+    redis: RedisClient = Depends(get_redis),
 ):
-    return await OrderService(db).get_offer(current_user.id, order_id)
+    return await OrderService(db).get_offer(current_user.id, order_id, redis)
 
 
 @router.post("/{order_id}/accept", response_model=OrderDetailResponse)

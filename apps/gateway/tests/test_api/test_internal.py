@@ -71,6 +71,83 @@ async def test_product_extracted_callback_success(client: AsyncClient, db_sessio
     assert float(order.down_payment_amount) == 25000.0
     assert order.product_id == product.id
 
+async def test_product_extracted_callback_blocks_prohibited_extracted_name(client: AsyncClient, db_session, test_user):
+    """MEDIUM regression: Gateway only ever checked the raw URL for a
+    prohibited keyword at order-initiation time (_check_prohibited_url).
+    A URL with no hint of its contents (e.g. a generic product-id path)
+    sails through that check, but the product's real name/description only
+    becomes known post-extraction. This proves the post-extraction re-check
+    in apply_product_extraction_result blocks such a product even though its
+    URL never matched, and escalates it to HITL instead of silently
+    advancing the order.
+    """
+    from sk_shared.models.hitl import HitlQueue
+    from sk_shared.models.product import Merchant, Product
+
+    user, _ = test_user
+    merchant = Merchant(name="Sketchy Merchant", normalized_name="sketchy-merchant", domain="example.com")
+    db_session.add(merchant)
+    await db_session.flush()
+    product = Product(
+        merchant_id=merchant.id,
+        # URL gives no hint this is a prohibited product -- only the
+        # extracted name reveals it.
+        name="Premium Cuban Cigarette Gift Set",
+        url="https://example.com/p/12345",
+        currency="PKR",
+        cost_price=5000.0,
+        sale_price=6000.0,
+        in_stock=True,
+    )
+    db_session.add(product)
+    await db_session.commit()
+
+    user.credit_limit = 500000.0
+    user.available_credit = 500000.0
+    db_session.add(user)
+    await db_session.flush()
+
+    order = Order(
+        user_id=user.id,
+        status="url_received",
+        total_amount=0,
+        # The raw URL alone would never trip _check_prohibited_url.
+        product_description="https://example.com/p/12345",
+    )
+    db_session.add(order)
+    await db_session.commit()
+    await db_session.refresh(order)
+
+    headers = {"X-Internal-Token": settings.INTERNAL_SERVICE_TOKEN}
+    payload = {
+        "product_id": product.id,
+        "name": product.name,
+        "cost_price": 5000.0,
+        "sale_price": 6000.0,
+        "currency": "PKR",
+        "in_stock": True,
+    }
+
+    response = await client.post(
+        f"/api/v1/internal/orders/{order.id}/product-extracted",
+        json=payload,
+        headers=headers,
+    )
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == "PROHIBITED_PRODUCT_CATEGORY"
+
+    await db_session.refresh(order)
+    assert order.status == "extraction_failed"
+    # Order must NOT have been silently advanced/offered despite the block.
+    assert order.product_id is None
+
+    hitl = await db_session.scalar(select(HitlQueue).where(HitlQueue.order_id == order.id))
+    assert hitl is not None
+    assert "PROHIBITED_CATEGORY" in (hitl.failure_reason or "")
+    assert hitl.priority == 2
+
+
 async def test_product_extracted_invalid_token(client: AsyncClient, test_user):
     headers = {"X-Internal-Token": "wrong-token"}
     response = await client.post(

@@ -68,7 +68,16 @@ class Installment(Base, TimestampMixin, SoftDeleteMixin):
     __table_args__ = (
         Index("ix_installments_loan_id", "loan_id"),
         Index("ix_installments_user_id", "user_id"),
-        Index("ix_installments_due_date_user_id_pending", "due_date", "user_id"),
+        # NOTE: the billing sweep's actual index -- a genuine partial index
+        # `idx_inst_billing ON installments (due_date, user_id) WHERE status =
+        # 'pending'` -- is created via raw SQL in db/migrations/versions/
+        # 039_missing_db_objects.py (SQLAlchemy's declarative Index() does not
+        # support a partial-index WHERE clause portably across the dialects
+        # this shared model compiles against in tests). A non-partial
+        # `ix_installments_due_date_user_id_pending` used to be declared here
+        # too (from migration 006) but was a misleadingly-named duplicate that
+        # indexed every installment row, not just pending ones -- dropped in
+        # db/migrations/versions/086_drop_misleading_installments_index.py.
     )
 
 

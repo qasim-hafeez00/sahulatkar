@@ -60,11 +60,30 @@ class Settings(BaseSettings):
 
     EXTRACTION_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=300)
     EXTRACTION_MAX_RETRIES: int = Field(default=2, ge=0, le=10)
+    # HIGH-05 fix: extraction retries (including OpenAI/Groq 429s bubbling up
+    # through the waterfall) previously re-queued instantly with zero delay,
+    # burning through EXTRACTION_MAX_RETRIES in a fraction of a second
+    # instead of giving a rate-limited/overloaded upstream time to recover.
+    # scraping_worker.py now sleeps base * 2^(attempt-1) seconds (capped,
+    # with jitter) before re-queuing a failed job.
+    EXTRACTION_RETRY_BACKOFF_BASE_SECONDS: float = Field(default=2.0, ge=0.1, le=60.0)
+    EXTRACTION_RETRY_BACKOFF_MAX_SECONDS: float = Field(default=30.0, ge=1.0, le=300.0)
     EXTRACTION_CONFIDENCE_THRESHOLD: float = Field(default=0.70, ge=0.0, le=1.0)
     FEATURE_STRICT_URL_HEAD_CHECK: bool = False
     CHECKOUT_TIMEOUT_SECONDS: int = Field(default=45, ge=5, le=600)
     CHECKOUT_MAX_RETRIES: int = Field(default=3, ge=0, le=20)
     CHECKOUT_RETRY_BACKOFF_SECONDS: float = Field(default=1.0, ge=0.1, le=60.0)
+    # HIGH-02 fix: a checkout worker that crashes/is killed mid-job (OOM,
+    # deploy, host failure) leaves its PurchaseExecution row at status
+    # 'running' forever -- nothing ever wrote a terminal status. ExecutionReaperWorker
+    # (src/workers/execution_reaper_worker.py) sweeps for rows stuck at
+    # 'running' longer than this and marks them failed/hitl_escalated so the
+    # admin retry endpoint can act on them again. Comfortably above
+    # CHECKOUT_TIMEOUT_SECONDS * (CHECKOUT_MAX_RETRIES + 1) so a legitimately
+    # slow-but-alive checkout (retries, proxy negotiation, slow merchant
+    # site) is never reaped out from under itself.
+    CHECKOUT_STUCK_RUNNING_TIMEOUT_SECONDS: int = Field(default=900, ge=60, le=7200)
+    EXECUTION_REAPER_INTERVAL_SECONDS: int = Field(default=300, ge=30, le=3600)
     PRICE_DRIFT_THRESHOLD_PCT: Decimal = Field(default=Decimal("5.0"), ge=Decimal("0"), le=Decimal("100"))
     # Coarser than PRICE_DRIFT_THRESHOLD_PCT (checkout-time re-verification): this
     # is a sanity cross-check between the LLM-based Tier 3 extractor's price and
@@ -147,6 +166,23 @@ class Settings(BaseSettings):
         return ["https://api.sahulatkar.com", "https://gateway.sahulatkar.internal"]
 
     CORS_ALLOW_ORIGINS: List[str] = Field(default_factory=lambda: ["*"])
+
+    # E2E test-only SSRF allowlist. Empty by default in every real
+    # environment -- this repo's SSRF hardening (url_normalizer.py's
+    # DNS-rebinding fix) intentionally rejects any hostname that resolves to
+    # a private/loopback/link-local/reserved IP. The end-to-end test suite
+    # (tests/e2e/) needs the real extraction/checkout pipeline to fetch a
+    # mock-merchant fixture container that lives on the docker-compose
+    # bridge network and therefore resolves to a private IP -- this lets
+    # exactly that one fixture hostname through the private-IP check, and
+    # only when explicitly configured. Comma-separated hostnames (no ports,
+    # no scheme). docker-compose.yml / .env.example never set this; only
+    # infra/docker/docker-compose.e2e.yml does.
+    E2E_ALLOWED_FETCH_HOSTS: str = ""
+
+    @property
+    def e2e_allowed_fetch_hosts_list(self) -> List[str]:
+        return [h.strip().lower() for h in self.E2E_ALLOWED_FETCH_HOSTS.split(",") if h.strip()]
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 

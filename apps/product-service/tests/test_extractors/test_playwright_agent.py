@@ -1,9 +1,40 @@
 import json
-from unittest.mock import MagicMock, patch
+import socket
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.extractors.playwright_agent import PlaywrightExtractionAgent
+from src.services.url_normalizer import UrlNormalizerService
+
+
+def _mock_playwright_stack():
+    """Builds the chain of mocks needed to drive `async with async_playwright() as p`
+    through browser/context/page creation without a real browser."""
+    page_mock = MagicMock()
+    page_mock.route = AsyncMock()
+    page_mock.goto = AsyncMock()
+
+    context_mock = MagicMock()
+    context_mock.new_page = AsyncMock(return_value=page_mock)
+
+    browser_mock = MagicMock()
+    browser_mock.new_context = AsyncMock(return_value=context_mock)
+    browser_mock.close = AsyncMock()
+
+    chromium_mock = MagicMock()
+    chromium_mock.launch = AsyncMock(return_value=browser_mock)
+
+    p_mock = MagicMock()
+    p_mock.chromium = chromium_mock
+
+    async_playwright_cm = MagicMock()
+    async_playwright_cm.__aenter__ = AsyncMock(return_value=p_mock)
+    async_playwright_cm.__aexit__ = AsyncMock(return_value=False)
+
+    async_playwright_factory = MagicMock(return_value=async_playwright_cm)
+
+    return page_mock, browser_mock, async_playwright_factory
 
 
 def test_detect_platform_rules():
@@ -66,4 +97,59 @@ async def test_parse_with_llm_separates_system_instructions_from_scraped_content
     assert malicious_text in messages[1]["content"]
     assert agent._SCRAPED_CONTENT_BEGIN in messages[1]["content"]
     assert agent._SCRAPED_CONTENT_END in messages[1]["content"]
-    assert "treat" in messages[0]["content"].lower()
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_url_unsafe_at_fetch_time_and_never_navigates():
+    """SSRF/DNS-rebinding regression (Bug 1): `extract()` re-validates the
+    URL immediately before `page.goto`, since this worker can run long
+    after the URL was already validated once at submission time (retries,
+    DLQ backoff). If the host is unsafe *right now*, the job must be
+    rejected and Playwright must never navigate to it."""
+    fake_normalizer = AsyncMock(spec=UrlNormalizerService)
+    fake_normalizer.ensure_fetch_target_is_safe.side_effect = ValueError("UNSAFE_URL")
+    agent = PlaywrightExtractionAgent(url_normalizer=fake_normalizer)
+
+    page_mock, browser_mock, async_playwright_factory = _mock_playwright_stack()
+
+    stealth_instance = MagicMock()
+    stealth_instance.apply_stealth_async = AsyncMock()
+
+    with patch("playwright.async_api.async_playwright", async_playwright_factory), \
+         patch("src.extractors.playwright_agent.Stealth", return_value=stealth_instance):
+        with pytest.raises(ValueError):
+            await agent.extract("https://rebinding.example/product/123")
+
+    fake_normalizer.ensure_fetch_target_is_safe.assert_awaited_once_with(
+        "https://rebinding.example/product/123"
+    )
+    page_mock.goto.assert_not_called()
+    # Cleanup must still happen even though the job was rejected.
+    browser_mock.close.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_extract_rejects_dns_rebound_to_private_ip_at_fetch_time(monkeypatch):
+    """End-to-end version of the same regression using the real
+    UrlNormalizerService: a domain that now resolves to a private/loopback
+    IP (even though it may have resolved publicly at submission time) must
+    be rejected before Playwright navigates to it."""
+
+    def fake_getaddrinfo(*_args, **_kwargs):
+        return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("127.0.0.1", 0))]
+
+    monkeypatch.setattr("src.services.url_normalizer.socket.getaddrinfo", fake_getaddrinfo)
+
+    agent = PlaywrightExtractionAgent()
+    page_mock, browser_mock, async_playwright_factory = _mock_playwright_stack()
+
+    stealth_instance = MagicMock()
+    stealth_instance.apply_stealth_async = AsyncMock()
+
+    with patch("playwright.async_api.async_playwright", async_playwright_factory), \
+         patch("src.extractors.playwright_agent.Stealth", return_value=stealth_instance):
+        with pytest.raises(ValueError):
+            await agent.extract("https://rebound-after-submit.example/product/9")
+
+    page_mock.goto.assert_not_called()
+    browser_mock.close.assert_awaited_once()

@@ -230,6 +230,45 @@ class UrlNormalizerService:
         """
         await self._resolve_pinned(url, resolution_cache)
 
+    async def ensure_fetch_target_is_safe(self, url: str) -> None:
+        """Public, fetch-time re-validation entry point.
+
+        `normalize()` validates a URL exactly once, at submission time
+        (`POST /products/extract`). The validated `canonical_url` is then
+        queued and may not actually be fetched until much later — after
+        retries, DLQ backoff, etc. In that window an attacker who controls
+        DNS for their own domain can rebind it from a public IP (which
+        passed submission-time validation) to a private/loopback/link-local/
+        reserved one, e.g. the cloud metadata IP 169.254.169.254.
+
+        Callers that fetch a previously-normalized URL asynchronously (the
+        scraping worker's extractors) MUST call this — or `resolve_pinned_
+        request` below — immediately before issuing their own request,
+        rather than trusting the one-time submission check. This deliberately
+        performs a *fresh* resolution (no cache reuse across calls) so it
+        reflects DNS as it stands right now, not at submission time.
+
+        Raises ValueError("UNSAFE_URL") / ValueError("NOT_A_PRODUCT_URL") if
+        the current resolution is unsafe.
+        """
+        await self._ensure_target_is_safe(url)
+
+    async def resolve_pinned_request(self, url: str) -> tuple[str, dict]:
+        """Public, fetch-time entry point that both validates `url` is safe
+        *and* returns the (safe_url, request_kwargs) pair needed to pin an
+        httpx request to the exact IP that was just validated — closing the
+        same DNS-rebinding TOCTOU window described in `_resolve_pinned`, but
+        for callers outside `normalize()` (e.g. `HtmlScraper.fetch_and_parse`
+        in the scraping worker, which fetches a previously-normalized
+        `canonical_url` asynchronously, possibly long after submission-time
+        validation ran). See `ensure_fetch_target_is_safe` for why this
+        re-validation at actual-fetch-time is necessary.
+
+        Raises ValueError("UNSAFE_URL") / ValueError("NOT_A_PRODUCT_URL") if
+        the current resolution is unsafe.
+        """
+        return await self._resolve_pinned(url)
+
     async def _resolve_pinned(
         self, url: str, resolution_cache: dict[str, str | None] | None = None
     ) -> tuple[str, dict]:
@@ -296,6 +335,19 @@ class UrlNormalizerService:
         except ValueError:
             pass
 
+        # E2E test-only escape hatch (see Settings.E2E_ALLOWED_FETCH_HOSTS):
+        # empty in every real environment, so this branch is dead code
+        # outside a docker-compose.e2e.yml run. The mock-merchant fixture
+        # container the E2E suite fetches against lives on the compose
+        # bridge network and therefore genuinely resolves to a private IP —
+        # without this, the DNS-rebinding fix below would reject it exactly
+        # as it's designed to reject a real attacker's rebound domain, and
+        # the E2E suite could never exercise the real extraction/checkout
+        # pipeline at all. Only the exact allowlisted hostname is exempted;
+        # every other host is still subject to the full private-IP check.
+        e2e_allowed = settings.e2e_allowed_fetch_hosts_list
+        e2e_bypass = bool(e2e_allowed) and host in e2e_allowed
+
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -314,7 +366,7 @@ class UrlNormalizerService:
                 ip = ipaddress.ip_address(sockaddr[0])
             except ValueError:
                 continue
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
+            if (ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved) and not e2e_bypass:
                 raise ValueError("UNSAFE_URL")
             resolved_ips.append(str(ip))
 

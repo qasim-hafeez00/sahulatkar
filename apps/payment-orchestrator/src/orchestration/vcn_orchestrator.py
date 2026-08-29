@@ -13,8 +13,13 @@ logger = logging.getLogger(__name__)
 
 
 class VcnOrchestrator:
-    def __init__(self, db: AsyncSession):
+    def __init__(self, db: AsyncSession, redis=None):
         self.db = db
+        # Optional: callers that have a RedisClient handy (both real webhook
+        # entry points do) pass it so issuing_transaction.created can signal
+        # completion to VcnVerifier.verify_charge (product-service). See the
+        # bug note on that branch below for why this parameter exists.
+        self.redis = redis
 
     async def handle_stripe_event(self, event_type: str, data: dict):
         """
@@ -50,7 +55,7 @@ class VcnOrchestrator:
             # BV-05 Fix: Do not mutate charged_amount here, emit event to Ledger
             card.is_used = True
             logger.info(f"VCN {card.id} transaction created", extra={"order_id": card.order_id})
-            
+
             await self._queue_event(
                 EVENT_VCN_CHARGED,
                 {
@@ -60,6 +65,27 @@ class VcnOrchestrator:
                     "stripe_txn_id": data.get("id"),
                 }
             )
+
+            # BUG FIX (found building the E2E order-lifecycle test): this branch
+            # is the ONLY real-world signal that a VCN was actually charged at
+            # the merchant, but nothing here ever wrote the Redis key that
+            # product-service's VcnVerifier.verify_charge() polls
+            # ("sk:vcn:charge:confirmed:{vcn_id}" — see
+            # apps/product-service/src/services/checkout/vcn_verifier.py).
+            # Grepping the whole repo turns up zero writers of that key before
+            # this fix, in ANY environment — so VcnVerificationWorker always
+            # timed out and every checkout landed on "hitl_escalated" instead
+            # of "succeeded", even on a real Stripe issuing_transaction.created
+            # webhook. Both real call sites (this orchestrator's two callers:
+            # the direct /api/v1/webhooks/stripe endpoint and the Gateway-relay
+            # payment_webhook_consumer worker) now pass a RedisClient in so
+            # this signal can actually be delivered.
+            if self.redis is not None:
+                # 600s comfortably covers product-service's own
+                # VCN_VERIFICATION_TIMEOUT_SECONDS poll window (default 120s,
+                # max 600s) without this service needing to know that
+                # setting's value.
+                await self.redis.set(f"sk:vcn:charge:confirmed:{card.id}", "1", ttl=600)
 
         elif event_type == "issuing_authorization.request":
             import asyncio

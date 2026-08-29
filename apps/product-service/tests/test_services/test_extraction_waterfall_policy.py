@@ -1,5 +1,6 @@
 from decimal import Decimal
 
+import httpx
 import pytest
 
 from src.services.extraction_waterfall import ExtractionResult, ExtractionWaterfallService
@@ -132,3 +133,62 @@ async def test_social_commerce_platform_skips_every_tier_and_routes_to_hitl(monk
 
     assert result.status == "hitl_required"
     assert result.error_code == "SOCIAL_COMMERCE_MANUAL_ONLY"
+
+
+@pytest.mark.asyncio
+async def test_run_tier3_tags_openai_429_as_rate_limited(monkeypatch):
+    """HIGH-05: a 429 from the LLM provider (OpenAI/Groq, called via httpx
+    inside PlaywrightExtractionAgent) must be distinguishable from a generic
+    transient failure so scraping_worker.py's retry backoff can apply a
+    longer initial delay for it specifically."""
+    service = ExtractionWaterfallService()
+
+    async def fake_extract(self, url, scrape_config=None):
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(429, request=request, text="Too Many Requests")
+        raise httpx.HTTPStatusError("429 Too Many Requests", request=request, response=response)
+
+    monkeypatch.setattr("src.extractors.playwright_agent.PlaywrightExtractionAgent.extract", fake_extract)
+
+    result = await service.run_tier3("https://example.com/products/phone", "CUSTOM")
+
+    assert result.status == "failed"
+    assert result.error_code == "RATE_LIMITED"
+
+
+@pytest.mark.asyncio
+async def test_run_tier3_generic_error_is_not_tagged_rate_limited(monkeypatch):
+    """A non-429 failure (e.g. a validation error from a malformed LLM
+    response) must keep the generic EXTRACTION_ERROR code, not be
+    misclassified as a rate limit."""
+    service = ExtractionWaterfallService()
+
+    async def fake_extract(self, url, scrape_config=None):
+        raise ValueError("EXTRACTION_VALIDATION_FAILED")
+
+    monkeypatch.setattr("src.extractors.playwright_agent.PlaywrightExtractionAgent.extract", fake_extract)
+
+    result = await service.run_tier3("https://example.com/products/phone", "CUSTOM")
+
+    assert result.status == "failed"
+    assert result.error_code == "EXTRACTION_ERROR"
+
+
+@pytest.mark.asyncio
+async def test_run_tier3_non_429_http_status_error_is_not_rate_limited(monkeypatch):
+    """A different HTTP status (e.g. 500) from the LLM provider must not be
+    misclassified as a rate limit either -- only 429 gets the longer
+    backoff treatment."""
+    service = ExtractionWaterfallService()
+
+    async def fake_extract(self, url, scrape_config=None):
+        request = httpx.Request("POST", "https://api.openai.com/v1/chat/completions")
+        response = httpx.Response(500, request=request, text="Internal Server Error")
+        raise httpx.HTTPStatusError("500 Internal Server Error", request=request, response=response)
+
+    monkeypatch.setattr("src.extractors.playwright_agent.PlaywrightExtractionAgent.extract", fake_extract)
+
+    result = await service.run_tier3("https://example.com/products/phone", "CUSTOM")
+
+    assert result.status == "failed"
+    assert result.error_code == "EXTRACTION_ERROR"

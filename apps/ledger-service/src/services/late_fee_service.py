@@ -5,6 +5,7 @@ from decimal import Decimal
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sk_shared.models.ledger import JournalEntry
 from sk_shared.models.payment import Installment, Loan
 from sk_shared.redis_client import RedisClient
 from src.events.publisher import EventPublisher
@@ -25,10 +26,22 @@ class LateFeeService:
         if fee_amount <= Decimal("0"):
             return {"status": "not_applicable", "amount": 0.0, "installment_id": installment_id}
 
-        if Decimal(str(installment.late_fee_amount or 0)) > Decimal("0"):
+        # LS-CRIT-XX: `installment.late_fee_amount` is never written back by any
+        # consumer (Ledger deliberately doesn't write to the shared `installments`
+        # table -- it only publishes `late_fee_applied`, and nothing subscribes to
+        # write the field), so that column can never be used as an idempotency
+        # signal. Instead, check for a late-fee JournalEntry Ledger itself already
+        # posted for this installment -- the same source_type/source_id pair
+        # record_late_fee() uses for its own idempotency check. A late fee is
+        # applied once per overdue episode (in this schema, an installment has at
+        # most one overdue episode over its lifetime -- it never cycles back to
+        # `pending` after being charged), matching the one-row-per-installment
+        # UniqueConstraint on LateFeeCharityAllocation.installment_id.
+        existing_entry = await self._find_existing_late_fee_entry(installment_id)
+        if existing_entry is not None:
             return {
                 "status": "already_applied",
-                "amount": float(Decimal(str(installment.late_fee_amount))),
+                "amount": float(Decimal(str(existing_entry.total_debit))),
                 "installment_id": installment_id,
             }
 
@@ -80,6 +93,19 @@ class LateFeeService:
             "outstanding": float(outstanding),
             "installment_count": len(rows),
         }
+
+    async def _find_existing_late_fee_entry(self, installment_id: int) -> JournalEntry | None:
+        """Mirrors AccountingService._create_balanced_entry's own idempotency
+        lookup (source_type/source_id) so both layers agree on whether a late
+        fee was already applied for this installment."""
+        return (
+            await self.db.execute(
+                select(JournalEntry).where(
+                    JournalEntry.source_type == "installment.late_fee",
+                    JournalEntry.source_id == installment_id,
+                )
+            )
+        ).scalar_one_or_none()
 
     async def _get_installment(self, installment_id: int) -> Installment:
         installment = (

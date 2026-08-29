@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 from uuid import UUID
 
+from fastapi import BackgroundTasks
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -206,16 +207,31 @@ class CreditPipelineService:
         # address is essentially always present at the HTTP layer (there's always a TCP peer),
         # so "was a value passed" is a useless sparse-signal — "did it actually resolve to a
         # known-clean row" is what identity.flags already captures.
-        data_sparse = (
+        #
+        # That device/IP/bank-data exit condition depends entirely on integrations that don't
+        # exist in production (see wallet.py / identity.py / fraud.py's honest docstrings), so
+        # the three flags below are always true for every real applicant and this condition can
+        # never resolve to False on its own — every repeat customer would be cold-start-capped
+        # forever. `has_repayment_track_record` is a second, independent exit: a customer with
+        # a genuine track record of fully-repaid, on-time loans (real signal the platform
+        # already has, unlike the device/wallet data) also graduates. See
+        # LimitEngine.has_repayment_track_record / RulePolicy.graduation_min_repaid_loans for
+        # the (conservative, zero-tolerance-for-any-missed-payment) rule.
+        device_ip_bank_sparse = (
             "device_trust_unverified" in identity.flags
             and "ip_trust_unverified" in identity.flags
             and "bank_data_unavailable" in affordability.flags
         )
+        repayment_history_graduated = (
+            device_ip_bank_sparse and await limit_engine.has_repayment_track_record(self.db, user_id)
+        )
+        data_sparse = device_ip_bank_sparse and not repayment_history_graduated
         limit = limit_engine.apply_cold_start_cap(overlay.limit, scoring.band, is_first_order, data_sparse=data_sparse)
         limit = limit_engine.clamp_to_maximum(limit)
         features["limit"] = {
             "base_limit": scoring.base_limit, "overlay_limit": overlay.limit,
-            "data_sparse": data_sparse, "final_limit": limit, "down_payment_pct": overlay.down_payment_pct,
+            "data_sparse": data_sparse, "repayment_history_graduated": repayment_history_graduated,
+            "final_limit": limit, "down_payment_pct": overlay.down_payment_pct,
         }
 
         all_flags = (
@@ -223,6 +239,8 @@ class CreditPipelineService:
         )
         if data_sparse:
             all_flags = all_flags + [FlagCode.COLD_START_DATA_SPARSE]
+        elif repayment_history_graduated:
+            all_flags = all_flags + [FlagCode.REPAYMENT_HISTORY_VERIFIED]
 
         # Credit is only drawn against the financed portion of the order — the down payment
         # is paid upfront by the customer, not extended as credit — so the limit check
@@ -333,6 +351,7 @@ class CreditPipelineService:
         requested_limit: float,
         application_type: str,
         decision: dict[str, Any],
+        background_tasks: BackgroundTasks | None = None,
     ) -> CreditApplication:
         # Popped (not just read) so it never leaks into a caller that forwards `decision`
         # straight into an API response — see routes.py's /credit/apply, which builds its
@@ -396,7 +415,7 @@ class CreditPipelineService:
             approved_limit = float(app.approved_limit or 0.0)
             gateway_user_id = await self._get_user_int_id(user_id)
             if gateway_user_id is not None:
-                await http_client.push_credit_result(
+                callback_kwargs = dict(
                     user_id=gateway_user_id,
                     risk_band=decision.get("risk_band") or "F",
                     credit_limit=approved_limit,
@@ -405,6 +424,23 @@ class CreditPipelineService:
                     decision="approved",
                     assessment_id=assessment.id,
                 )
+                if background_tasks is not None:
+                    # CE-HIGH-02: push_credit_result retries up to 3x, each with a 5s HTTP
+                    # timeout and exponential backoff between attempts (see
+                    # src/core/http_client.py) — worst case ~16.5s. Awaiting it inline here
+                    # used to mean /credit/apply couldn't respond until Gateway answered (or
+                    # every retry was exhausted), blowing the endpoint's <3s SLA whenever
+                    # Gateway was slow or down. The CreditApplication/RiskAssessment rows
+                    # above are already committed by this point — credit-engine's own DB is
+                    # the system of record for the decision itself — so the Gateway sync is
+                    # safe to run after the HTTP response is sent rather than gating it.
+                    # routes.py's /credit/apply supplies a real BackgroundTasks for this;
+                    # callers with no request context (e.g. the periodic-review worker in
+                    # workers/credit_assess_consumer.py, where nothing is waiting on an HTTP
+                    # response) fall through to the synchronous await below instead.
+                    background_tasks.add_task(http_client.push_credit_result, **callback_kwargs)
+                else:
+                    await http_client.push_credit_result(**callback_kwargs)
             else:
                 logger.error("credit_result_push_skipped: no users row for uuid=%s", user_id)
 

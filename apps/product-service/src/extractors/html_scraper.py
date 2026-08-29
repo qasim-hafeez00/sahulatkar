@@ -8,6 +8,8 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 
+from src.services.url_normalizer import UrlNormalizerService
+
 
 @dataclass(slots=True)
 class HtmlScrapeResult:
@@ -23,10 +25,30 @@ class HtmlScrapeResult:
 class HtmlScraper:
     USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/123.0.0.0 Safari/537.36"
 
+    def __init__(self, url_normalizer: UrlNormalizerService | None = None) -> None:
+        # `url` here has typically already passed UrlNormalizerService.normalize()
+        # at submission time (POST /products/extract), but this fetch can
+        # happen much later — asynchronously off `sk:queue:scraping`, after
+        # retries/DLQ backoff — so DNS could have been rebound since then
+        # (e.g. to the 169.254.169.254 metadata IP). Re-resolve and pin the
+        # connection to a freshly-validated IP right here, immediately before
+        # connecting, instead of trusting the one-time submission check.
+        self._url_normalizer = url_normalizer or UrlNormalizerService()
+
     async def fetch_and_parse(self, url: str) -> HtmlScrapeResult | None:
         try:
+            safe_url, pin_kwargs = await self._url_normalizer.resolve_pinned_request(url)
+        except ValueError:
+            # Host is unsafe right now (e.g. DNS-rebound to a private/
+            # loopback/link-local/reserved IP since submission-time
+            # validation) - refuse to fetch rather than trusting the earlier
+            # check.
+            return None
+
+        headers = {"User-Agent": self.USER_AGENT, **pin_kwargs.pop("headers", {})}
+        try:
             async with httpx.AsyncClient(timeout=15.0) as client:
-                resp = await client.get(url, headers={"User-Agent": self.USER_AGENT})
+                resp = await client.get(safe_url, headers=headers, **pin_kwargs)
             if resp.status_code != 200:
                 return None
         except Exception:

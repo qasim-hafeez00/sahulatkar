@@ -24,6 +24,7 @@ tracer = trace.get_tracer("product-service.worker.event-listener")
 
 CHANNEL_VCN_ISSUED = "sk:events:vcn.issued"
 CHANNEL_ORDER_CANCELLED = "sk:events:order.cancelled"
+CHANNEL_VCN_CHARGED = "sk:events:vcn.charged"
 
 class EventListenerWorker:
     def __init__(self) -> None:
@@ -40,8 +41,11 @@ class EventListenerWorker:
         while self.running:
             redis = get_redis_client(settings.REDIS_URL, db=settings.REDIS_DB)
             pubsub = redis.redis.pubsub()
-            await pubsub.subscribe(CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED)
-            logger.info("EventListenerWorker subscribed to %s and %s", CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED)
+            await pubsub.subscribe(CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED, CHANNEL_VCN_CHARGED)
+            logger.info(
+                "EventListenerWorker subscribed to %s, %s and %s",
+                CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED, CHANNEL_VCN_CHARGED,
+            )
 
             try:
                 async for message in pubsub.listen():
@@ -71,6 +75,8 @@ class EventListenerWorker:
                                 await self._handle_vcn_issued(payload, redis)
                             elif event_name == "order.cancelled":
                                 await self._handle_order_cancelled(payload, redis)
+                            elif event_name == "vcn.charged":
+                                await self._handle_vcn_charged(payload, redis)
                     except Exception as exc:
                         logger.error("EventListenerWorker: error processing message: %s", exc)
                         logger.error(traceback.format_exc())
@@ -87,7 +93,7 @@ class EventListenerWorker:
             except Exception as exc:
                 logger.error("Event listener disconnected: %s", exc)
             finally:
-                await pubsub.unsubscribe(CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED)
+                await pubsub.unsubscribe(CHANNEL_VCN_ISSUED, CHANNEL_ORDER_CANCELLED, CHANNEL_VCN_CHARGED)
                 await redis.close()
 
             if self.running:
@@ -109,6 +115,34 @@ class EventListenerWorker:
             )
             logger.info("Queued checkout job for order_id=%s vcn_id=%s",
                         payload["order_id"], payload["vcn_id"])
+
+    async def _handle_vcn_charged(self, payload: dict, redis) -> None:
+        """
+        BUG FIX (found live-running the real order flow end-to-end):
+        VcnOrchestrator (payment-orchestrator) writes
+        `sk:vcn:charge:confirmed:{vcn_id}` to ITS OWN Redis client, which is
+        bound to REDIS_URL's db=3 (see infra/docker/docker-compose.yml's
+        payment-orchestrator service). VcnVerifier.verify_charge()
+        (product-service) polls that exact key name on ITS OWN Redis
+        client, bound to db=1. Redis SELECT-scoped keys are namespaced per
+        logical DB -- a key set in db=3 is structurally invisible to a
+        client connected to db=1 -- so that key was never actually
+        deliverable cross-service; VcnVerificationWorker always timed out
+        and every checkout landed on 'hitl_escalated' regardless of the
+        earlier fix that added the write. Redis pub/sub, unlike plain
+        keys, is NOT scoped per SELECTed database, which is exactly why
+        the vcn.issued/order.cancelled handling above already works
+        correctly cross-service -- so this listens for the same
+        `vcn.charged` event (already durably queued via payment-
+        orchestrator's outbox, see VcnOrchestrator._queue_event) and sets
+        the confirmation key locally, in product-service's own db=1,
+        where the poller that actually reads it lives.
+        """
+        vcn_id = payload.get("vcn_id")
+        if vcn_id is None:
+            return
+        await redis.set(f"sk:vcn:charge:confirmed:{vcn_id}", "1", ttl=600)
+        logger.info("VCN %s charge confirmation relayed to local Redis db", vcn_id)
 
     async def _handle_order_cancelled(self, payload: dict, redis) -> None:
         order_id = payload.get("order_id")

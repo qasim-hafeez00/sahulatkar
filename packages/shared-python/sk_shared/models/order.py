@@ -1,6 +1,7 @@
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import BigInteger, ForeignKey, Index, Integer, Numeric, String, Text
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .base import Base, TimestampMixin, UUIDMixin, SoftDeleteMixin
@@ -18,6 +19,13 @@ class Order(Base, UUIDMixin, TimestampMixin, SoftDeleteMixin):
     down_payment_amount: Mapped[Optional[float]] = mapped_column(Numeric(14, 2), nullable=True)
     installment_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     product_description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    # Added by migration 016 (db/migrations/versions/016_order_remaining.py), made
+    # nullable by migration 052 -- previously undeclared here, which meant the ORM
+    # metadata used to build the gateway test-suite's sqlite schema never created
+    # this column even though it genuinely exists in production Postgres, causing
+    # admin_orders.py's raw-SQL reads of it to fail with "no such column" only in
+    # tests, silently masked there by a since-removed bare except.
+    product_snapshot: Mapped[Optional[dict[str, Any]]] = mapped_column(JSONB, nullable=True)
     # Set once a Murabaha contract is signed. Multiple orders (a cart's line items) may
     # share the same loan_id for unified financing — see ContractSignerService.sign_murabaha.
     loan_id: Mapped[Optional[int]] = mapped_column(BigInteger, ForeignKey("loans.id", ondelete="SET NULL"), nullable=True)

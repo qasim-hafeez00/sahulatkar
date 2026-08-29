@@ -1,0 +1,98 @@
+# End-to-end test overlay. Adds the mock-merchant fixture (tests/e2e/fixtures/
+# mock_merchant) to the compose network and grants product-service's
+# extraction/checkout paths a narrow, explicit SSRF allowlist entry for that
+# one fixture hostname (see Settings.E2E_ALLOWED_FETCH_HOSTS in
+# apps/product-service/src/config.py — empty/unset in every other compose
+# file, so this bypass is dead code outside an E2E run).
+#
+# Usage (run from repo root):
+#   docker compose -f infra/docker/docker-compose.yml -f infra/docker/docker-compose.e2e.yml up -d --build
+#
+# This file adds ONLY what a real merchant site would otherwise provide —
+# it does not change any other service's behavior.
+
+services:
+  e2e-mock-merchant:
+    build:
+      context: ../../tests/e2e/fixtures/mock_merchant
+    container_name: sk-e2e-mock-merchant
+    networks:
+      - sahulatkar
+    # No ports mapping needed — only reached from inside the compose network
+    # (by product-service's extraction/checkout paths) and from the test
+    # runner itself via `docker compose exec` / a published port added at
+    # test-run time if the runner is outside the network too.
+    ports: ["8099:8080"]
+
+  product-service:
+    # BUG FIX (found bringing this stack up for the E2E test): the base
+    # compose file's product-service-{scraping,checkout,vcn-verifier,
+    # price-staleness}-worker and -dlq-monitor / -execution-reaper services
+    # all hardcode `image: docker-product-service` (see the long comment
+    # above product-service-scraping-worker in docker-compose.yml) instead of
+    # building their own image, intentionally reusing product-service's
+    # build. That only resolves correctly when the Compose *project* name
+    # happens to be exactly "docker" (Compose's default image tag for a
+    # built service with no explicit `image:` is "<project>-<service>") --
+    # true only if you `cd infra/docker` before running compose, which
+    # nothing here enforces or documents. Run `docker compose -f
+    # infra/docker/docker-compose.yml -f infra/docker/docker-compose.e2e.yml
+    # up -d --build` from the repo root (as this file's own header comment
+    # says to) and the project name is "sahulatkar" instead: product-service
+    # builds as "sahulatkar-product-service", the workers' hardcoded
+    # "docker-product-service" reference resolves to nothing, and `--build`
+    # then tries to build each of them too -- from their bare inherited
+    # `build: {context: ../../}` (no dockerfile), which fails outright
+    # ("open Dockerfile: no such file or directory"), live-verified while
+    # bringing this stack up. Pinning the image tag explicitly here decouples
+    # it from the Compose project name entirely, so `up --build` works
+    # regardless of which directory (or -p/COMPOSE_PROJECT_NAME) it's run
+    # with -- including a dedicated project name for a throwaway E2E run,
+    # which is what this test suite's own conftest.py uses so it never has
+    # to touch a pre-existing "docker"-project dev stack's volumes.
+    image: docker-product-service
+    environment:
+      E2E_ALLOWED_FETCH_HOSTS: "e2e-mock-merchant"
+      # Force-blank regardless of whatever the developer's local .env has set
+      # (env_file: ../../.env loads before this override, so a stale/bogus
+      # proxy value there -- e.g. a leftover placeholder from unrelated local
+      # testing -- would otherwise route every Playwright navigation through
+      # a nonexistent proxy, failing with `net::ERR_PROXY_CONNECTION_FAILED`
+      # on every extraction attempt regardless of whether the mock-merchant
+      # itself is reachable. Live-verified: this was the actual cause of a
+      # 404 product URL's order offer staying "pending" forever instead of
+      # reaching "extraction_failed" -- PlaywrightExtractionAgent.extract
+      # (apps/product-service/src/extractors/playwright_agent.py) never got
+      # far enough to even attempt the navigation that would have produced a
+      # real 404/failure signal. Originally this override existed only on
+      # product-service-checkout-worker below for the identical bug in the
+      # checkout flow; it was missing here for extraction.
+      BRIGHTDATA_PROXY_URL: ""
+
+  product-service-scraping-worker:
+    environment:
+      E2E_ALLOWED_FETCH_HOSTS: "e2e-mock-merchant"
+      BRIGHTDATA_PROXY_URL: ""
+
+  product-service-checkout-worker:
+    environment:
+      E2E_ALLOWED_FETCH_HOSTS: "e2e-mock-merchant"
+      # Force-blank regardless of whatever the developer's local .env has set
+      # (env_file: ../../.env loads before this override, so a stale/bogus
+      # proxy value there -- e.g. a leftover placeholder from unrelated local
+      # testing -- would otherwise route every Playwright navigation through
+      # a nonexistent proxy, failing with `net::ERR_TIMED_OUT` on every
+      # checkout attempt regardless of whether the mock-merchant itself is
+      # reachable. Live-verified: this was the actual cause of the checkout
+      # step failing in this environment.
+      BRIGHTDATA_PROXY_URL: ""
+
+  payment-orchestrator:
+    environment:
+      # Deterministic, offline payment path: with ENVIRONMENT=local (base
+      # compose default) AND this explicit flag, JazzCash/SafePay/Raast
+      # adapters return a fake-success response instead of calling a real
+      # sandbox that needs real credentials — see
+      # Settings.test_payment_fallbacks_enabled. Stripe Issuing (VCN) already
+      # has its own local stub gated the same way, needing no extra flag here.
+      ALLOW_TEST_PAYMENT_FALLBACKS: "true"

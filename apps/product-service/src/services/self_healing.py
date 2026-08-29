@@ -15,6 +15,30 @@ if TYPE_CHECKING:
 class SelfHealingService:
     def __init__(self) -> None:
         self.client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
+        # PCI/security fix: once live cardholder data (PAN/CVV) may have been
+        # typed into the checkout page, self-healing must never take or send
+        # another screenshot of it to OpenAI — a screenshot taken any time
+        # from the "Payment Injection" checkout step onward (including of an
+        # iframe-hosted payment form) can capture live, unmasked card data.
+        # `mark_payment_data_injected()` is called by `CheckoutFormFiller`
+        # right as that step begins (before any card field is typed, since a
+        # selector-not-found on a *later* field, e.g. CVV, could otherwise
+        # trigger self-healing after an *earlier* field, e.g. PAN, is already
+        # visible on the page). This flag is checked at the very top of every
+        # self-healing entry point below — not by the caller — so a future
+        # call site can't accidentally bypass the guard by forgetting to
+        # check it first.
+        self.payment_data_injected: bool = False
+
+    def mark_payment_data_injected(self) -> None:
+        """Call once the checkout session has reached (or is about to reach)
+        the point where live PAN/CVV may be typed into the page. Irreversible
+        for the lifetime of this service instance — there is no matching
+        "unmark", since a single `SelfHealingService` is scoped to a single
+        checkout job (see `CheckoutFormFiller.__init__`) and card data, once
+        it may be on screen, must stay off-limits to self-healing for the
+        rest of that job."""
+        self.payment_data_injected = True
 
     async def suggest_selector(
         self,
@@ -29,6 +53,15 @@ class SelfHealingService:
         Attempts to find a CSS selector to proceed by using GPT-4o Vision to analyze
         a screenshot of the current page state.
         """
+        if self.payment_data_injected:
+            # Fail closed: never screenshot the page once cardholder data may
+            # be visible on it. Returning None (instead of even a heuristic
+            # match) makes the caller (`_click_with_retry`) exhaust its
+            # retries and raise, which routes the job to HITL manual review
+            # via CheckoutAgentService.process_job's existing failure/HITL
+            # escalation path — no new escalation mechanism needed.
+            return None
+
         # 1. Heuristic fallbacks first (fast)
         lowered = error_context.lower()
         if "guest" in lowered and "checkout" in lowered:
@@ -106,6 +139,10 @@ class SelfHealingService:
         return any(signal in text for signal in signals)
 
     async def suggest_form_field_selector(self, page: Page, field_purpose: str) -> str | None:
+        if self.payment_data_injected:
+            # Same fail-closed guard as `suggest_selector` above: never
+            # screenshot the page once cardholder data may be on it.
+            return None
         if not settings.FEATURE_OPENAI_FALLBACK or not settings.OPENAI_API_KEY:
             return None
         try:

@@ -104,7 +104,7 @@ class StripeIssuingAdapter(PaymentAdapter):
                 "expiry_year": str(card_details.exp_year),
             }
         except stripe.error.StripeError as exc:
-            if settings.ENVIRONMENT == "local":
+            if settings.test_payment_fallbacks_enabled:
                 logger.warning("Using local Stripe card stub", extra={"error": str(exc)})
                 return {
                     "issuer_card_id": f"ic_local_{cardholder_id}",
@@ -156,7 +156,7 @@ class StripeIssuingAdapter(PaymentAdapter):
         """Verify Stripe signature when a webhook secret is configured."""
         endpoint_secret = settings.STRIPE_WEBHOOK_SECRET
         if not endpoint_secret:
-            return settings.ENVIRONMENT == "local"
+            return settings.test_payment_fallbacks_enabled
 
         try:
             stripe.Webhook.construct_event(body, signature, endpoint_secret)

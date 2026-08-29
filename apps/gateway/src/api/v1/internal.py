@@ -55,7 +55,7 @@ class ProductExtractedPayload(BaseModel):
     cost_price: float = Field(..., gt=0)
     sale_price: float = Field(..., gt=0)
     currency: str = Field(default="PKR", min_length=3, max_length=3)
-    down_payment_pct: float = Field(default=25.0, ge=0, le=100)
+    down_payment_pct: float | None = Field(default=None, ge=0, le=100)
     in_stock: bool = True
 
 
@@ -85,79 +85,32 @@ async def product_extracted_callback(
     if order.status not in {OrderState.URL_RECEIVED, "url_received", "processing"}:
         return {"status": "already_processed", "current_status": order.status}
 
-    old_status = order.status
     product = await db.scalar(select(Product).where(Product.id == payload.product_id))
     if product is None:
         logger.error("Product %s not found while processing order %s", payload.product_id, order_id)
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="EXTRACTED_PRODUCT_NOT_FOUND_IN_DB")
-    
-    order.product_id = payload.product_id
-    order.total_amount = payload.sale_price
-    
-    # Calculate exact down payment locally based on percentage mapping boundaries correctly securely nicely!
-    order.down_payment_amount = round(payload.sale_price * payload.down_payment_pct / 100.0, 2)
-    order.status = OrderState.OFFER_PRESENTED
 
-    # GW-BL-01: Reserve credit at extraction — guard against insufficient credit first.
-    # P1-06: row-locked (SELECT ... FOR UPDATE) so two concurrent extraction
-    # callbacks for the same user can't both read the same available_credit,
-    # both pass the check, and both decrement — the second blocks until the
-    # first commits and then re-reads the already-decremented value.
-    from sk_shared.models.auth import User as UserModel
-    from sk_shared.models.credit import CreditLimitHistory
-    user = await db.scalar(
-        select(UserModel)
-        .where(UserModel.id == order.user_id, UserModel.deleted_at.is_(None))
-        .with_for_update()
+    # MEDIUM fix (duplicated "product extracted" logic): the actual
+    # down-payment calc / credit reservation / prohibited-category re-check
+    # / status transition now lives in one shared function
+    # (order_service.apply_product_extraction_result), also called by
+    # delivery_events.apply_product_extracted_envelope for the Redis-event
+    # path. `payload.sale_price` is intentionally NOT used to override
+    # `order.total_amount` here anymore -- the shared function reads it off
+    # `product.sale_price` (the value actually persisted for this product),
+    # keeping this HTTP path and the Redis-event path reading the exact same
+    # source of truth instead of trusting whatever the caller's payload says.
+    from src.services.order_service import apply_product_extraction_result
+
+    outcome = await apply_product_extraction_result(
+        db, order, product, down_payment_pct=payload.down_payment_pct
     )
-    if user and user.available_credit is not None:
-        prev_available = float(user.available_credit)
-        if prev_available < float(payload.sale_price):
-            old_status = order.status
-            order.status = "extraction_failed"
-            db.add(OrderStatusHistory(
-                order_id=order.id,
-                from_status=old_status,
-                to_status="extraction_failed",
-                reason="INSUFFICIENT_CREDIT",
-            ))
-            await db.commit()
-            raise HTTPException(
-                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
-                detail="INSUFFICIENT_CREDIT",
-            )
-        user.available_credit = round(prev_available - float(payload.sale_price), 2)
-        
-        if settings.ENVIRONMENT != "test":
-            history_kwargs = {"user_id": user.id}
-            # Handle variations in CreditLimitHistory model fields
-            for attr in ["previous_limit", "old_limit", "new_limit"]:
-                if hasattr(CreditLimitHistory, attr):
-                    history_kwargs[attr] = float(user.credit_limit or 0)
-            if hasattr(CreditLimitHistory, "available_before"):
-                history_kwargs["available_before"] = prev_available
-            if hasattr(CreditLimitHistory, "available_after"):
-                history_kwargs["available_after"] = user.available_credit
-            if hasattr(CreditLimitHistory, "reason"):
-                history_kwargs["reason"] = f"order_extraction_reserved:{order_id}"
-            if hasattr(CreditLimitHistory, "reason_code"):
-                history_kwargs["reason_code"] = "order_extraction_reserved"
-            if hasattr(CreditLimitHistory, "changed_by"):
-                history_kwargs["changed_by"] = "system"
-            if hasattr(CreditLimitHistory, "changed_by_type"):
-                history_kwargs["changed_by_type"] = "system"
-            if hasattr(CreditLimitHistory, "changed_by_id"):
-                history_kwargs["changed_by_id"] = "product_service"
-            db.add(CreditLimitHistory(**history_kwargs))
 
-    db.add(OrderStatusHistory(
-        order_id=order.id,
-        from_status=old_status,
-        to_status=OrderState.OFFER_PRESENTED,
-        reason="product_extraction_complete",
-    ))
-    
-    await db.commit()
+    if outcome == "insufficient_credit":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="INSUFFICIENT_CREDIT")
+    if outcome == "prohibited":
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail="PROHIBITED_PRODUCT_CATEGORY")
+
     return {"status": "ok", "order_status": order.status}
 
 

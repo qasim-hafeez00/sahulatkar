@@ -13,6 +13,7 @@ from sk_shared.storage import get_storage_client
 from src.config import settings
 from src.core.audit import record_audit_event
 from src.core.dependencies import RequirePermission, get_current_user, get_db, get_redis
+from src.core.logging import logger
 from src.schemas.contracts import (
     ContractDisclosure,
     ContractSignResponse,
@@ -140,7 +141,7 @@ async def sign_murabaha(
     if not req.confirmation_checkbox:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail="CONFIRMATION_REQUIRED")
 
-    contract, order = await ContractSignerService.sign_murabaha(
+    contract, order, pending_event = await ContractSignerService.sign_murabaha(
         db=db,
         redis=redis,
         user_id=current_user.id,
@@ -161,6 +162,22 @@ async def sign_murabaha(
     await db.commit()
     await db.refresh(contract)
     await db.refresh(order)
+
+    # HIGH-1 fix: publish EVENT_LOAN_CREATED only now that the loan/installments
+    # are durably committed -- publishing before commit let a fast consumer
+    # (e.g. Ledger Service) query for a loan that didn't exist yet in the DB.
+    # Best-effort: a publish failure here must not fail the (already-committed)
+    # sign request back to the customer.
+    if pending_event is not None:
+        channel, message = pending_event
+        try:
+            await redis.publish(channel, message)
+        except Exception:
+            logger.error(
+                "Failed to publish loan.created event after commit order_id=%s contract_id=%s",
+                order.id, contract.id, exc_info=True,
+            )
+
     return ContractSignResponse(signed=True, signed_at=contract.signed_at, order_status=order.status)
 
 

@@ -1,9 +1,10 @@
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, SmallInteger, String, TypeDecorator
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, Index, Integer, LargeBinary, Numeric, SmallInteger, String, Text, TypeDecorator
 from sqlalchemy.dialects.postgresql import INET
 from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
 
 from .base import Base, SoftDeleteMixin, TimestampMixin, UUIDMixin
 
@@ -118,8 +119,33 @@ class UserSession(Base, TimestampMixin):
     revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
 
     user: Mapped["User"] = relationship("User", back_populates="sessions")
-    
+
     __table_args__ = (
         Index("ix_user_sessions_user_id", "user_id"),
         Index("ix_user_sessions_access_token", "access_token_hash"),
+    )
+
+
+class AdminSession(Base):
+    """Postgres-backed mirror of the admin session set kept in Redis (see
+    AuthService.admin_login) — gives Module 12's session management UI real,
+    queryable rows and enforces single-session-per-admin at the DB layer.
+
+    Schema matches db/migrations/versions/023_admin_team_remaining.py exactly
+    (including the lack of an `updated_at` column) — do not add TimestampMixin
+    here, it would add a column the real table doesn't have.
+    """
+    __tablename__ = "admin_sessions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    admin_user_id: Mapped[int] = mapped_column(BigInteger, ForeignKey("admin_users.id", ondelete="CASCADE"), nullable=False)
+    token_hash: Mapped[str] = mapped_column(String(64), unique=True, nullable=False)
+    ip: Mapped[Optional[str]] = mapped_column(InetType, nullable=True)
+    device_info: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime, nullable=False)
+    revoked_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    __table_args__ = (
+        Index("ix_admin_sessions_admin__user_id_expires_at", "admin_user_id", "expires_at"),
     )

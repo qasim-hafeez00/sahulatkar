@@ -1,481 +1,160 @@
-# Ledger Service: Comprehensive Audit & Implementation Report
+# Ledger Service: Integration Reference
+
+**Service path:** `apps/ledger-service/` · **Last verified:** 2026-08-28 · **Test status:** 150 passed, 1 pre-existing unrelated failure (`test_reconciliation_import_accepts_valid_internal_token`, an enum-value mismatch, not a regression)
+
+> This service has **no customer-facing endpoints**. Every route requires either an admin actor context or an internal-service token (see [Auth Model](#auth-model--critical-for-a-new-frontend) below — read this before building any admin finance UI against it).
+
+---
 
 ## 1. Service Overview & Scope
 
-The **Ledger Service** (`apps/ledger-service/`) is the dedicated financial bookkeeping microservice in SahulatKar. It owns the double-entry ledger, billing sweep support, late-fee charity routing, reconciliation processing, TASDEEQ credit-bureau reporting, and finance/admin reporting APIs.
+The **Ledger Service** is the double-entry bookkeeping system of record for SahulatKar. It owns:
 
-This audit is intentionally scoped to **ledger-service only**. Shared packages and database migrations are referenced only where they are directly required by the ledger service implementation.
+1. **Double-entry accounting** — every payment, purchase, late fee, charity disbursement, reversal, and manual adjustment is posted as a balanced journal entry (debits == credits, enforced at both the application layer and a Postgres trigger).
+2. **Billing sweep** — daily job that triggers due installment collection and applies late fees to newly-overdue installments.
+3. **Charity routing** — 100% of late fee revenue is tracked as a liability (`charity_payable`) and disbursed to Edhi Foundation via a periodic sweep, never recognized as company revenue.
+4. **Reconciliation** — matches gateway settlement files against internal `PaymentTransaction` records.
+5. **TASDEEQ reporting** — generates the Pakistani credit-bureau CSV submission format for loan reporting.
+6. **Finance/admin reporting APIs** — P&L, trial balance, balance sheet, shariah audit report, account ledgers (T-accounts), journal entry browsing.
 
-### Core Responsibilities
-1. **Double-entry accounting** for payment, purchase, late fee, charity disbursement, reversal, and adjustment workflows.
-2. **Billing sweep** execution for due installments with distributed locking and overdue processing.
-3. **Reconciliation** ingestion and reporting for gateway settlement data.
-4. **TASDEEQ reporting** with local outbox or HTTP submission flow and durable submission audit.
-5. **Charity routing** for late fees with 100% allocation compliance.
-6. **Finance admin APIs** for profit/loss, trial balance, balance sheet, shariah audit, reconciliation, and charity reporting.
-7. **Operational visibility** via request IDs, readiness checks, metrics, and listener health.
+Ledger-service does **not** own: checkout UX, product extraction, contract generation/signing, payment gateway integration, or credit scoring. It reacts to events/calls from Payment Orchestrator and Gateway; it never initiates a purchase or payment itself.
 
-### Current Verified State
-- Ledger-service tests currently pass in the workspace.
-- Verified test count at the end of the latest implementation pass: **39 passed**.
-- The microservice is now functionally implemented as a complete ledger bounded context in this repository.
+It relies on the shared ORM models in `packages/shared-python/sk_shared/models/ledger.py` rather than defining its own — there is no `src/models/` content beyond a package marker.
 
 ---
 
-## 2. Bounded Contexts and Design Decisions
+## 2. Auth Model — critical for a new frontend
 
-### Ownership Boundaries
-Ledger-service owns:
-- Journal entry creation and balancing.
-- Ledger reporting and finance admin endpoints.
-- Billing sweep orchestration.
-- Reconciliation status tracking.
-- Charity disbursement ledgering.
-- TASDEEQ report generation/submission.
-- Event-driven posting for payments and purchase confirmations.
+Every route in this service authenticates via **plain, unsigned request headers**, read in `src/core/dependencies.py`:
 
-Ledger-service does **not** own:
-- Customer-facing checkout UX.
-- Product scraping/extraction.
-- Contract generation/signing.
-- Payment orchestration.
-- Gateway routing.
-- Credit scoring.
+| Header | Purpose |
+|---|---|
+| `X-Actor-Type` | Must be exactly `admin` for any admin/finance endpoint — anything else is rejected with 403 `ADMIN_ROLE_REQUIRED`. |
+| `X-Actor-Id` | Free-text actor identifier, recorded for audit purposes only. |
+| `X-Actor-Roles` | Comma-separated role list (e.g. `finance_analyst,super_admin`) checked against each endpoint's required-role set. |
+| `X-Request-ID` | Propagated for tracing; not auth-related. |
+| `X-Internal-Token` | Required on internal-only routes (e.g. reconciliation import), compared with `hmac.compare_digest` against `settings.internal_api_token`. |
 
-### Architectural Choices Already Implemented
-- FastAPI app with lifespan-managed Redis and listener tasks.
-- Async SQLAlchemy session usage.
-- Request ID propagation middleware.
-- Prometheus request metrics.
-- Redis-based distributed lock for billing sweep.
-- JSONL-based durable audit trails for reconciliation and TASDEEQ in this workspace.
-- Fakeredis-backed tests with SQLite fallback for local execution.
+**There is no JWT verification, no signature, and no cryptographic binding between these headers and any real identity.** Anyone who can reach this service's HTTP port with `X-Actor-Type: admin` and `X-Actor-Roles: super_admin` gets full write access to the general ledger — including creating manual journal entries and reversing existing ones.
+
+As of this writing, **Gateway's `admin_finance.py` does not proxy to this service** — it implements its own separate finance queries directly against the DB. That means nothing in the current codebase performs JWT-to-header translation for you. Before building any admin finance UI against Ledger Service directly:
+
+- Either put Ledger Service behind Gateway (add a proxy layer in `admin_finance.py` that verifies the admin's JWT and then sets these headers itself, server-side, never trusting a client-supplied value), or
+- Ensure network-level isolation (this service is not reachable from the public internet, only from a trusted internal network/ingress that sets these headers after its own auth check).
+
+**Do not build a frontend that sends `X-Actor-*` headers directly from the browser.** That would let any authenticated (or unauthenticated) HTTP client impersonate `super_admin`.
+
+Two role tiers are used throughout: `finance_analyst` (read access to most reporting) and `super_admin` (required for every write: manual entries, reversals, period close/reopen).
 
 ---
 
-## 3. Directory Structure & File Inventory
+## 3. API Endpoint Catalog
 
-### Root Files
-- `Dockerfile` - Container image definition for ledger-service.
-- `pyproject.toml` - Python project metadata, dependencies, and pytest configuration.
+### `src/api/v1/entries.py` — prefix `/entries` (roles: read = `finance_analyst`/`super_admin`, write = `super_admin` only)
 
-### `src/` Overview
-- `src/config.py` - Runtime settings for database, Redis, billing/reconciliation crons, TASDEEQ modes, audit directories, and internal auth token.
-- `src/main.py` - FastAPI app construction, lifespan management, listener startup/watchdog, health endpoint, and metrics endpoint.
+| Method & Path | Purpose | Notes |
+|---|---|---|
+| `GET /entries/` | List journal entries, cursor-paginated. | Query params: `from_date`, `to_date` (`YYYY-MM-DD`), `entry_type`, `source_type`, `cursor`, `limit` (1-200, default 50). |
+| `GET /entries/{entry_number}` | Full detail for one entry, including all posting lines. | 404 `ENTRY_NOT_FOUND` if missing. |
+| `POST /entries/manual` | Create a manual journal entry. | Body: `{description, lines: [{account_code, debit_amount, credit_amount, description}], entry_date?, reference?}`. Supports `Idempotency-Key` header (used as `reference` if none given). Rejected with 400 if lines don't balance or reference an unknown account. |
+| `POST /entries/{entry_number}/reverse` | Reverse an existing entry (creates an offsetting entry, doesn't mutate the original). | Body: `{reason, reversal_id?, entry_date?}`. `Idempotency-Key` header supported. 404 `ORIGINAL_ENTRY_NOT_FOUND` if the target doesn't exist. |
 
-### `src/api/`
-- `src/api/routes.py` - Top-level API router inclusion for versioned endpoints.
-- `src/api/v1/__init__.py` - Versioned API package marker.
-- `src/api/v1/finance.py` - Finance/admin endpoints for reporting, reconciliation, and charity operations.
-- `src/api/v1/health.py` - Live/ready health endpoints with dependency and listener status reporting.
+### `src/api/v1/accounts.py` — prefix `/accounts` (role: `finance_analyst`/`super_admin`)
 
-### `src/accounting/`
-- `src/accounting/accounts.py` - Canonical account code mapping and posting-line invariants.
+| Method & Path | Purpose |
+|---|---|
+| `GET /accounts/` | List all GL accounts with current balances. Optional `account_type` filter (`asset|liability|equity|revenue|expense`) and `as_of` date. |
+| `GET /accounts/{account_code}` | Single account's balance detail. 404 if unknown code. |
+| `GET /accounts/{account_code}/ledger` | Full T-account view (every posting line touching this account), cursor-paginated with `from_date`/`to_date`. |
 
-### `src/billing/`
-- `src/billing/__init__.py` - Billing package marker.
-- `src/billing/billing_sweep.py` - Billing sweep orchestration, lock handling, payment triggering, overdue detection, and late-fee application.
-- `src/billing/overdue_processor.py` - Overdue detection, batch status transitions, and late-fee amount policy.
+### `src/api/v1/periods.py` — prefix `/periods` (read: `finance_analyst`/`super_admin`; write: `super_admin` only)
 
-### `src/core/`
-- `src/core/database.py` - Shared async DB session/engine wiring.
-- `src/core/dependencies.py` - Request context extraction, admin role enforcement, and internal token validation.
-- `src/core/event_listeners.py` - Redis pub/sub listener for ledger-relevant events.
-- `src/core/logging.py` - Logging configuration for service startup.
-- `src/core/middleware.py` - Request ID middleware and HTTP request metrics.
+| Method & Path | Purpose |
+|---|---|
+| `GET /periods/` | List accounting periods and their status (open/closed), `limit` up to 100. |
+| `POST /periods/{period_key}/close` | Close a period — blocks further postings into it. Body: `{closed_by}`. |
+| `POST /periods/{period_key}/reopen` | Reopen a closed period. Use with caution — no business-rule guard beyond the role check. |
 
-### `src/models/`
-- `src/models/` - Present as a package directory; ledger-service relies primarily on shared models from `packages/shared-python/sk_shared/models/` rather than defining new ORM models locally.
+### `src/api/v1/finance.py` — prefix `/admin/finance` (roles vary by endpoint — check each; all require `X-Actor-Type: admin`)
 
-### `src/schemas/`
-- `src/schemas/__init__.py` - Schema package exports.
-- `src/schemas/common.py` - Shared pagination response schema.
-- `src/schemas/finance.py` - Finance, reconciliation, balance sheet, charity, and TASDEEQ request/response schemas.
+| Method & Path | Purpose |
+|---|---|
+| `GET /admin/finance/pl` | Profit & loss report for a period. |
+| `GET /admin/finance/trial-balance` | Trial balance snapshot. |
+| `GET /admin/finance/balance-sheet` | Balance sheet snapshot. |
+| `GET /admin/finance/reconciliation` | Query reconciliation history/status. |
+| `POST /admin/finance/reconciliation` | Import a reconciliation snapshot (gateway settlement file). Internal-token gated in addition to admin role. |
+| `GET /admin/finance/shariah-audit` | Shariah compliance audit report — profit-vs-Murabaha-disclosure checks, charity allocation totals. |
+| `GET /admin/finance/charity-report` | Charity disbursement summary, grouped by organization. |
+| `POST /admin/finance/charity-disbursement` | Manually trigger/record a charity disbursement. |
 
-### `src/services/`
-- `src/services/accounting_service.py` - Core ledger posting and financial reporting service.
-- `src/services/charity_service.py` - Charity summary and disbursement service.
-- `src/services/late_fee_service.py` - Late-fee application, waiver, and summary service.
-- `src/services/reconciliation_service.py` - Reconciliation import/query service with durable snapshot persistence.
-- `src/services/tasdeeq_service.py` - TASDEEQ report generation and submission service with audit trail and retries.
+### `src/api/v1/health.py` — prefix `/health` (no auth)
 
-### `src/workers/`
-- `src/workers/__init__.py` - Worker package marker.
-- `src/workers/billing_sweep_worker.py` - CLI worker entrypoint for billing sweep execution.
-- `src/workers/reconciliation_worker.py` - CLI worker entrypoint for reconciliation snapshot import.
-- `src/workers/tasdeeq_worker.py` - CLI worker entrypoint for TASDEEQ report generation/submission.
+| Method & Path | Purpose |
+|---|---|
+| `GET /health/live` | Liveness — process is up. |
+| `GET /health/ready` | Readiness — checks DB, Redis, seeded ledger accounts, active charity config, and event-listener/watchdog health. Returns structured per-dependency status. |
 
-### `tests/`
-- `tests/conftest.py` - Shared test fixtures, Redis override, async DB setup, and seed helpers.
-- `tests/test_accounting_completeness.py` - Regression coverage for expanded accounting journal workflows and reversals.
-- `tests/test_billing_lock.py` - Billing lock and lock-release tests.
-- `tests/test_finance_api.py` - Finance API authorization, reporting, reconciliation, charity, and health request ID tests.
-- `tests/test_health_and_metrics.py` - Health endpoint and Prometheus metrics tests.
-- `tests/test_late_fee_service.py` - Late-fee application and waiver behavior tests.
-- `tests/test_ledger_functional.py` - End-to-end functional ledger flows.
-- `tests/test_overdue_processor.py` - Overdue detection and late-fee policy tests.
-- `tests/test_reconciliation_service.py` - Durable reconciliation snapshot and query tests.
-- `tests/test_tasdeeq_service.py` - TASDEEQ submission mode and retry/audit tests.
+All response shapes are defined as Pydantic models in `src/schemas/finance.py` and `src/schemas/common.py` (pagination envelope) — read those directly for exact field names/types when generating a typed client.
 
 ---
 
-## 4. File-by-File Implementation Audit
+## 4. Business Rules a Frontend Must Respect
 
-### 4.1 Root and Configuration
-
-#### `apps/ledger-service/pyproject.toml`
-- Declares the service as `sk-ledger-service`.
-- Pins FastAPI, SQLAlchemy, asyncpg, Pydantic settings, Prometheus client, and shared package dependency.
-- Test extras include pytest, pytest-asyncio, fakeredis, aiosqlite, httpx, and coverage tooling.
-- Pytest is configured to use `src` as pythonpath and `tests` as the test root.
-
-#### `apps/ledger-service/Dockerfile`
-- Containerizes the ledger service for runtime deployment.
-- Exposes the application port and follows the workspace's Python service conventions.
-
-#### `src/config.py`
-- Central settings model for the microservice.
-- Contains:
-  - `service_name`
-  - `database_url`
-  - `redis_url`
-  - `redis_db`
-  - `billing_sweep_cron`
-  - `reconciliation_cron`
-  - `tasdeeq_mode`
-  - `tasdeeq_endpoint_url`
-  - `tasdeeq_api_token`
-  - `tasdeeq_timeout_seconds`
-  - `tasdeeq_max_retries`
-  - `tasdeeq_audit_dir`
-  - `reconciliation_audit_dir`
-  - `default_charity_registration_number`
-  - `payment_service_url`
-  - `internal_api_token`
-- The service is configured for Redis DB 4.
+- **Balance invariant**: every journal entry's debit lines must sum to its credit lines. This is enforced in `AccountingService` (application layer) *and* by a Postgres trigger on `journal_entry_lines` (`test_journal_entry_lines_balance_trigger.py` verifies this at the DB level) — an unbalanced manual entry is rejected with a 400, not silently accepted.
+- **Manual entry guardrails**: `test_manual_entry_guardrails.py` covers a real control here — a manual admin entry cannot credit the `late_fee_collections` (revenue) account in a way that would misclassify what should be a charity liability. If you're building a manual-journal-entry UI, surface account codes/types clearly (`asset|liability|equity|revenue|expense`) so an operator can't blindly misclassify a posting.
+- **Period close**: once a period is closed, no new postings land in it (enforced in `src/domain/period_rules.py`). A finance UI should show period status prominently before allowing any manual entry dated into that period.
+- **Idempotency**: `POST /entries/manual` and `POST /entries/{entry_number}/reverse` both honor an `Idempotency-Key` header — always send one from the frontend for any user-triggered write, to make retries/double-clicks safe.
+- **Charity money is never revenue**: late fees post to `charity_payable` (a liability), not to any revenue account, until an explicit disbursement moves it to a paid/disbursed state. Any dashboard summarizing "revenue" must exclude this by construction — don't sum it in ad hoc.
 
 ---
 
-### 4.2 API Layer
+## 5. File Registry
 
-#### `src/api/routes.py`
-- Composes the versioned API router.
-- Includes the finance and health routers.
+### API (`src/api/v1/`)
+`entries.py`, `accounts.py`, `periods.py`, `finance.py`, `health.py` — see endpoint catalog above.
 
-#### `src/api/v1/__init__.py`
-- Marker package for versioned API resources.
+### Services (`src/services/`)
+| File | Purpose |
+|---|---|
+| `accounting_service.py` | Core double-entry engine — every `record_*` posting method (down payment, purchase, installment, late fee, charity disbursement, VCN load, merchant payment, gateway fee, refund, chargeback, provision, write-off, manual adjustment, reversal) plus reporting builders (P&L, trial balance, balance sheet, shariah audit). |
+| `balance_service.py` | Computes/snapshots per-account balances (backs `GET /accounts/*` and the nightly snapshot worker). |
+| `period_service.py` | Period lifecycle — get-or-create, close, reopen; delegates rule enforcement to `src/domain/period_rules.py`. |
+| `late_fee_service.py` | Applies/waives late fees on installments, delegates the actual posting to `AccountingService`. |
+| `charity_service.py` | Charity summaries, disbursement recording, marks `LateFeeCharityAllocation` rows disbursed. |
+| `reconciliation_service.py` | Imports and queries settlement reconciliation snapshots (JSONL-persisted). |
+| `tasdeeq_service.py` | Builds and submits TASDEEQ CSV reports (`batch_csv` local outbox or `http` mode with retry). |
+| `tasdeeq_validation.py` | Strict schema validation for the TASDEEQ CSV format against the bureau's spec. |
 
-#### `src/api/v1/finance.py`
-- Implements all finance/admin endpoints.
-- Uses role-based access checks and internal token checks.
-- Exposes:
-  - `GET /admin/finance/pl`
-  - `GET /admin/finance/trial-balance`
-  - `GET /admin/finance/balance-sheet`
-  - `GET /admin/finance/reconciliation`
-  - `POST /admin/finance/reconciliation`
-  - `GET /admin/finance/shariah-audit`
-  - `GET /admin/finance/charity-report`
-  - `POST /admin/finance/charity-disbursement`
-- Delegates business logic to accounting, reconciliation, and charity services.
-- Uses explicit Pydantic response models from `src/schemas/finance.py`.
+### Workers (`src/workers/`, CLI entrypoints — run as separate processes/cron)
+| File | Purpose |
+|---|---|
+| `billing_sweep_worker.py` | Daily due-installment collection + late-fee application, Redis-lock-guarded against concurrent runs. |
+| `charity_disbursement_worker.py` | Periodic sweep that auto-disburses pending late-fee charity allocations older than a configured minimum age. |
+| `balance_snapshot_worker.py` | Nightly per-account balance snapshotting via `BalanceService`. |
+| `reconciliation_worker.py` | Reconciliation snapshot import entrypoint. |
+| `tasdeeq_worker.py` | TASDEEQ report generation/submission entrypoint. |
+| `dlq_worker.py` | Consumes the ledger dead-letter queue (JSONL-backed), retries failed events by re-publishing to Redis, alerts when DLQ depth exceeds threshold. |
 
-#### `src/api/v1/health.py`
-- Exposes:
-  - `GET /health/live`
-  - `GET /health/ready`
-- Readiness verifies:
-  - Database connectivity
-  - Redis connectivity
-  - Seeded ledger accounts
-  - Active charity configuration
-  - Listener/watchdog task health
-- Returns structured dependency and listener state.
+### Core (`src/core/`)
+`database.py` (async engine/session — see the PgBouncer note below), `dependencies.py` (auth headers, see section 2), `event_listeners.py` (Redis pub/sub consumer for `payment.down_payment_confirmed`, `order.purchase_confirmed`, `delivery.status_changed`), `middleware.py`, `logging.py`, `period_utils.py`, `readonly_guard.py`.
 
 ---
 
-### 4.3 Accounting and Journal Logic
+## 6. A Bug Worth Knowing About If You Touch This Service
 
-#### `src/accounting/accounts.py`
-- Central chart-of-accounts code mapping.
-- Includes cash, AR installments, VCN issued, AP merchants, charity payable, customer deposits, owner equity, retained earnings, Murabaha profit, affiliate commission, late fee collections, merchant payment expense, gateway fees, VCN issuance, loan loss provision, and loan loss reserve.
-- `PostingLine` now enforces:
-  - non-negative values
-  - exactly one side per line
-  - at least one amount must be present
+`src/core/database.py`'s async engine was, until 2026-08-28, missing `connect_args={"statement_cache_size": 0}`. Every other service's DB engine (via the shared `packages/shared-python/sk_shared/database.py`) already had this. Without it, this service's connections — which route through PgBouncer in transaction-pooling mode — intermittently hit `asyncpg.exceptions.DuplicatePreparedStatementError`, silently failing real financial event postings (down payments, installments, late fees) in any deployment behind PgBouncer. It's fixed now, but if this file is ever refactored to create its own engine again (rather than importing the shared one), this flag must travel with it. This bug was invisible to the SQLite-backed unit test suite and was only found by running the full stack live against real Postgres — see `tests/e2e/README.md` for how that test works.
 
-#### `src/services/accounting_service.py`
-- Core double-entry engine for ledger-service.
-- Implemented workflows:
-  - `record_down_payment`
-  - `record_purchase`
-  - `record_installment_paid`
-  - `record_late_fee`
-  - `record_charity_disbursement`
-  - `record_vcn_load`
-  - `record_merchant_payment`
-  - `record_gateway_fee`
-  - `record_refund`
-  - `record_chargeback`
-  - `record_provision`
-  - `record_write_off`
-  - `record_manual_adjustment`
-  - `record_reversal`
-- Reporting functions:
-  - `build_profit_loss_report`
-  - `get_trial_balance`
-  - `build_balance_sheet`
-  - `build_shariah_audit_report`
-- Internal safeguards:
-  - balanced-entry validation
-  - duplicate source detection
-  - concurrency-safe journal numbering via UUID-based entry numbers
-  - period parsing for year, month, and quarter inputs
-- Late-fee charity logic is tied to ledger accounts and charity allocation records.
-
-#### `src/services/late_fee_service.py`
-- Applies late fees to installments.
-- Supports waiver and summary reporting.
-- Prevents duplicate fee application.
-- Delegates posting to `AccountingService`.
-
-#### `src/services/charity_service.py`
-- Computes charity summaries and pending disbursements.
-- Records charity disbursement ledger entries.
-- Marks late-fee charity allocations as disbursed.
-- Produces charity reporting grouped by organization.
+Relatedly, migrations `089`–`091` added several columns to `ledger.py` models (`journal_entries.source_reference/currency/reversed_by_id`, `ledger_accounts.parent_code/account_group/currency/is_control`, `ledger_periods.fiscal_year/pre_close_snapshot_at/reopened_at/reopened_by`, `late_fee_charity_allocations.journal_entry_id`, `journal_entry_lines.currency`, `ledger_account_balances.updated_at`) that existed as SQLAlchemy model fields but had never actually been migrated onto the real schema. If a real Postgres deployment ever throws `UndefinedColumnError` on a ledger table, check for this class of drift first — compare the model in `sk_shared/models/ledger.py` against `\d <table>` on the real DB rather than assuming the ORM and schema agree.
 
 ---
 
-### 4.4 Billing and Overdue Processing
+## 7. Tests
 
-#### `src/billing/__init__.py`
-- Billing package marker.
-
-#### `src/billing/billing_sweep.py`
-- Executes the daily billing sweep.
-- Uses a distributed Redis lock to prevent concurrent pod execution.
-- Loads due installments.
-- Calls payment orchestrator for installment triggering.
-- Records successful installment payments in the ledger.
-- Detects newly overdue installments.
-- Applies late-fee processing through overdue and late-fee services.
-- Returns structured sweep statistics.
-
-#### `src/billing/overdue_processor.py`
-- Finds newly overdue installments.
-- Marks installments overdue in batch.
-- Calculates late-fee amounts using the configured policy.
-- Maintains in-session `days_overdue` values for predictability.
+150 passing, one pre-existing unrelated failure (see header). Coverage includes: balanced-entry enforcement (app layer + DB trigger), manual entry guardrails, billing sweep locking/idempotency, overdue processing, charity lock/disbursement worker, DLQ worker, period close/reopen rules, reconciliation import/query, TASDEEQ submission modes and retries, unauthenticated-request rejection on every admin router, health/metrics endpoints, and end-to-end functional ledger flows. Test fixtures (`tests/conftest.py`) use `fakeredis` and an async SQLite fallback (`LEDGER_TEST_DATABASE_URL`) — meaning **Postgres-specific behavior (triggers, PgBouncer interaction, real constraint enforcement) is not exercised by this suite**; the E2E suite (`tests/e2e/`) is what actually validates this service against real Postgres.
 
 ---
 
-### 4.5 Reconciliation and TASDEEQ
+## 8. Local Development
 
-#### `src/services/reconciliation_service.py`
-- Imports reconciliation snapshots.
-- Matches payment transactions by gateway and settlement date.
-- Marks matched transactions as reconciled.
-- Persists reconciliation snapshots and items to JSONL audit files under `settings.reconciliation_audit_dir`.
-- Queries reconciliation history from persisted snapshots with pagination and filtering.
-- Returns structured reconciliation status, totals, and discrepancy information.
-
-#### `src/services/tasdeeq_service.py`
-- Builds TASDEEQ report CSV output from loan and customer profile data.
-- Supports two submission modes:
-  - `batch_csv` / local file outbox
-  - `http` / API submission with retries
-- Writes durable JSONL submission audit records.
-- Retries transient HTTP failures with backoff.
-- Extracts remote submission references when present.
-- Uses configured audit directory `settings.tasdeeq_audit_dir`.
-
----
-
-### 4.6 Event Listener and Workers
-
-#### `src/core/event_listeners.py`
-- Subscribes to ledger-relevant pub/sub channels.
-- Handles:
-  - `payment.down_payment_confirmed`
-  - `order.purchase_confirmed`
-  - `delivery.status_changed`
-- Posts ledger entries from event payloads.
-- Uses defensive parsing and logs per-message failures without crashing the listener loop.
-
-#### `src/workers/billing_sweep_worker.py`
-- CLI entrypoint for running billing sweeps.
-- Initializes Redis and passes it into `BillingSweepService`.
-- Logs structured completion output.
-
-#### `src/workers/reconciliation_worker.py`
-- CLI entrypoint for reconciliation snapshot import.
-- Logs structured completion output.
-
-#### `src/workers/tasdeeq_worker.py`
-- CLI entrypoint for TASDEEQ reporting.
-- Delegates to `TasdeeqService`.
-- Logs structured result metadata.
-
-#### `src/workers/__init__.py`
-- Worker package marker.
-
----
-
-### 4.7 Core Infrastructure
-
-#### `src/core/database.py`
-- Shared async engine/session wiring for the service.
-- Uses the ledger-service database URL from settings.
-
-#### `src/core/dependencies.py`
-- Extracts request context from headers.
-- Enforces admin role requirements for finance/admin endpoints.
-- Validates internal requests using a header token with constant-time comparison.
-- Carries request ID and actor roles in the request context.
-
-#### `src/core/logging.py`
-- Configures standard service logging.
-
-#### `src/core/middleware.py`
-- Adds request IDs to incoming requests and response headers.
-- Logs request metadata.
-- Exposes Prometheus metrics counters and latency histograms.
-
-#### `src/main.py`
-- Bootstraps the FastAPI app.
-- Starts the ledger event listener and watchdog task.
-- Exposes `/health` and `/metrics`.
-- Handles shutdown cleanup for Redis and listener tasks.
-
----
-
-### 4.8 Schemas
-
-#### `src/schemas/__init__.py`
-- Aggregates public schema exports.
-
-#### `src/schemas/common.py`
-- Standard pagination response schema.
-
-#### `src/schemas/finance.py`
-- Request/response schemas for finance and reporting APIs.
-- Includes:
-  - reconciliation import models
-  - profit/loss response
-  - trial balance response
-  - balance sheet response
-  - reconciliation list response
-  - shariah audit response
-  - charity report/disbursement models
-
----
-
-## 5. Tests and Verification
-
-The ledger-service test suite is broad and currently green.
-
-### Test Coverage Areas
-- Core accounting postings and reversals.
-- Billing sweep locking and overdue processing.
-- Finance API authorization and reporting.
-- Health and metrics endpoint behavior.
-- Late-fee application and summary.
-- Reconciliation persistence and query flow.
-- TASDEEQ submission modes and retries.
-- End-to-end functional ledger flows.
-
-### Test Fixtures
-- `tests/conftest.py` uses:
-  - async SQLAlchemy test engine
-  - `fakeredis` for Redis behavior
-  - `app.state.redis` override
-  - `LEDGER_TEST_DATABASE_URL` fallback to SQLite for local safety
-
-### Verified Status
-- Full suite last run in this workspace: **39 passed**.
-
----
-
-## 6. Database and Migration Support
-
-Ledger-service depends on a larger shared migration chain, but the ledger-specific and ledger-relevant migration support in this workspace includes:
-
-- `db/migrations/versions/020_financial_accounting_remaining.py`
-  - Reconciliation tables.
-  - Gateway settlements.
-  - Revenue transactions.
-  - Financial report scaffolding.
-
-- `db/migrations/versions/039_missing_db_objects.py`
-  - Scheduled tasks table seeding.
-  - Partition setup and shared operational DB objects.
-
-- `db/migrations/versions/041_production_hardening.py`
-  - Shared production hardening that impacts ledger-adjacent tables and constraints.
-
-- `db/migrations/versions/042_ledger_scheduler_seeds.py`
-  - Ledger scheduler seeds for the explicit billing and reconciliation crons defined by ledger-service.
-
-### Ledger-Specific Migration Notes
-- The ledger service currently uses JSONL audit persistence for reconciliation and TASDEEQ in this workspace.
-- The scheduler seed migration registers only the tasks that are explicitly defined in ledger-service config.
-- No undocumented TASDEEQ or charity cron was invented.
-
----
-
-## 7. Runtime, Security, and Observability
-
-### Security
-- Admin endpoints require both admin actor headers and role checks.
-- Internal reconciliation import validates an internal token.
-- Request IDs are propagated through middleware and returned in response headers.
-- The service avoids leaking raw internals in standard API responses.
-
-### Observability
-- `/metrics` is exposed for Prometheus scraping.
-- Request count and latency metrics are recorded.
-- Readiness checks include listener/watchdog state.
-- Structured logs are emitted from middleware and worker entrypoints.
-
-### Reliability
-- Billing sweep uses a Redis distributed lock.
-- Event listener exceptions are isolated per message.
-- TASDEEQ HTTP submission retries transient failures.
-- Reconciliation and TASDEEQ write durable JSONL audit records.
-
----
-
-## 8. Implementation Completeness Assessment
-
-### What Is Implemented
-- Full accounting and ledger posting flow.
-- Late-fee and charity compliance flow.
-- Billing sweep and overdue processing.
-- Reconciliation import/query flow.
-- TASDEEQ submission/report generation flow.
-- Health, readiness, metrics, logging, and request-ID support.
-- Worker entrypoints for operational execution.
-- Comprehensive tests with passing status.
-
-### What Is Left
-At this point, the remaining work is primarily deployment/environment coordination rather than missing ledger-service application code. Examples:
-- External Postgres/Redis deployment wiring in non-local environments.
-- Infrastructure task scheduling outside this repository's runtime execution.
-- Any organization-specific ops policy changes not represented in code.
-
-### Overall Status
-**Ledger-service implementation status: functionally complete and verified in this workspace.**
-
----
-
-## 9. Executive Summary
-
-The Ledger Service is now a fully implemented microservice in this repository with clear ownership boundaries, complete finance/ledger workflows, verified health and metrics surfaces, production-oriented worker behavior, and a passing regression test suite. Anyone reading this audit should be able to understand:
-- what the service owns,
-- what each file does,
-- how the service behaves at runtime,
-- how it is tested,
-- and what still depends on external deployment choices.
-
-This document should be used as the ledger-service implementation reference for maintenance, review, and future hardening work.
+Runs as part of the full stack via `docker compose` at `infra/docker/docker-compose.yml` (Redis logical DB 4, prefixed by `sk:` key namespaces same as every other service). See `tests/e2e/README.md` for the exact commands to bring up the whole backend locally and a worked example of calling `GET /entries/` with the correct headers against a live stack.

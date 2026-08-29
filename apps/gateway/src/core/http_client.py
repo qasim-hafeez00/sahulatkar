@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 import httpx
@@ -15,7 +16,7 @@ class InternalServiceClient:
 
     @classmethod
     def start(cls):
-        cls.client = httpx.AsyncClient(timeout=10.0)
+        cls.client = httpx.AsyncClient(timeout=settings.INTERNAL_HTTP_TIMEOUT_SECONDS)
 
     @classmethod
     async def stop(cls):
@@ -28,6 +29,61 @@ class InternalServiceClient:
         if not cls.client:
              raise RuntimeError("InternalServiceClient is not initialized")
         return cls.client
+
+    @classmethod
+    async def request_with_retry(
+        cls,
+        method: str,
+        url: str,
+        *,
+        max_retries: int | None = None,
+        backoff_base_seconds: float | None = None,
+        **kwargs,
+    ) -> httpx.Response:
+        """HIGH-4 fix: every cross-service call through this client previously
+        had a flat timeout and NO retry — a single transient blip (the
+        neighbor service mid-restart, a dropped connection) failed the call
+        outright, and callers of a "best-effort" cross-service nudge (e.g.
+        OrderService.initiate's product-extract kickoff) simply swallowed
+        that failure, silently leaving the order stuck. This retries
+        connection errors, read timeouts, and 5xx responses with exponential
+        backoff (base * 2**attempt) before giving up and re-raising the last
+        error to the caller, who decides whether the failure is fatal or
+        best-effort.
+
+        4xx responses are never retried (retrying a client error can't
+        succeed) -- callers that need to inspect a 4xx should catch
+        httpx.HTTPStatusError from resp.raise_for_status() themselves, or
+        just check resp.status_code on the returned Response.
+        """
+        retries = settings.INTERNAL_HTTP_MAX_RETRIES if max_retries is None else max_retries
+        backoff_base = (
+            settings.INTERNAL_HTTP_RETRY_BACKOFF_BASE_SECONDS if backoff_base_seconds is None else backoff_base_seconds
+        )
+        client = cls.get_client()
+
+        last_exc: Exception | None = None
+        for attempt in range(retries + 1):
+            try:
+                resp = await client.request(method, url, **kwargs)
+                if resp.status_code >= 500:
+                    raise httpx.HTTPStatusError(
+                        f"Server error {resp.status_code}", request=resp.request, response=resp
+                    )
+                return resp
+            except (httpx.TimeoutException, httpx.TransportError, httpx.HTTPStatusError) as exc:
+                last_exc = exc
+                if attempt >= retries:
+                    break
+                delay = backoff_base * (2 ** attempt)
+                logger.warning(
+                    "INTERNAL_HTTP_RETRY method=%s url=%s attempt=%s/%s delay=%.2fs error=%s",
+                    method, url, attempt + 1, retries, delay, exc,
+                )
+                await asyncio.sleep(delay)
+
+        assert last_exc is not None
+        raise last_exc
 
     @classmethod
     async def reset_for_tests(cls) -> None:
@@ -78,8 +134,8 @@ class InternalServiceClient:
         then simply be undeliverable and the user must retry.
         """
         try:
-            client = cls.get_client()
-            resp = await client.post(
+            resp = await cls.request_with_retry(
+                "POST",
                 f"{settings.NOTIFICATION_SERVICE_URL}/api/v1/internal/notifications/otp",
                 json={
                     "phone": phone,

@@ -1,7 +1,11 @@
+import asyncio
+import time
 import uuid
 from datetime import date, timedelta
+from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import BackgroundTasks
 from sqlalchemy import select
 
 from sk_shared.models.admin import RiskBlacklist
@@ -13,6 +17,8 @@ from sk_shared.models.credit import (
     CreditLimitHistory,
     RiskAssessment,
 )
+from sk_shared.models.payment import Installment, Loan
+from src.services.pipeline import CreditPipelineService
 
 
 pytestmark = pytest.mark.asyncio
@@ -616,3 +622,128 @@ async def test_credit_status_is_not_rate_limited(client, approved_user, auth_hea
     for _ in range(35):
         response = await client.get("/credit/status", headers=headers)
         assert response.status_code == 200
+
+
+# ── CE-HIGH-01: portfolio-concentration TOCTOU race ──────────────────────────────
+# check_portfolio_concentration (inside evaluate_credit) reads the user's current
+# approved exposure, and create_credit_application persists a new approved
+# CreditApplication row afterwards. With no lock spanning the two, two concurrent
+# /credit/apply calls for the same user could both read the same pre-application
+# exposure, both pass the concentration check, and both get approved — jointly
+# exceeding the platform's exposure limit for that user. A naive sequential test
+# can't catch this: it fires both requests genuinely concurrently via asyncio.gather
+# against the same shared db_session/redis_mock the `client` fixture wires up,
+# mirroring apps/gateway/tests/test_api/test_orders.py::
+# test_concurrent_order_accept_credit_race and the installment double-charge guard
+# in payment-orchestrator's payments.py.
+
+async def test_concurrent_credit_apply_serializes_portfolio_concentration_check(
+    client, approved_user, auth_headers, db_session,
+):
+    payload = {
+        "user_id": str(approved_user.uuid),
+        "requested_limit": 3000,
+        "application_type": "manual_request",
+        "order_amount": 3000,
+        "product_category": "general",
+        "is_first_order": False,
+    }
+
+    async def apply_once():
+        return await client.post("/credit/apply", json=payload, headers=auth_headers(approved_user))
+
+    r1, r2 = await asyncio.gather(apply_once(), apply_once())
+    codes = sorted([r1.status_code, r2.status_code])
+    # Exactly one request wins the per-user lock and is processed; the other fails
+    # fast with 409 instead of racing it and both being approved concurrently.
+    assert codes == [200, 409], (
+        r1.status_code,
+        r1.json() if r1.headers.get("content-type", "").startswith("application/json") else r1.text,
+        r2.status_code,
+        r2.json() if r2.headers.get("content-type", "").startswith("application/json") else r2.text,
+    )
+
+    apps = (
+        await db_session.execute(select(CreditApplication).where(CreditApplication.user_id == approved_user.uuid))
+    ).scalars().all()
+    assert len(apps) == 1
+
+
+# ── CE-HIGH-02: /credit/apply must not block the response on the Gateway callback ──
+# push_credit_result (src/core/http_client.py) retries up to 3x, each with a 5s HTTP
+# timeout and exponential backoff between attempts — worst case ~16.5s. Awaiting it
+# inline inside create_credit_application used to mean /credit/apply couldn't respond
+# until Gateway answered or every retry was exhausted, blowing the endpoint's <3s SLA
+# whenever Gateway was slow or down. Mocks the callback to be slow and asserts
+# create_credit_application (the code path routes.py's /credit/apply calls) returns
+# immediately once a BackgroundTasks is supplied, deferring the callback rather than
+# awaiting it.
+
+async def test_create_credit_application_defers_slow_gateway_callback_to_background_task(
+    db_session, redis_mock, approved_user,
+):
+    pipeline = CreditPipelineService(db_session=db_session, redis_client=redis_mock)
+    decision = {
+        "approved": True,
+        "risk_band": "B",
+        "approved_limit": 8000.0,
+        "rejection_reason": None,
+        "outcome": "approved",
+        "manual_review_required": False,
+    }
+
+    async def _slow_push(**kwargs):
+        await asyncio.sleep(0.3)
+        return True
+
+    slow_push = AsyncMock(side_effect=_slow_push)
+    background_tasks = BackgroundTasks()
+
+    with patch("src.core.http_client.push_credit_result", slow_push):
+        start = time.monotonic()
+        app = await pipeline.create_credit_application(
+            user_id=str(approved_user.uuid),
+            requested_limit=8000.0,
+            application_type="manual_request",
+            decision=decision,
+            background_tasks=background_tasks,
+        )
+        elapsed = time.monotonic() - start
+
+    assert app.status == "approved"
+    assert elapsed < 1.0, f"create_credit_application blocked on the Gateway callback ({elapsed:.2f}s)"
+    slow_push.assert_not_called()  # not awaited inline
+    assert len(background_tasks.tasks) == 1  # scheduled instead, to run after the response
+
+    # Draining the scheduled task the way FastAPI does after sending the response proves
+    # the callback isn't silently dropped, just deferred.
+    await background_tasks()
+    slow_push.assert_awaited_once()
+
+
+async def test_create_credit_application_awaits_callback_inline_with_no_background_tasks(
+    db_session, redis_mock, approved_user,
+):
+    """The periodic-review worker (workers/credit_assess_consumer.py) calls
+    create_credit_application with no FastAPI request/response in play, so there's nothing
+    to defer onto — it must keep awaiting the callback synchronously as before."""
+    pipeline = CreditPipelineService(db_session=db_session, redis_client=redis_mock)
+    decision = {
+        "approved": True,
+        "risk_band": "B",
+        "approved_limit": 8000.0,
+        "rejection_reason": None,
+        "outcome": "approved",
+        "manual_review_required": False,
+    }
+
+    fast_push = AsyncMock(return_value=True)
+    with patch("src.core.http_client.push_credit_result", fast_push):
+        await pipeline.create_credit_application(
+            user_id=str(approved_user.uuid),
+            requested_limit=8000.0,
+            application_type="periodic_review",
+            decision=decision,
+        )
+
+    fast_push.assert_awaited_once()

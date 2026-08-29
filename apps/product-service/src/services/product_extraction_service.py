@@ -114,6 +114,41 @@ class ProductExtractionService:
         self.merchant_repo = MerchantRepository(db)
         self.scraping_job_repo = ScrapingJobRepository(db)
 
+    async def _notify_product_extracted(
+        self, product: Product, order_id: int | None, correlation_id: str | None
+    ) -> UpoResponse:
+        """Publishes the `product.extracted` event Gateway's delivery-event
+        listener consumes to advance THIS order's status.
+
+        BUG FIX: previously only called from the fresh-extraction path at the
+        end of extract_or_enqueue(). Every "the product for this URL was
+        already extracted by an earlier order" shortcut (lock-not-acquired,
+        Redis cache hit, and DB-cache-miss-but-row-exists) returned
+        status="completed" straight to the caller without ever publishing
+        this event -- so Gateway, which only advances Order.status from this
+        event (not from the synchronous HTTP response to its own nudge call),
+        never found out THIS order's extraction was done. Any order for a
+        product URL someone had already bought before stayed stuck at
+        url_received/pending forever. Live-reproduced 8/8 times while
+        building tests/e2e/test_admin_workflows.py and
+        tests/e2e/test_billing_late_fee_charity.py, both of which reuse the
+        same mock-merchant product URL across many orders precisely because
+        that is realistic (multiple customers buying the same real-world
+        product from the same merchant page).
+        """
+        upo = build_upo(product)
+        await publish_event(
+            redis=self.redis,
+            event="product.extracted",
+            payload={
+                "order_id": order_id,
+                "correlation_id": correlation_id,
+                "product_id": str(product.uuid),
+                "upo": upo.model_dump(mode="json"),
+            },
+        )
+        return upo
+
     async def extract_or_enqueue(
         self,
         raw_url: str,
@@ -146,6 +181,7 @@ class ProductExtractionService:
             # Another request is processing this URL; return existing product/job if present.
             existing_product = await self.product_repo.find_by_canonical_url(normalized.canonical_url)
             if existing_product is not None:
+                await self._notify_product_extracted(existing_product, order_id, correlation_id)
                 return ExtractResponse(status="completed", upo=build_upo(existing_product), meta={"cache_hit": False})
             existing_job = await self.scraping_job_repo.find_active_by_canonical_url(normalized.canonical_url)
             if existing_job is not None:
@@ -156,11 +192,13 @@ class ProductExtractionService:
             url_key = _url_cache_key(normalized.canonical_url)
             cached_product = await self.cache_service.get_by_url(self.redis, self.db, normalized.canonical_url)
             if cached_product is not None:
+                await self._notify_product_extracted(cached_product, order_id, correlation_id)
                 return ExtractResponse(status="completed", upo=build_upo(cached_product), meta={"cache_hit": True})
 
             existing_product = await self.product_repo.find_by_canonical_url(normalized.canonical_url)
             if existing_product is not None:
                 await self.redis.set(url_key, str(existing_product.uuid), ttl=RedisTTL.PRODUCT_URL_MAP)
+                await self._notify_product_extracted(existing_product, order_id, correlation_id)
                 return ExtractResponse(status="completed", upo=build_upo(existing_product), meta={"cache_hit": False})
 
             merchant, _ = await self.merchant_repo.get_or_create(normalized.domain, normalized.platform)
@@ -199,6 +237,28 @@ class ProductExtractionService:
                 return ExtractResponse(status="extracting", job_id=job.uuid)
 
             if extraction_result.status == "hitl_required":
+                # BUG FIX: this branch told the caller "still extracting,
+                # check back later" but never actually created the HitlQueue
+                # row a human needs to act on it -- unlike the sibling
+                # prohibited-category branch below, which does. Every order
+                # whose extraction genuinely exhausted all waterfall tiers
+                # (a real 404, an unparseable page, no LLM provider
+                # configured, ...) vanished into a silent limbo: no admin
+                # ever saw it in the HITL queue, and the customer's order
+                # only ever left "pending" via Gateway's own 600s stuck-order
+                # sweep (OrderService.is_stuck_in_extraction), which marks it
+                # extraction_failed with no chance of manual recovery.
+                # Live-reproduced against a 404 mock-merchant URL.
+                if settings.FEATURE_HITL_ESCALATION:
+                    hitl = HitlQueue(
+                        order_id=order_id,
+                        execution_id=None,
+                        status="pending",
+                        priority=3,
+                        failure_reason=f"EXTRACTION_FAILED: {extraction_result.error_message or 'All extraction tiers failed'}",
+                    )
+                    self.db.add(hitl)
+                    await self.db.commit()
                 return ExtractResponse(status="extracting", meta={"hitl_required": True})
 
             if extraction_result.availability == "out_of_stock":
@@ -286,17 +346,7 @@ class ProductExtractionService:
                 )
                 await self.db.commit()
 
-            upo = build_upo(product)
-            await publish_event(
-                redis=self.redis,
-                event="product.extracted",
-                payload={
-                    "order_id": order_id,
-                    "correlation_id": correlation_id,
-                    "product_id": str(product.uuid),
-                    "upo": upo.model_dump(mode="json"),
-                },
-            )
+            upo = await self._notify_product_extracted(product, order_id, correlation_id)
             await self.cache_service.set_upo(self.redis, str(product.uuid), upo.model_dump(mode="json"))
             await self.cache_service.set_by_url(self.redis, normalized.canonical_url, str(product.uuid))
 

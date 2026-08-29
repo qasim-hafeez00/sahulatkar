@@ -199,6 +199,25 @@ services:
       REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
       INTERNAL_SERVICE_TOKEN: local-internal-token
 
+  # HIGH-02 fix: sweeps PurchaseExecution rows stuck at 'running' (owning
+  # checkout-worker process crashed/killed) and marks them failed/
+  # hitl_escalated so the admin retry endpoint can act on them again --
+  # previously nothing ever did this, so such a row was stuck forever.
+  product-service-execution-reaper:
+    <<: *python-service
+    image: docker-product-service
+    depends_on:
+      - product-service
+    container_name: sk-product-service-execution-reaper
+    command: ["python", "-c", "from src.workers.execution_reaper_worker import main; main()"]
+    healthcheck:
+      disable: true
+    environment:
+      SERVICE_NAME: product-service
+      DATABASE_URL: postgresql+asyncpg://sk_app:${PG_PASSWORD:-localdev123}@pgbouncer:6432/sahulatkar
+      REDIS_URL: redis://:${REDIS_PASSWORD:-localdev123}@redis:6379/1
+      INTERNAL_SERVICE_TOKEN: local-internal-token
+
 
   credit-engine:
     <<: *python-service
@@ -244,6 +263,16 @@ services:
       # INTERNAL_SERVICE_TOKEN like the other services) but it's the same
       # shared secret — must match gateway's INTERNAL_SERVICE_TOKEN above.
       INTERNAL_API_TOKEN: local-internal-token
+      # Same class of bug as GATEWAY_URL above, but for calling ITSELF: the
+      # billing-sweep auto-collect listener (src/events/listeners.py) makes
+      # an HTTP self-call to its own /internal/installments/{id}/auto-collect
+      # endpoint. The code default (http://localhost:8003) is the HOST-mapped
+      # port from docker-compose's `ports:` mapping below -- nothing listens
+      # on 8003 *inside* this container, only on 8000. Left unset, every
+      # self-call fails with a connection error and overdue installments are
+      # never actually auto-charged (live-verified via sk-payment-orchestrator
+      # logs: "Auto-collect call raised ... All connection attempts failed").
+      SELF_BASE_URL: http://localhost:8000
 
 
   ledger-service:
